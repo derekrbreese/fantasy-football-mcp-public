@@ -15,7 +15,7 @@ You'll need the following credentials:
 
 1. **Navigate to Yahoo Developer Portal**
    - Go to https://developer.yahoo.com/
-   - Click "My Apps" in the top menu
+   - Click "Apps" in the top menu
    - Sign in with your Yahoo account (the same one you use for Fantasy Sports)
 
 2. **Verify Your Account**
@@ -42,19 +42,19 @@ You'll need the following credentials:
    - This is just for reference, not actually used
 
    ### Redirect URI(s)
-   - Enter: `http://localhost:8000/callback`
+   - Enter: `https://localhost:8000/callback`
    - ⚠️ **CRITICAL**: 
      - Must be HTTPS not HTTP for localhost
      - Must NOT have trailing slash
      - Must match EXACTLY in your code
 
+   ### OAuth Client Type
+   - Pick Confidential Client - Choose for traditional apps.
+
    ### API Permissions
    - Find "Fantasy Sports" in the list
    - Click the checkbox for **"Read"** permission
    - ✅ Only select Read (not Read/Write)
-
-   ### OAuth Client Type
-   - Pick Confidential Client - Choose for traditional apps.
 
 4. **Create the App**
    - Click "Create App" button

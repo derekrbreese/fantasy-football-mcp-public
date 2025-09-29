@@ -17,7 +17,7 @@ A Model Context Protocol (MCP) server for Yahoo Fantasy Football integration wit
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.11+
 - Claude Desktop
 - Yahoo Fantasy Sports account
 - Yahoo Developer App credentials
