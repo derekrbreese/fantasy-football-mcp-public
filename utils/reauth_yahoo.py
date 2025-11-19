@@ -100,8 +100,9 @@ def reauth_yahoo():
     token_url = "https://api.login.yahoo.com/oauth2/get_token"
 
     # Callback configuration
-    callback_port = 8000
-    redirect_uri = f"http://localhost:{callback_port}/callback"
+    # callback_port = 8000
+    # redirect_uri = f"https://localhost:{callback_port}/callback"
+    redirect_uri = "oob"
 
     print(f"📌 Using redirect URI: {redirect_uri}")
     print()
