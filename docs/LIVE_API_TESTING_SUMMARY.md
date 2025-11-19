@@ -207,7 +207,7 @@ python test_live_api.py
 
 # Verify environment first
 python -c "from dotenv import load_dotenv; import os; load_dotenv(); \
-  print('✓ Ready' if all([os.getenv(v) for v in ['YAHOO_CONSUMER_KEY', \
+  print('✓ Ready' if all([os.getenv(v) for v in ['YAHOO_CLIENT_ID', \
   'YAHOO_ACCESS_TOKEN', 'YAHOO_GUID']]) else '✗ Missing env vars')"
 
 # Refresh token if needed

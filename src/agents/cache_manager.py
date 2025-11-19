@@ -208,7 +208,7 @@ class CacheManagerAgent:
         try:
             # Initialize memory cache
             self._memory_cache = SimpleMemoryCache(
-                serializer=PickleSerializer(), namespace="fantasy_football"
+                serializer=PickleSerializer(), namespace="yahoo_fantasy_football"
             )
 
             # Load existing file cache entries

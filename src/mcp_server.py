@@ -30,7 +30,10 @@ from models.matchup import Matchup, MatchupAnalysis
 from utils.constants import POSITIONS, ROSTER_POSITIONS
 from config.settings import Settings
 
-load_dotenv()
+# Find project root and load .env from there
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+ENV_FILE_PATH = PROJECT_ROOT / ".env"
+load_dotenv(dotenv_path=ENV_FILE_PATH)
 
 class FantasyFootballServer:
     """Main MCP server for Fantasy Football operations."""

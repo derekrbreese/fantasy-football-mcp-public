@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Union, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 import hashlib
 import time
 
@@ -32,6 +33,11 @@ from ..models.player import (
 from ..models.matchup import Matchup as FantasyMatchup, GameStatus
 from ..models.lineup import Lineup
 from .cache_manager import CacheManagerAgent
+
+# Find project root (where .env file is located)
+# This file is in src/agents/, so project root is 2 levels up
+PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
+ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
 
 class APIEndpoint(str, Enum):
@@ -625,9 +631,9 @@ class DataFetcherAgent:
                 league_id=None,  # Will be set per request
                 game_code="nfl",
                 game_id=None,  # Will be determined from current season
-                yahoo_consumer_key=self.settings.yahoo_client_id,
-                yahoo_consumer_secret=self.settings.yahoo_client_secret,
-                env_file_location=".env",  # OAuth tokens stored here
+                YAHOO_CLIENT_ID=self.settings.yahoo_client_id,
+                YAHOO_CLIENT_SECRET=self.settings.yahoo_client_secret,
+                env_file_location=str(ENV_FILE_PATH),  # OAuth tokens stored in project root .env
             )
 
             logger.info("Yahoo API client initialized")
