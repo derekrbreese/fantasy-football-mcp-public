@@ -110,15 +110,23 @@ pip install -r requirements.txt
 
 ## ⚙️ Configuration
 
-Create a `.env` file with your Yahoo API credentials:
+Create a `.env` file with your API credentials:
 
 ```env
+# Yahoo API Credentials (Required)
 YAHOO_CONSUMER_KEY=your_consumer_key_here
 YAHOO_CONSUMER_SECRET=your_consumer_secret_here
 YAHOO_ACCESS_TOKEN=your_access_token
 YAHOO_REFRESH_TOKEN=your_refresh_token
 YAHOO_GUID=your_yahoo_guid
+
+# Reddit API Credentials (Optional - for sentiment analysis)
+REDDIT_CLIENT_ID=your_reddit_client_id
+REDDIT_CLIENT_SECRET=your_reddit_client_secret
+REDDIT_USERNAME=your_reddit_username
 ```
+
+**Note**: Reddit credentials are optional. The app will work without them, but Reddit sentiment analysis features will be unavailable. See [Reddit API Setup Guide](docs/REDDIT_API_SETUP.md) for detailed instructions.
 
 ### Initial Authentication
 ```bash
