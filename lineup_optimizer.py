@@ -12,6 +12,13 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+try:
+    from src.utils.roster_configs import RosterConfiguration, RosterPosition
+    ROSTER_CONFIG_AVAILABLE = True
+except ImportError:
+    ROSTER_CONFIG_AVAILABLE = False
+    RosterPosition = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +49,30 @@ MATCH_CONFIDENCE = {
 
 # Penalty factors for mismatches
 MISMATCH_PENALTY = 0.5
+
+# Default roster configuration when league-specific config is not available
+# This is the standard Yahoo fantasy football format
+DEFAULT_ROSTER_SLOTS = [
+    ("QB", 1),
+    ("RB", 2),
+    ("WR", 2),
+    ("TE", 1),
+    ("FLEX", 1),  # W/R/T
+    ("K", 1),
+    ("DST", 1),
+]
+
+# Flex position eligibility mapping
+FLEX_ELIGIBILITY = {
+    "FLEX": {"RB", "WR", "TE"},
+    "W/R/T": {"RB", "WR", "TE"},
+    "W/R": {"WR", "RB"},
+    "W/T": {"WR", "TE"},
+    "R/T": {"RB", "TE"},
+    "SUPERFLEX": {"QB", "RB", "WR", "TE"},
+    "Q/W/R/T": {"QB", "RB", "WR", "TE"},
+    "OP": {"QB", "RB", "WR", "TE"},
+}
 
 
 @dataclass
@@ -690,43 +721,122 @@ class LineupOptimizer:
         strategy: str = "balanced",
         week: Optional[int] = None,
         use_llm: bool = False,
+        roster_positions: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Return a deterministic starter/bench split without heavy math."""
-
+        """Return a deterministic starter/bench split based on roster configuration.
+        
+        Args:
+            players: List of Player objects from the roster
+            strategy: Optimization strategy ("balanced", "floor", "ceiling", etc.)
+            week: Week number for projections
+            use_llm: Whether to use LLM for additional insights
+            roster_positions: List of roster position dicts from Yahoo API, e.g.:
+                [{"position": "QB", "count": 1}, {"position": "RB", "count": 2}, ...]
+                If not provided, uses DEFAULT_ROSTER_SLOTS.
+        """
+        # Parse roster configuration
+        roster_slots = self._parse_roster_config(roster_positions)
+        
+        # Get the best projection for sorting
+        def get_projection(p: Player) -> float:
+            return max(p.yahoo_projection or 0, p.sleeper_projection or 0, p.composite_score or 0)
+        
+        # Separate players by their actual position (not current slot assignment)
+        # and sort by projection within each position group
+        position_pools: Dict[str, List[Player]] = {}
+        bench_players: List[Player] = []
+        
+        for player in players:
+            # Use the player's display/eligible position, not current roster slot
+            raw_pos = player.raw.get("display_position") or player.raw.get("position") or player.position
+            pos = _normalize_position(raw_pos)
+            
+            # Players already in bench slots go to bench
+            if pos in BENCH_SLOTS:
+                bench_players.append(player)
+                continue
+            
+            # Normalize common position variants
+            if pos in ("DEF", "D/ST"):
+                pos = "DST"
+            
+            if pos not in position_pools:
+                position_pools[pos] = []
+            position_pools[pos].append(player)
+        
+        # Sort each pool by projection (best first)
+        for pos in position_pools:
+            position_pools[pos].sort(key=get_projection, reverse=True)
+        
+        # Fill starters based on roster slots
         starters: Dict[str, Player] = {}
-        bench: List[Player] = []
-        bench_ids: set[int] = set()
-        selected_ids: set[int] = set()
-
+        used_player_ids: set[int] = set()
+        
+        # First pass: fill non-flex positions
+        for slot_name, count in roster_slots:
+            if slot_name in FLEX_ELIGIBILITY:
+                continue  # Handle flex positions in second pass
+            
+            pool = position_pools.get(slot_name, [])
+            filled = 0
+            for player in pool:
+                if id(player) in used_player_ids:
+                    continue
+                if filled >= count:
+                    break
+                    
+                # Create unique slot key (e.g., "RB1", "RB2")
+                if count > 1:
+                    slot_key = f"{slot_name}{filled + 1}"
+                else:
+                    slot_key = slot_name
+                    
+                starters[slot_key] = player
+                used_player_ids.add(id(player))
+                filled += 1
+        
+        # Second pass: fill flex positions with best remaining eligible players
+        for slot_name, count in roster_slots:
+            if slot_name not in FLEX_ELIGIBILITY:
+                continue
+                
+            eligible_positions = FLEX_ELIGIBILITY.get(slot_name, set())
+            
+            # Gather all eligible players not yet used
+            flex_candidates: List[Player] = []
+            for elig_pos in eligible_positions:
+                pool = position_pools.get(elig_pos, [])
+                for player in pool:
+                    if id(player) not in used_player_ids:
+                        flex_candidates.append(player)
+            
+            # Sort by projection and fill
+            flex_candidates.sort(key=get_projection, reverse=True)
+            
+            filled = 0
+            for player in flex_candidates:
+                if filled >= count:
+                    break
+                if id(player) in used_player_ids:
+                    continue
+                    
+                if count > 1:
+                    slot_key = f"{slot_name}{filled + 1}"
+                else:
+                    slot_key = slot_name
+                    
+                starters[slot_key] = player
+                used_player_ids.add(id(player))
+                filled += 1
+        
+        # All remaining players go to bench
+        bench: List[Player] = list(bench_players)  # Start with explicit bench players
         for player in players:
-            slot = player.position.upper()
-            if slot in BENCH_SLOTS:
+            if id(player) not in used_player_ids and player not in bench:
                 bench.append(player)
-                bench_ids.add(id(player))
-                continue
-
-            existing = starters.get(slot)
-            if existing is None:
-                starters[slot] = player
-                selected_ids.add(id(player))
-                continue
-
-            # Prefer the player with the higher projection
-            if player.yahoo_projection > existing.yahoo_projection:
-                bench.append(existing)
-                bench_ids.add(id(existing))
-                starters[slot] = player
-                selected_ids.add(id(player))
-            else:
-                bench.append(player)
-                bench_ids.add(id(player))
-
-        for player in players:
-            pid = id(player)
-            if pid in selected_ids or pid in bench_ids:
-                continue
-            bench.append(player)
-            bench_ids.add(pid)
+        
+        # Sort bench by projection
+        bench.sort(key=get_projection, reverse=True)
 
         recommendations = [f"Start {p.name} at {pos}" for pos, p in starters.items()]
         data_quality = {
@@ -748,6 +858,8 @@ class LineupOptimizer:
             ),
             "high_confidence_matches": sum(1 for p in players if p.match_confidence >= 0.8),
             "low_confidence_matches": sum(1 for p in players if 0 < p.match_confidence < 0.6),
+            "roster_slots_configured": len(roster_slots),
+            "starters_filled": len(starters),
         }
 
         return {
@@ -760,6 +872,49 @@ class LineupOptimizer:
             "errors": [],
             "data_quality": data_quality,
         }
+    
+    def _parse_roster_config(
+        self, roster_positions: Optional[List[Dict[str, Any]]]
+    ) -> List[tuple]:
+        """Parse roster configuration into list of (position, count) tuples.
+        
+        Args:
+            roster_positions: Yahoo API roster positions format, e.g.:
+                [{"position": "QB", "count": 1}, {"position": "RB", "count": 2}, ...]
+                
+        Returns:
+            List of (position_name, count) tuples for starting positions only.
+        """
+        if not roster_positions:
+            logger.debug("No roster_positions provided, using DEFAULT_ROSTER_SLOTS")
+            return list(DEFAULT_ROSTER_SLOTS)
+        
+        slots = []
+        for pos_data in roster_positions:
+            if isinstance(pos_data, dict):
+                position = pos_data.get("position", "")
+                count = int(pos_data.get("count", 1))
+                
+                # Skip bench and IR positions
+                if position in BENCH_SLOTS or position in ("IR", "IR+", "IL", "IL+"):
+                    continue
+                
+                # Normalize position names
+                if position in ("DEF", "D/ST"):
+                    position = "DST"
+                elif position == "W/R/T":
+                    position = "FLEX"
+                elif position in ("Q/W/R/T", "OP"):
+                    position = "SUPERFLEX"
+                
+                slots.append((position, count))
+        
+        if not slots:
+            logger.warning("Parsed roster_positions was empty, using DEFAULT_ROSTER_SLOTS")
+            return list(DEFAULT_ROSTER_SLOTS)
+        
+        logger.debug(f"Parsed roster config: {slots}")
+        return slots
 
 
 lineup_optimizer = LineupOptimizer()

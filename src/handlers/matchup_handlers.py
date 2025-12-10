@@ -9,6 +9,81 @@ yahoo_api_call = None
 parse_team_roster = None
 
 
+def _extract_roster_positions(settings_data: dict) -> list:
+    """Extract roster positions from Yahoo league settings API response.
+    
+    Args:
+        settings_data: Raw response from Yahoo /league/{key}/settings endpoint
+        
+    Returns:
+        List of dicts like [{"position": "QB", "count": 1}, {"position": "RB", "count": 2}, ...]
+    """
+    positions = []
+    
+    try:
+        content = settings_data.get("fantasy_content", {})
+        league = content.get("league", {})
+        
+        # League can be a list in Yahoo's response format
+        if isinstance(league, list):
+            for item in league:
+                if isinstance(item, dict) and "settings" in item:
+                    settings = item["settings"]
+                    if isinstance(settings, list):
+                        for setting in settings:
+                            if isinstance(setting, dict) and "roster_positions" in setting:
+                                roster_data = setting["roster_positions"]
+                                positions = _parse_roster_data(roster_data)
+                                break
+                    elif isinstance(settings, dict) and "roster_positions" in settings:
+                        positions = _parse_roster_data(settings["roster_positions"])
+                    if positions:
+                        break
+        elif isinstance(league, dict) and "settings" in league:
+            # Alternative structure
+            settings = league["settings"]
+            if "roster_positions" in settings:
+                positions = _parse_roster_data(settings["roster_positions"])
+    except Exception:
+        pass  # Return empty list on error
+    
+    return positions
+
+
+def _parse_roster_data(roster_data) -> list:
+    """Parse roster_positions data into standardized format."""
+    positions = []
+    
+    if isinstance(roster_data, list):
+        for pos_item in roster_data:
+            if isinstance(pos_item, dict):
+                if "roster_position" in pos_item:
+                    pos_info = pos_item["roster_position"]
+                    positions.append({
+                        "position": pos_info.get("position", ""),
+                        "count": int(pos_info.get("count", 1)),
+                    })
+                elif "position" in pos_item:
+                    positions.append({
+                        "position": pos_item.get("position", ""),
+                        "count": int(pos_item.get("count", 1)),
+                    })
+    elif isinstance(roster_data, dict):
+        # Sometimes it's a dict with numbered keys
+        for key, value in roster_data.items():
+            if key == "count":
+                continue
+            if isinstance(value, dict):
+                if "roster_position" in value:
+                    pos_info = value["roster_position"]
+                    positions.append({
+                        "position": pos_info.get("position", ""),
+                        "count": int(pos_info.get("count", 1)),
+                    })
+    
+    return positions
+
+
 async def handle_ff_get_matchup(arguments: dict) -> dict:
     """Get matchup information for a team in a specific week.
 
@@ -110,12 +185,25 @@ async def handle_ff_build_lineup(arguments: dict) -> dict:
                 "suggestion": "Check roster data format or try refreshing",
             }
 
+        # Fetch league settings to get roster configuration
+        roster_positions = None
+        try:
+            settings_data = await yahoo_api_call(f"league/{league_key}/settings")
+            roster_positions = _extract_roster_positions(settings_data)
+        except Exception as e:
+            # Log but don't fail - optimizer will use defaults
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Could not fetch roster settings for {league_key}: {e}. Using defaults."
+            )
+
         players = await lineup_optimizer.enhance_with_external_data(players, week=week)
         optimization = await lineup_optimizer.optimize_lineup_smart(
             players,
             strategy,
             week,
             use_llm,
+            roster_positions=roster_positions,
         )
         if optimization["status"] == "error":
             return {
