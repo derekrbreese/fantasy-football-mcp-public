@@ -8,6 +8,17 @@ from typing import Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
+# Find project root (where .env file is located)
+# This module can be imported from various places, so we need to find the project root
+# Try to find the project root by looking for common markers
+_caller_file = Path(__file__)
+if _caller_file.parent.name == "config":
+    PROJECT_ROOT = _caller_file.parent.parent.absolute()
+else:
+    # Fallback: assume we're at the root or one level down
+    PROJECT_ROOT = _caller_file.parent.absolute()
+ENV_FILE_PATH = PROJECT_ROOT / ".env"
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -26,10 +37,10 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
-    log_file: Path = Field(default=Path("./logs/fantasy_football.log"), env="LOG_FILE")
+    log_file: Path = Field(default=Path("./logs/yahoo_fantasy_football.log"), env="LOG_FILE")
 
     # MCP Server Configuration
-    mcp_server_name: str = Field(default="fantasy-football", env="MCP_SERVER_NAME")
+    mcp_server_name: str = Field(default="yahoo-fantasy-football", env="MCP_SERVER_NAME")
     mcp_server_version: str = Field(default="1.0.0", env="MCP_SERVER_VERSION")
 
     # Parallel Processing
@@ -42,12 +53,12 @@ class Settings(BaseSettings):
     enable_injury_reports: bool = Field(default=True, env="ENABLE_INJURY_REPORTS")
 
     # Yahoo OAuth Configuration
-    yahoo_redirect_uri: str = Field(default="http://localhost:8090", env="YAHOO_REDIRECT_URI")
+    yahoo_redirect_uri: str = Field(default="https://localhost:8090", env="YAHOO_REDIRECT_URI")
     yahoo_callback_port: int = Field(default=8090, env="YAHOO_CALLBACK_PORT")
     yahoo_callback_host: str = Field(default="localhost", env="YAHOO_CALLBACK_HOST")
 
     class Config:
-        env_file = ".env"
+        env_file = str(ENV_FILE_PATH)  # Use absolute path to project root .env
         env_file_encoding = "utf-8"
         case_sensitive = False
 

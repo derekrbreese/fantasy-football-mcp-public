@@ -17,9 +17,9 @@ services:
         value: "Claude,claude-ai,claude.ai,anthropic,mcp-client,*"
       - key: OAUTH_CLIENT_SECRET
         generateValue: true
-      - key: YAHOO_CONSUMER_KEY
+      - key: YAHOO_CLIENT_ID
         sync: false
-      - key: YAHOO_CONSUMER_SECRET
+      - key: YAHOO_CLIENT_SECRET
         sync: false
       - key: YAHOO_ACCESS_TOKEN
         sync: false

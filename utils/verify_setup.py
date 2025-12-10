@@ -11,19 +11,24 @@ from dotenv import load_dotenv
 import json
 
 # Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+SCRIPT_DIR = Path(__file__).parent.absolute()
+PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 def check_env_file():
     """Check if .env file exists and has required variables"""
     print("\n1. Checking .env file...")
     
-    env_path = Path('.env')
+    # Look for .env file in project root, not current working directory
+    env_path = PROJECT_ROOT / '.env'
     if not env_path.exists():
         print("   ❌ .env file not found!")
+        print(f"   Expected at: {env_path}")
         print("   Fix: Copy .env.example to .env")
         return False
     
-    load_dotenv()
+    # Load .env from project root
+    load_dotenv(dotenv_path=env_path)
     
     required_vars = {
         'YAHOO_CLIENT_ID': 'Your app client ID from Yahoo',
@@ -206,7 +211,7 @@ def main():
     else:
         print("❌ Setup needs attention")
         print("\nPlease fix the issues above and run this script again.")
-        print("See YAHOO_SETUP.md for detailed instructions.")
+        print("See INSTALLATION.md for detailed instructions.")
     
     print("=" * 60)
 

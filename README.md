@@ -105,29 +105,57 @@ pip install -r requirements.txt
 
 ### Yahoo API Setup
 1. Create a Yahoo Developer App at [developer.yahoo.com](https://developer.yahoo.com)
-2. Note your Consumer Key and Consumer Secret
-3. Complete OAuth flow using included scripts
+2. Note your Consumer Key (Client ID) and Consumer Secret (Client Secret)
+3. Set up your `.env` file with these credentials
+4. Complete OAuth flow using the included authentication scripts
 
 ## ⚙️ Configuration
 
-Create a `.env` file with your Yahoo API credentials:
+Create a `.env` file with your API credentials:
 
 ```env
-YAHOO_CONSUMER_KEY=your_consumer_key_here
-YAHOO_CONSUMER_SECRET=your_consumer_secret_here
+# Yahoo API Credentials (Required)
+YAHOO_CLIENT_ID=your_consumer_key_here
+YAHOO_CLIENT_SECRET=your_consumer_secret_here
 YAHOO_ACCESS_TOKEN=your_access_token
 YAHOO_REFRESH_TOKEN=your_refresh_token
 YAHOO_GUID=your_yahoo_guid
+
+# Reddit API Credentials (Optional - for sentiment analysis)
+REDDIT_CLIENT_ID=your_reddit_client_id
+REDDIT_CLIENT_SECRET=your_reddit_client_secret
+REDDIT_USERNAME=your_reddit_username
 ```
+
+**Note**: Reddit credentials are optional. The app will work without them, but Reddit sentiment analysis features will be unavailable. See [Reddit API Setup Guide](docs/REDDIT_API_SETUP.md) for detailed instructions.
 
 ### Initial Authentication
-```bash
-# First-time setup
-python setup_yahoo_auth.py
 
-# Or manual authentication
+**First-time setup:**
+```bash
+cd utils
+python setup_yahoo_auth.py
+```
+
+**Re-authentication (if tokens expired):**
+```bash
+cd utils
 python reauth_yahoo.py
 ```
+
+**Token refresh (when access token expires):**
+```bash
+cd utils
+python refresh_yahoo_token.py
+```
+
+The authentication scripts will:
+- Open your browser for Yahoo OAuth authorization
+- Automatically update your `.env` file (preserving existing variable line positions)
+- Automatically update MCP config files (Claude Desktop, Cursor, Antigravity) if they exist
+- Display confirmation messages
+
+**Important**: After authentication or token refresh, restart your MCP client to use the new tokens.
 
 ## 🚀 Deployment Options
 
@@ -226,11 +254,19 @@ The optimization engine targets:
 **Authentication Errors**
 ```bash
 # Refresh expired tokens (expire hourly)
-python utils/refresh_token.py
+cd utils
+python refresh_yahoo_token.py
 
 # Full re-authentication if refresh fails
+cd utils
 python reauth_yahoo.py
+
+# Or first-time setup
+cd utils
+python setup_yahoo_auth.py
 ```
+
+**Note**: All authentication scripts automatically update your `.env` file and MCP config files. After running any authentication script, restart your MCP client (Claude Desktop, Cursor, etc.) to use the new tokens.
 
 **Only One League Showing**
 - Verify `YAHOO_GUID` matches your Yahoo account

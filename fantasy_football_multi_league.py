@@ -25,6 +25,12 @@ from src.api.yahoo_utils import rate_limiter, response_cache
 from src.utils.bye_weeks import get_bye_week_with_fallback
 
 # Import all handlers from the handlers module
+from pathlib import Path
+
+# Find project root and load .env from there
+PROJECT_ROOT = Path(__file__).parent.absolute()
+ENV_FILE_PATH = PROJECT_ROOT / ".env"
+
 from src.handlers import (
     handle_ff_analyze_draft_state,
     handle_ff_analyze_reddit_sentiment,
@@ -54,8 +60,8 @@ from src.handlers import (
 # Draft functionality is built-in (no complex imports needed)
 DRAFT_AVAILABLE = True
 
-# Load environment
-load_dotenv()
+# Load environment from project root
+load_dotenv(dotenv_path=ENV_FILE_PATH)
 
 # Initialize access token in the API module
 if os.getenv("YAHOO_ACCESS_TOKEN"):

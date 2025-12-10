@@ -90,8 +90,8 @@ async def refresh_yahoo_token() -> Dict:
             - {"status": "success", "message": "...", "expires_in": 3600}
             - {"status": "error", "message": "...", "details": "..."}
     """
-    client_id = os.getenv("YAHOO_CONSUMER_KEY")
-    client_secret = os.getenv("YAHOO_CONSUMER_SECRET")
+    client_id = os.getenv("YAHOO_CLIENT_ID")
+    client_secret = os.getenv("YAHOO_CLIENT_SECRET")
     refresh_token = os.getenv("YAHOO_REFRESH_TOKEN")
 
     if not all([client_id, client_secret, refresh_token]):
