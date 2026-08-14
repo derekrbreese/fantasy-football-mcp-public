@@ -11,6 +11,19 @@ from src.api.yahoo_utils import rate_limiter, response_cache
 _YAHOO_ACCESS_TOKEN = os.getenv("YAHOO_ACCESS_TOKEN")
 YAHOO_API_BASE = "https://fantasysports.yahooapis.com/fantasy/v2"
 
+# Yahoo's 401s carry an oauth_problem that distinguishes recoverable from
+# unrecoverable auth failures. additional_authorization_required means the
+# token is valid but the app itself is not entitled to the Fantasy Sports
+# API — refreshing can never help. See issue #18.
+NOT_PROVISIONED_ERROR = (
+    "Your Yahoo app is not provisioned for the Fantasy Sports API "
+    '(oauth_problem="additional_authorization_required"). This is not a '
+    "token problem - refreshing will not help. Yahoo no longer self-serve "
+    "provisions Fantasy Sports API access; apply at "
+    "https://sports.yahoo.com/developer/access/ and include your existing "
+    "Client ID so approval is attached to the app you already have."
+)
+
 
 def get_access_token() -> str:
     """Get the current access token."""
@@ -65,18 +78,22 @@ async def yahoo_api_call(
                 if use_cache:
                     await response_cache.set(endpoint, data)
                 return data
-            elif response.status == 401 and retry_on_auth_fail:
-                # Token expired, try to refresh
-                refresh_result = await refresh_yahoo_token()
-                if refresh_result.get("status") == "success":
-                    # Token refreshed, retry the API call with new token
-                    return await yahoo_api_call(
-                        endpoint, retry_on_auth_fail=False, use_cache=use_cache
-                    )
-                else:
-                    # Refresh failed, raise the original error
-                    text = await response.text()
+            elif response.status == 401:
+                text = await response.text()
+                # A provisioning failure is not recoverable by refresh: the
+                # token authenticates fine, the APP lacks Fantasy API access.
+                if "additional_authorization_required" in text:
+                    raise Exception(NOT_PROVISIONED_ERROR)
+                if retry_on_auth_fail:
+                    # token_rejected / expired token - refreshing helps here
+                    refresh_result = await refresh_yahoo_token()
+                    if refresh_result.get("status") == "success":
+                        # Token refreshed, retry the API call with new token
+                        return await yahoo_api_call(
+                            endpoint, retry_on_auth_fail=False, use_cache=use_cache
+                        )
                     raise Exception(f"Yahoo API auth failed and token refresh failed: {text[:200]}")
+                raise Exception(f"Yahoo API error 401 after token refresh: {text[:200]}")
             else:
                 text = await response.text()
                 raise Exception(f"Yahoo API error {response.status}: {text[:200]}")

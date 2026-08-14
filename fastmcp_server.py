@@ -69,7 +69,10 @@ _TOOL_PROMPTS: Dict[str, str] = {
         "Build optimal lineup from your roster using strategy-based optimization and positional constraints."
     ),
     "ff_refresh_token": (
-        "🔑 Refresh Yahoo OAuth token. " "NO parameters. Use when API returns 401 errors."
+        "🔑 Refresh Yahoo OAuth token. "
+        "NO parameters. Use for expired-token 401s (oauth_problem=token_rejected). "
+        "Does NOT help with additional_authorization_required - that means the Yahoo app "
+        "lacks Fantasy Sports API provisioning; see INSTALLATION.md."
     ),
     "ff_get_api_status": (
         "📊 Check API health and rate limits. "
@@ -523,7 +526,11 @@ async def ff_build_lineup(
     description=(
         "🔑 Refresh Yahoo OAuth token. "
         "NO parameters required. "
-        "Use when API calls return 401 authentication errors."
+        "Use when API calls return 401 errors from an expired token "
+        "(oauth_problem=token_rejected). A 401 with "
+        "additional_authorization_required is a provisioning problem the "
+        "refresh cannot fix - the Yahoo app needs Fantasy Sports API access "
+        "approved at https://sports.yahoo.com/developer/access/."
     ),
     meta=_tool_meta("ff_refresh_token"),
 )
