@@ -42,6 +42,45 @@ print(f"   Client ID: {CLIENT_ID[:30]}...")
 print(f"   Client Secret: {CLIENT_SECRET[:10]}...")
 print()
 
+def preflight_fantasy_access(access_token):
+    """Verify the app is actually provisioned for the Fantasy Sports API.
+
+    A successful token exchange does NOT mean Fantasy API access: Yahoo no
+    longer self-serve provisions the Fantasy Sports API, so an app can hold
+    perfectly valid tokens that every fantasysports.yahooapis.com call rejects
+    with oauth_problem="additional_authorization_required". Catch that here,
+    at setup time, instead of letting the first real tool call fail later.
+    """
+    print()
+    print("🔎 Preflight: checking Fantasy Sports API provisioning...")
+    try:
+        response = requests.get(
+            "https://fantasysports.yahooapis.com/fantasy/v2/game/nfl?format=json",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            timeout=30,
+        )
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️  Preflight request failed to send: {e}")
+        print("   Could not determine provisioning status.")
+        return False
+
+    if response.status_code == 200:
+        print("✅ Fantasy Sports API access confirmed - your app is provisioned.")
+        return True
+    if response.status_code == 401 and "additional_authorization_required" in response.text:
+        print("❌ Your tokens are VALID, but your Yahoo app is NOT provisioned for")
+        print("   the Fantasy Sports API. This is not a token problem - re-running")
+        print("   this setup, refreshing tokens, or recreating the app will not fix it.")
+        print()
+        print("   Apply for access at: https://sports.yahoo.com/developer/access/")
+        print("   Include your existing Client ID so approval attaches to this app.")
+        print("   Approval is a manual review with no published turnaround time;")
+        print("   every Fantasy API call will keep returning 401 until it lands.")
+        return False
+    print(f"⚠️  Preflight returned status {response.status_code}: {response.text[:200]}")
+    return False
+
+
 def exchange_verification_code_for_tokens(verification_code, client_id, client_secret):
     """Exchange Yahoo OAuth verification code for access and refresh tokens."""
     token_url = "https://api.login.yahoo.com/oauth2/get_token"
@@ -301,23 +340,10 @@ def manual_oauth_flow(client_id, client_secret):
     
     print("   The MCP server can now use this token!")
     print()
-    
-    # Test the token by making a simple API call
-    print("Testing connection...")
-    try:
-        test_url = "https://fantasysports.yahooapis.com/fantasy/v2/users;use_login=1/games"
-        headers = {
-            "Authorization": f"Bearer {token_data.get('access_token')}"
-        }
-        response = requests.get(test_url, headers=headers)
-        if response.status_code == 200:
-            print("✅ Connection test successful!")
-        else:
-            print(f"⚠️  Connection test returned status {response.status_code}")
-    except Exception as e:
-        print(f"⚠️  Connection test failed: {e}")
-        print("   But token was saved successfully.")
-    
+
+    # Verify the app can actually reach the Fantasy API (provisioning check)
+    preflight_fantasy_access(token_data.get('access_token'))
+
     return True
 
 # Method 1: Using yfpy (Recommended)
@@ -392,10 +418,12 @@ try:
                     update_env_file_with_tokens(access_token, refresh_token, ENV_FILE_PATH)
                     # Also update MCP config files
                     update_mcp_configs(access_token, refresh_token)
+                    # Verify the app can actually reach the Fantasy API
+                    preflight_fantasy_access(access_token)
                 else:
                     print("⚠️  Could not extract tokens from token_data to update .env")
                     print(f"   Token data keys: {list(token_data.keys())}")
-                
+
                 print("   The MCP server can now use this token!")
             
         except Exception as e:

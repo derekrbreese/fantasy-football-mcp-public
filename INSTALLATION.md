@@ -30,17 +30,24 @@ pip install -r requirements.txt
 
 ## Step 3: Yahoo API Setup
 
-### 3.1 Create a Yahoo Developer App
+### 3.1 Create a Yahoo Developer App — and apply for Fantasy Sports API access
 
-1. Go to https://developer.yahoo.com/apps/
-2. Click "Create an App"
-3. Fill in the application details:
+> **⚠️ Yahoo no longer self-serve provisions the Fantasy Sports API.** The app
+> creation form no longer offers a "Fantasy Sports" permission (only OpenID
+> Connect and TW Auction). Creating an app gives you valid OAuth credentials
+> that are **not** entitled to the Fantasy API — every call will return `401`
+> with `oauth_problem="additional_authorization_required"` until Yahoo approves
+> your access application (step 3 below). Refreshing tokens or recreating the
+> app will not fix this. Yahoo has also de-provisioned some previously working
+> apps, so long-time users may need to apply as well.
+
+1. Go to https://developer.yahoo.com/apps/ and click "Create an App":
    - **Application Name**: Fantasy Football MCP (or your choice)
    - **Application Type**: Web Application
    - **Redirect URI(s)**: `oob` (for out-of-band OAuth flow - you'll copy the verification code manually)
-   - **API Permissions**: Fantasy Sports (Read)
-4. Click "Create App"
-5. Save your **Client ID (Consumer Key)** and **Client Secret (Consumer Secret)**
+2. Click "Create App" and save your **Client ID (Consumer Key)** and **Client Secret (Consumer Secret)**.
+3. **Apply for Fantasy Sports API access** at https://sports.yahoo.com/developer/access/ — include the Client ID from step 2 so the approval is attached to the app you already created. Approval is a manual human review with no published turnaround time; the API stays 401 until it lands.
+4. Note that Yahoo currently grants **read-only** access (`fspt-r`) — write access is not available, so nothing in this server can or does write through the API.
 
 **Note**: The authentication scripts use the "oob" (out-of-band) redirect URI, which means you'll copy the verification code from the browser and paste it into the terminal. This is simpler than setting up a callback server.
 
