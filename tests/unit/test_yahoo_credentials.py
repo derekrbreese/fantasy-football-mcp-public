@@ -1,8 +1,16 @@
 """Tests for request-scoped Yahoo credential isolation."""
 
 import os
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.api.yahoo_client import _cache_key, get_access_token, set_access_token
+import pytest
+
+from src.api.yahoo_client import (
+    _cache_key,
+    get_access_token,
+    refresh_yahoo_token,
+    set_access_token,
+)
 from src.api.yahoo_credentials import YahooCredentials, use_yahoo_credentials
 from src.api.yahoo_utils import ResponseCache
 
@@ -44,7 +52,6 @@ def test_rotated_refresh_token_survives_context_exit(monkeypatch):
         )
         assert session.credentials.refresh_token == "refresh-user-a-rotated"
 
-    # The caller can persist this value after request cleanup.
     assert session.credentials.access_token == "token-a-new"
     assert session.credentials.refresh_token == "refresh-user-a-rotated"
 
@@ -79,10 +86,44 @@ def test_cache_ttl_uses_endpoint_not_user_namespace():
     cache = ResponseCache()
     endpoint = "league/123/roster"
 
-    # A malicious/unlucky user id containing 'draft' must not change roster TTL.
     with use_yahoo_credentials(_credentials("draft-user", "token-a")):
         key = _cache_key(endpoint)
 
     assert "draft-user" in key
     assert cache.ttl_for_endpoint(endpoint) == cache.default_ttls["roster"]
     assert cache.ttl_for_endpoint(endpoint) != cache.default_ttls["draft"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_payload_does_not_expose_tokens():
+    response = MagicMock()
+    response.status = 200
+    response.json = AsyncMock(
+        return_value={
+            "access_token": "secret-access-token",
+            "refresh_token": "secret-rotated-refresh-token",
+            "expires_in": 3600,
+        }
+    )
+
+    context = AsyncMock()
+    context.__aenter__.return_value = response
+    context.__aexit__.return_value = None
+
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.post = MagicMock(return_value=context)
+
+    with use_yahoo_credentials(_credentials("user-a", "token-a")) as credential_session:
+        with patch("src.api.yahoo_client.aiohttp.ClientSession", return_value=session):
+            result = await refresh_yahoo_token()
+
+        assert result["status"] == "success"
+        assert "access_token" not in result
+        assert "refresh_token" not in result
+        assert credential_session.credentials.access_token == "secret-access-token"
+        assert (
+            credential_session.credentials.refresh_token
+            == "secret-rotated-refresh-token"
+        )
