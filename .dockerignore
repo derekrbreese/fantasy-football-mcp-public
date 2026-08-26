@@ -17,6 +17,17 @@ env/
 .env
 .env.*
 
+# Secrets and auth artifacts
+.auth/
+token.json
+yahoo_token.json
+.yahoo_token.json
+yahoo_tokens.json
+*yahoo*token*.json
+*.token
+oauth_state.json
+session_*.json
+
 # IDE
 .vscode/
 .idea/
