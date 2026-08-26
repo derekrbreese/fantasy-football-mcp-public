@@ -108,10 +108,10 @@ async def yahoo_api_call(
 async def refresh_yahoo_token() -> Dict:
     """Refresh the current request's Yahoo access token.
 
-    The returned payload includes the active access and refresh tokens so a caller
-    can durably persist them. In request-scoped mode, the same updated credentials
-    are also stored on the active YahooCredentialSession for persistence after the
-    request finishes.
+    Updated credentials are retained internally by the active request session so
+    the application layer can persist them after the request. Raw Yahoo tokens are
+    intentionally never returned in this payload because this function is also
+    exposed through an MCP maintenance tool.
     """
     credentials = get_yahoo_credentials()
 
@@ -149,7 +149,7 @@ async def refresh_yahoo_token() -> Dict:
                             "message": "Yahoo refresh response did not include an access token",
                         }
 
-                    updated = update_current_credentials(
+                    update_current_credentials(
                         access_token=new_access_token,
                         refresh_token=new_refresh_token,
                     )
@@ -157,8 +157,6 @@ async def refresh_yahoo_token() -> Dict:
                     return {
                         "status": "success",
                         "message": "Token refreshed successfully",
-                        "access_token": updated.access_token,
-                        "refresh_token": updated.refresh_token,
                         "expires_in": expires_in,
                         "expires_in_hours": round(expires_in / 3600, 1),
                     }
