@@ -10,6 +10,7 @@ import aiohttp
 
 from src.api.yahoo_credentials import (
     get_yahoo_credentials,
+    has_request_credentials,
     update_current_credentials,
 )
 from src.api.yahoo_utils import rate_limiter, response_cache
@@ -43,12 +44,15 @@ def set_access_token(token: str) -> None:
 
 
 def _cache_key(endpoint: str) -> str:
-    """Namespace cached Yahoo responses by user identity/token.
+    """Namespace cached Yahoo responses for request-scoped/multi-user calls.
 
-    The original cache used only the endpoint, which is unsafe in a multi-user
-    deployment because two Yahoo users can request the same endpoint path.  Use
-    the Yahoo GUID when available; otherwise use a one-way token fingerprint.
+    Local single-user mode keeps the historical key format for backwards
+    compatibility. Production callers that bind request credentials are always
+    namespaced so one Yahoo user's cached league data cannot leak to another.
     """
+    if not has_request_credentials():
+        return endpoint
+
     credentials = get_yahoo_credentials()
     namespace = credentials.user_id
     if not namespace:
