@@ -48,6 +48,9 @@ coverage.xml
 .auth/
 token.json
 yahoo_token.json
+.yahoo_token.json
+yahoo_tokens.json
+*yahoo*token*.json
 *.token
 
 # Development and debug files
