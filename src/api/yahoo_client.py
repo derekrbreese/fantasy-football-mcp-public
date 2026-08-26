@@ -1,125 +1,133 @@
 """Yahoo Fantasy Sports API client with rate limiting and token refresh."""
 
-import os
+from __future__ import annotations
+
+import hashlib
 import socket
 from typing import Dict
 
 import aiohttp
+
+from src.api.yahoo_credentials import (
+    get_yahoo_credentials,
+    has_request_credentials,
+    update_current_credentials,
+)
 from src.api.yahoo_utils import rate_limiter, response_cache
 
-# Module-level token cache
-_YAHOO_ACCESS_TOKEN = os.getenv("YAHOO_ACCESS_TOKEN")
 YAHOO_API_BASE = "https://fantasysports.yahooapis.com/fantasy/v2"
 
-# Yahoo's 401s carry an oauth_problem that distinguishes recoverable from
-# unrecoverable auth failures. additional_authorization_required means the
-# token is valid but the app itself is not entitled to the Fantasy Sports
-# API — refreshing can never help. See issue #18.
 NOT_PROVISIONED_ERROR = (
     "Your Yahoo app is not provisioned for the Fantasy Sports API "
     '(oauth_problem="additional_authorization_required"). This is not a '
-    "token problem - refreshing will not help. Yahoo no longer self-serve "
-    "provisions Fantasy Sports API access; apply at "
+    "token problem - refreshing will not help. Apply at "
     "https://sports.yahoo.com/developer/access/ and include your existing "
     "Client ID so approval is attached to the app you already have."
 )
 
 
 def get_access_token() -> str:
-    """Get the current access token."""
-    global _YAHOO_ACCESS_TOKEN
-    if _YAHOO_ACCESS_TOKEN is None:
-        _YAHOO_ACCESS_TOKEN = os.getenv("YAHOO_ACCESS_TOKEN")
-    return _YAHOO_ACCESS_TOKEN or ""
+    """Return the current request's Yahoo access token."""
+    return get_yahoo_credentials().access_token
 
 
 def set_access_token(token: str) -> None:
-    """Update the access token (used after refresh)."""
-    global _YAHOO_ACCESS_TOKEN
-    _YAHOO_ACCESS_TOKEN = token
-    os.environ["YAHOO_ACCESS_TOKEN"] = token
+    """Update the current request's access token."""
+    update_current_credentials(access_token=token)
+
+
+def _cache_key(endpoint: str) -> str:
+    """Namespace cached Yahoo responses for request-scoped/multi-user calls."""
+    if not has_request_credentials():
+        return endpoint
+
+    credentials = get_yahoo_credentials()
+    namespace = credentials.user_id
+    if not namespace:
+        token_fingerprint = hashlib.sha256(credentials.access_token.encode("utf-8")).hexdigest()[:16]
+        namespace = f"token:{token_fingerprint}"
+    return f"yahoo:{namespace}:{endpoint}"
 
 
 async def yahoo_api_call(
     endpoint: str, retry_on_auth_fail: bool = True, use_cache: bool = True
 ) -> Dict:
-    """Make Yahoo API request with rate limiting, caching, and automatic token refresh.
+    """Make a Yahoo API request with rate limiting, scoped caching, and refresh."""
+    cache_key = _cache_key(endpoint)
 
-    Args:
-        endpoint: Yahoo API endpoint (e.g., "users;use_login=1/games")
-        retry_on_auth_fail: If True, will attempt token refresh on 401 errors
-        use_cache: If True, will check cache before making API call
-
-    Returns:
-        dict: JSON response from Yahoo API
-
-    Raises:
-        Exception: On API errors or authentication failures
-    """
-    # Check cache first (if enabled)
     if use_cache:
-        cached_response = await response_cache.get(endpoint)
+        cached_response = await response_cache.get(cache_key)
         if cached_response is not None:
             return cached_response
 
-    # Apply rate limiting
     await rate_limiter.acquire()
 
-    access_token = get_access_token()
+    credentials = get_yahoo_credentials()
+    if not credentials.access_token:
+        raise Exception("Missing Yahoo access token for the current user/request")
+
     url = f"{YAHOO_API_BASE}/{endpoint}?format=json"
-    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {credentials.access_token}",
+        "Accept": "application/json",
+    }
 
     connector = aiohttp.TCPConnector(family=socket.AF_INET)
     async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
         async with session.get(url, headers=headers) as response:
             if response.status == 200:
                 data = await response.json()
-                # Cache successful response
                 if use_cache:
-                    await response_cache.set(endpoint, data)
+                    # Use the true Yahoo endpoint to choose the TTL; the namespaced
+                    # cache key is only for isolation and must not influence policy.
+                    ttl = response_cache.ttl_for_endpoint(endpoint)
+                    await response_cache.set(cache_key, data, ttl=ttl)
                 return data
-            elif response.status == 401:
+
+            if response.status == 401:
                 text = await response.text()
-                # A provisioning failure is not recoverable by refresh: the
-                # token authenticates fine, the APP lacks Fantasy API access.
                 if "additional_authorization_required" in text:
                     raise Exception(NOT_PROVISIONED_ERROR)
+
                 if retry_on_auth_fail:
-                    # token_rejected / expired token - refreshing helps here
                     refresh_result = await refresh_yahoo_token()
                     if refresh_result.get("status") == "success":
-                        # Token refreshed, retry the API call with new token
                         return await yahoo_api_call(
                             endpoint, retry_on_auth_fail=False, use_cache=use_cache
                         )
-                    raise Exception(f"Yahoo API auth failed and token refresh failed: {text[:200]}")
+                    raise Exception(
+                        f"Yahoo API auth failed and token refresh failed: {text[:200]}"
+                    )
+
                 raise Exception(f"Yahoo API error 401 after token refresh: {text[:200]}")
-            else:
-                text = await response.text()
-                raise Exception(f"Yahoo API error {response.status}: {text[:200]}")
+
+            text = await response.text()
+            raise Exception(f"Yahoo API error {response.status}: {text[:200]}")
 
 
 async def refresh_yahoo_token() -> Dict:
-    """Refresh the Yahoo access token using the refresh token.
+    """Refresh the current request's Yahoo access token.
 
-    Returns:
-        dict: Status message with refresh result
-            - {"status": "success", "message": "...", "expires_in": 3600}
-            - {"status": "error", "message": "...", "details": "..."}
+    Updated credentials are retained internally by the active request session so
+    the application layer can persist them after the request. Raw Yahoo tokens are
+    intentionally never returned in this payload because this function is also
+    exposed through an MCP maintenance tool.
     """
-    client_id = os.getenv("YAHOO_CLIENT_ID")
-    client_secret = os.getenv("YAHOO_CLIENT_SECRET")
-    refresh_token = os.getenv("YAHOO_REFRESH_TOKEN")
+    credentials = get_yahoo_credentials()
 
-    if not all([client_id, client_secret, refresh_token]):
-        return {"status": "error", "message": "Missing credentials in environment"}
+    if not all(
+        [credentials.client_id, credentials.client_secret, credentials.refresh_token]
+    ):
+        return {
+            "status": "error",
+            "message": "Missing Yahoo credentials for the current user/request",
+        }
 
     token_url = "https://api.login.yahoo.com/oauth2/get_token"
-
     data = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "refresh_token": refresh_token,
+        "client_id": credentials.client_id,
+        "client_secret": credentials.client_secret,
+        "refresh_token": credentials.refresh_token,
         "grant_type": "refresh_token",
     }
 
@@ -130,15 +138,21 @@ async def refresh_yahoo_token() -> Dict:
                 if response.status == 200:
                     token_data = await response.json()
                     new_access_token = token_data.get("access_token")
-                    new_refresh_token = token_data.get("refresh_token", refresh_token)
+                    new_refresh_token = token_data.get(
+                        "refresh_token", credentials.refresh_token
+                    )
                     expires_in = token_data.get("expires_in", 3600)
 
-                    # Update global token
-                    set_access_token(new_access_token)
+                    if not new_access_token:
+                        return {
+                            "status": "error",
+                            "message": "Yahoo refresh response did not include an access token",
+                        }
 
-                    # Update environment
-                    if new_refresh_token != refresh_token:
-                        os.environ["YAHOO_REFRESH_TOKEN"] = new_refresh_token
+                    update_current_credentials(
+                        access_token=new_access_token,
+                        refresh_token=new_refresh_token,
+                    )
 
                     return {
                         "status": "success",
@@ -146,12 +160,12 @@ async def refresh_yahoo_token() -> Dict:
                         "expires_in": expires_in,
                         "expires_in_hours": round(expires_in / 3600, 1),
                     }
-                else:
-                    error_text = await response.text()
-                    return {
-                        "status": "error",
-                        "message": f"Failed to refresh token: {response.status}",
-                        "details": error_text[:200],
-                    }
-    except Exception as e:
-        return {"status": "error", "message": f"Error refreshing token: {str(e)}"}
+
+                error_text = await response.text()
+                return {
+                    "status": "error",
+                    "message": f"Failed to refresh token: {response.status}",
+                    "details": error_text[:200],
+                }
+    except Exception as exc:
+        return {"status": "error", "message": f"Error refreshing token: {exc}"}
