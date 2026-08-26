@@ -17,9 +17,6 @@ from src.api.yahoo_utils import rate_limiter, response_cache
 
 YAHOO_API_BASE = "https://fantasysports.yahooapis.com/fantasy/v2"
 
-# Yahoo's 401s carry an oauth_problem that distinguishes recoverable from
-# unrecoverable auth failures. additional_authorization_required means the
-# token is valid but the app itself is not entitled to the Fantasy Sports API.
 NOT_PROVISIONED_ERROR = (
     "Your Yahoo app is not provisioned for the Fantasy Sports API "
     '(oauth_problem="additional_authorization_required"). This is not a '
@@ -35,21 +32,12 @@ def get_access_token() -> str:
 
 
 def set_access_token(token: str) -> None:
-    """Update the current request's access token.
-
-    In legacy/local mode this retains the historical environment-variable
-    behavior. In request-scoped mode the token stays isolated to that request.
-    """
+    """Update the current request's access token."""
     update_current_credentials(access_token=token)
 
 
 def _cache_key(endpoint: str) -> str:
-    """Namespace cached Yahoo responses for request-scoped/multi-user calls.
-
-    Local single-user mode keeps the historical key format for backwards
-    compatibility. Production callers that bind request credentials are always
-    namespaced so one Yahoo user's cached league data cannot leak to another.
-    """
+    """Namespace cached Yahoo responses for request-scoped/multi-user calls."""
     if not has_request_credentials():
         return endpoint
 
@@ -90,7 +78,10 @@ async def yahoo_api_call(
             if response.status == 200:
                 data = await response.json()
                 if use_cache:
-                    await response_cache.set(cache_key, data)
+                    # Use the true Yahoo endpoint to choose the TTL; the namespaced
+                    # cache key is only for isolation and must not influence policy.
+                    ttl = response_cache.ttl_for_endpoint(endpoint)
+                    await response_cache.set(cache_key, data, ttl=ttl)
                 return data
 
             if response.status == 401:
@@ -115,7 +106,13 @@ async def yahoo_api_call(
 
 
 async def refresh_yahoo_token() -> Dict:
-    """Refresh the current request's Yahoo access token."""
+    """Refresh the current request's Yahoo access token.
+
+    The returned payload includes the active access and refresh tokens so a caller
+    can durably persist them. In request-scoped mode, the same updated credentials
+    are also stored on the active YahooCredentialSession for persistence after the
+    request finishes.
+    """
     credentials = get_yahoo_credentials()
 
     if not all(
@@ -152,7 +149,7 @@ async def refresh_yahoo_token() -> Dict:
                             "message": "Yahoo refresh response did not include an access token",
                         }
 
-                    update_current_credentials(
+                    updated = update_current_credentials(
                         access_token=new_access_token,
                         refresh_token=new_refresh_token,
                     )
@@ -160,6 +157,8 @@ async def refresh_yahoo_token() -> Dict:
                     return {
                         "status": "success",
                         "message": "Token refreshed successfully",
+                        "access_token": updated.access_token,
+                        "refresh_token": updated.refresh_token,
                         "expires_in": expires_in,
                         "expires_in_hours": round(expires_in / 3600, 1),
                     }
