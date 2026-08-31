@@ -15,8 +15,11 @@ from typing import Any, Awaitable, Callable, Dict, Literal, Optional, Sequence, 
 
 from fastmcp import Context, FastMCP
 from mcp.types import ContentBlock, TextContent
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 import fantasy_football_multi_league
+from src.services.live_draft_store import LiveDraftValidationError, load_live_draft, save_live_draft
 
 # REMOVED: enhanced_mcp_tools imports - no longer using wrapper tools
 
@@ -85,6 +88,10 @@ _TOOL_PROMPTS: Dict[str, str] = {
     "ff_get_draft_results": (
         "Retrieve the draft board and pick summaries for every team in a league "
         "after the draft has completed."
+    ),
+    "ff_get_live_draft_state": (
+        "Read the latest live Yahoo draft state synced from the local browser extension. "
+        "Returns every recorded pick, all team rosters, and the user's roster."
     ),
     "ff_get_waiver_wire": (
         "List waiver-wire candidates sorted by rank, points, or trends to aid "
@@ -594,6 +601,130 @@ async def ff_clear_cache(
 )
 async def ff_get_draft_results(ctx: Context, league_key: str) -> Dict[str, Any]:
     return await _call_legacy_tool("ff_get_draft_results", ctx=ctx, league_key=league_key)
+
+
+@server.tool(
+    name="ff_get_live_draft_state",
+    description=(
+        "Read the latest live Yahoo draft board captured by the local browser extension. "
+        "Use this immediately before making next-pick recommendations. Optionally filter "
+        "by Yahoo league ID."
+    ),
+    meta=_tool_meta("ff_get_live_draft_state"),
+)
+async def ff_get_live_draft_state(
+    ctx: Context, league_id: Optional[str] = None
+) -> Dict[str, Any]:
+    try:
+        context = load_live_draft(league_id=league_id)
+    except LiveDraftValidationError as exc:
+        return {"status": "error", "message": str(exc)}
+    if context is None:
+        return {
+            "status": "not_found",
+            "message": "No live draft has been synced from the browser extension yet.",
+            "leagueId": league_id,
+        }
+    await ctx.info(
+        f"Loaded live draft {context['draft']['sessionKey']} with {len(context['picks'])} picks"
+    )
+    return {"status": "success", "liveDraft": context}
+
+
+_ALLOWED_DRAFT_SYNC_ORIGINS = (
+    "https://football.fantasysports.yahoo.com",
+    "moz-extension://",
+    "chrome-extension://",
+)
+
+
+def _is_allowed_draft_sync_origin(origin: str) -> bool:
+    return origin == _ALLOWED_DRAFT_SYNC_ORIGINS[0] or origin.startswith(
+        _ALLOWED_DRAFT_SYNC_ORIGINS[1:]
+    )
+
+
+def _draft_sync_headers(request: Request) -> Dict[str, str]:
+    origin = request.headers.get("origin", "")
+    allowed_origin = origin if _is_allowed_draft_sync_origin(origin) else ""
+    headers = {
+        "Access-Control-Allow-Headers": "Content-Type, X-Yahoo-Draft-Recorder",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Private-Network": "true",
+        "Vary": "Origin",
+    }
+    if allowed_origin:
+        headers["Access-Control-Allow-Origin"] = allowed_origin
+    return headers
+
+
+@server.custom_route("/draft-sync", methods=["POST", "OPTIONS"], include_in_schema=False)
+async def receive_live_draft(request: Request) -> Response:
+    """Receive private draft context only from a local Yahoo draft extension."""
+
+    headers = _draft_sync_headers(request)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost"}:
+        return JSONResponse(
+            {"status": "error", "message": "Loopback access required"},
+            status_code=403,
+            headers=headers,
+        )
+    origin = request.headers.get("origin", "")
+    if origin and not _is_allowed_draft_sync_origin(origin):
+        return JSONResponse(
+            {"status": "error", "message": "Origin not allowed"},
+            status_code=403,
+            headers=headers,
+        )
+    if request.headers.get("x-yahoo-draft-recorder") != "1":
+        return JSONResponse(
+            {"status": "error", "message": "Recorder header required"},
+            status_code=403,
+            headers=headers,
+        )
+    try:
+        content_length = int(request.headers.get("content-length", "0") or 0)
+    except ValueError:
+        return JSONResponse(
+            {"status": "error", "message": "Invalid content length"},
+            status_code=400,
+            headers=headers,
+        )
+    if content_length > 1_000_000:
+        return JSONResponse(
+            {"status": "error", "message": "Payload too large"},
+            status_code=413,
+            headers=headers,
+        )
+
+    try:
+        body = await request.body()
+        if len(body) > 1_000_000:
+            return JSONResponse(
+                {"status": "error", "message": "Payload too large"},
+                status_code=413,
+                headers=headers,
+            )
+        payload = json.loads(body)
+        context = save_live_draft(payload)
+    except (json.JSONDecodeError, LiveDraftValidationError, ValueError, TypeError) as exc:
+        return JSONResponse(
+            {"status": "error", "message": str(exc)},
+            status_code=400,
+            headers=headers,
+        )
+    return JSONResponse(
+        {
+            "status": "ok",
+            "sessionKey": context["draft"]["sessionKey"],
+            "pickCount": len(context["picks"]),
+        },
+        headers=headers,
+    )
 
 
 @server.tool(
@@ -1710,6 +1841,7 @@ __all__ = [
     "ff_get_api_status",
     "ff_clear_cache",
     "ff_get_draft_results",
+    "ff_get_live_draft_state",
     "ff_get_waiver_wire",
     "ff_get_draft_rankings",
     "ff_get_draft_recommendation",

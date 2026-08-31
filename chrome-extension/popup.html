@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Yahoo Draft Recorder</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">YAHOO FANTASY</p>
+        <h1>Draft Recorder</h1>
+      </div>
+      <span id="recording-indicator" class="indicator" title="Recorder status"></span>
+    </header>
+
+    <main>
+      <section class="summary" aria-live="polite">
+        <div>
+          <span class="summary-label">Draft</span>
+          <strong id="draft-name">Not detected</strong>
+        </div>
+        <div class="pick-count">
+          <strong id="pick-count">0</strong>
+          <span>picks</span>
+        </div>
+      </section>
+
+      <p id="status" class="status">Open a Yahoo live draft to begin recording.</p>
+
+      <div class="toolbar">
+        <button id="rescan" type="button">Rescan page</button>
+        <button id="diagnostics" type="button">Save diagnostics</button>
+        <button id="export-csv" type="button" disabled>Export CSV</button>
+        <button id="export-json" type="button" disabled>Agent JSON</button>
+      </div>
+
+      <section class="picks-section">
+        <h2>Recorded picks</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">#</th>
+                <th scope="col">Player</th>
+                <th scope="col">NFL</th>
+                <th scope="col">Fantasy team</th>
+              </tr>
+            </thead>
+            <tbody id="picks"></tbody>
+          </table>
+          <p id="empty-state" class="empty">No picks recorded yet.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Stored only in this browser profile</span>
+      <button id="clear" class="danger" type="button" disabled>Clear draft</button>
+    </footer>
+
+    <script src="webext-api.js"></script>
+    <script src="agent-context.js"></script>
+    <script src="export.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

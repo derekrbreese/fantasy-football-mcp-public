@@ -75,6 +75,10 @@ enhanced_mcp_*.py
 !test_enhancement_layer.py
 !test_real_data.py
 !demo_enhancement_layer.py
+!chrome-extension/tests/
+!chrome-extension/tests/**
+!tests/
+!tests/test_live_draft_store.py
 
 # Temporary and analysis files
 temp/

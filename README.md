@@ -34,6 +34,7 @@ The main FastMCP server currently exposes:
 - `ff_compare_teams`
 - `ff_build_lineup`
 - `ff_get_draft_results`
+- `ff_get_live_draft_state`
 - `ff_get_waiver_wire`
 - `ff_get_draft_rankings`
 - `ff_get_draft_recommendation`
@@ -71,6 +72,14 @@ YAHOO_GUID=...
 ```
 
 This single-user mode is the supported way to run the app.
+
+## Browser extension: live draft recording
+
+The optional [Yahoo Fantasy Draft Recorder](chrome-extension/README.md) works in Firefox and Chrome. It watches a logged-in Yahoo live draft, captures the full **Results → Round by Round** ledger, saves picks locally in the browser, and exports CSV or agent-ready JSON. It never stores Yahoo authentication data.
+
+When this FastMCP server is running locally on port 8765 (`PORT=8765 python fastmcp_server.py`), the extension also syncs sanitized draft context to a loopback-only endpoint. Agents can call `ff_get_live_draft_state` to retrieve every pick, your roster, and rosters grouped by fantasy team before advising on the next selection. Local server state is written to `~/.fantasy-football-mcp/live-drafts.json` with user-only permissions.
+
+For Firefox, load `chrome-extension/manifest.json` from **This Firefox** in `about:debugging`. See the extension README for full setup, privacy, persistence, and testing instructions.
 
 ## Running the MCP server
 
