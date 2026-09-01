@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -15,11 +15,21 @@ DEFAULT_STORE_PATH = Path.home() / ".fantasy-football-mcp" / "live-drafts.json"
 MAX_PICKS = 500
 _STORE_LOCK = threading.Lock()
 _SESSION_KEY = re.compile(r"^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{1,64}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _PICK_STRING_FIELDS = ("player", "position", "nflTeam", "fantasyTeam", "recordedAt")
+_RESET_TOMBSTONES_KEY = "__resetTombstones"
 
 
 class LiveDraftValidationError(ValueError):
     """Raised when extension-provided draft context is invalid."""
+
+
+class LiveDraftConflictError(LiveDraftValidationError):
+    """Raised when a valid request conflicts with newer stored draft state."""
+
+
+class LiveDraftNotFoundError(LiveDraftValidationError):
+    """Raised when an exact draft session is unavailable for reset."""
 
 
 def _store_path(path: Optional[Union[str, Path]] = None) -> Path:
@@ -172,6 +182,61 @@ def _timestamp(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _required_timestamp(value: Any, field: str) -> datetime:
+    text = _safe_string(value, field, 64)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise LiveDraftValidationError(
+            f"{field} must be an ISO-8601 timestamp"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise LiveDraftValidationError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _sanitize_reset_request(value: Any) -> Dict[str, Any]:
+    allowed_fields = {
+        "schemaVersion",
+        "source",
+        "expectedGeneratedAt",
+        "draft",
+    }
+    if not isinstance(value, dict) or set(value) != allowed_fields:
+        raise LiveDraftValidationError("reset request fields are invalid")
+    if value.get("schemaVersion") != 1:
+        raise LiveDraftValidationError("schemaVersion 1 is required")
+    if value.get("source") != "yahoo-draft-recorder":
+        raise LiveDraftValidationError("unsupported draft reset source")
+    draft = value.get("draft")
+    identity_fields = {"sport", "leagueId", "teamId", "sessionKey"}
+    if not isinstance(draft, dict) or set(draft) != identity_fields:
+        raise LiveDraftValidationError("reset draft identity fields are invalid")
+
+    clean_draft: Dict[str, str] = {}
+    for field in ("sport", "leagueId", "teamId"):
+        identifier = _safe_string(draft.get(field), field, 64)
+        if not _IDENTIFIER.fullmatch(identifier):
+            raise LiveDraftValidationError(f"{field} has an invalid format")
+        clean_draft[field] = identifier
+    session_key = _safe_string(draft.get("sessionKey"), "sessionKey")
+    if not _SESSION_KEY.fullmatch(session_key):
+        raise LiveDraftValidationError("sessionKey has an invalid format")
+    if session_key != f"{clean_draft['sport']}:{clean_draft['leagueId']}":
+        raise LiveDraftValidationError("sessionKey must equal sport:leagueId")
+    clean_draft["sessionKey"] = session_key
+
+    expected = _safe_string(
+        value.get("expectedGeneratedAt"), "expectedGeneratedAt", 64
+    )
+    _required_timestamp(expected, "expectedGeneratedAt")
+    return {"draft": clean_draft, "expectedGeneratedAt": expected}
+
+
 def _read_all(path: Path) -> Dict[str, Dict[str, Any]]:
     if not path.exists():
         return {}
@@ -181,6 +246,15 @@ def _read_all(path: Path) -> Dict[str, Dict[str, Any]]:
         raise LiveDraftValidationError(f"could not read live draft store: {error}") from error
     if not isinstance(value, dict):
         raise LiveDraftValidationError("live draft store is malformed")
+    return value
+
+
+def _reset_tombstones(store: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    value = store.get(_RESET_TOMBSTONES_KEY)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise LiveDraftValidationError("live draft reset tombstones are malformed")
     return value
 
 
@@ -204,6 +278,26 @@ def _prepare_store_directory(destination: Path, tighten_existing: bool) -> None:
         parent.chmod(0o700)
 
 
+def _write_all(
+    store: Dict[str, Any], destination: Path, *, tighten_existing: bool
+) -> None:
+    _prepare_store_directory(destination, tighten_existing=tighten_existing)
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=".live-drafts-", suffix=".json", dir=destination.parent
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as temporary:
+            json.dump(store, temporary, indent=2, sort_keys=True)
+            temporary.write("\n")
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, destination)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
 def save_live_draft(value: Any, path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     """Atomically save one sanitized draft session and return it."""
 
@@ -216,6 +310,22 @@ def save_live_draft(value: Any, path: Optional[Union[str, Path]] = None) -> Dict
     with _STORE_LOCK:
         sessions = _read_all(destination)
         session_key = context["draft"]["sessionKey"]
+        tombstone = _reset_tombstones(sessions).get(session_key)
+        if tombstone:
+            tombstone_draft = tombstone.get("draft", {})
+            if any(
+                context["draft"].get(field) != tombstone_draft.get(field)
+                for field in ("sport", "leagueId", "teamId", "sessionKey")
+            ):
+                raise LiveDraftConflictError(
+                    "live draft identity conflicts with the reset session"
+                )
+            incoming_time = _timestamp(context.get("generatedAt"))
+            reset_time = _timestamp(tombstone.get("resetAt"))
+            if incoming_time is None or reset_time is None or incoming_time <= reset_time:
+                raise LiveDraftConflictError(
+                    "live draft was reset; rescan the current draft before syncing"
+                )
         existing = sessions.get(session_key)
         if existing:
             existing_time = _timestamp(existing.get("generatedAt"))
@@ -252,20 +362,85 @@ def save_live_draft(value: Any, path: Optional[Union[str, Path]] = None) -> Dict
             ):
                 raise LiveDraftValidationError("stale live draft snapshot rejected")
         sessions[session_key] = context
-        _prepare_store_directory(destination, tighten_existing=not custom_store_configured)
-        handle, temporary_name = tempfile.mkstemp(
-            prefix=".live-drafts-", suffix=".json", dir=destination.parent
+        _write_all(
+            sessions, destination, tighten_existing=not custom_store_configured
         )
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as temporary:
-                json.dump(sessions, temporary, indent=2, sort_keys=True)
-                temporary.write("\n")
-            os.chmod(temporary_name, 0o600)
-            os.replace(temporary_name, destination)
-        finally:
-            if os.path.exists(temporary_name):
-                os.unlink(temporary_name)
     return context
+
+
+def reset_live_draft(
+    value: Any,
+    path: Optional[Union[str, Path]] = None,
+    *,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Atomically clear one exact session while retaining a replay tombstone."""
+
+    request = _sanitize_reset_request(value)
+    destination = _store_path(path)
+    custom_store_configured = path is not None or bool(
+        os.getenv("FANTASY_FOOTBALL_LIVE_DRAFT_PATH")
+    )
+    session_key = request["draft"]["sessionKey"]
+    expected_time = _required_timestamp(
+        request["expectedGeneratedAt"], "expectedGeneratedAt"
+    )
+    with _STORE_LOCK:
+        store = _read_all(destination)
+        existing = store.get(session_key)
+        tombstones = _reset_tombstones(store)
+        tombstone = tombstones.get(session_key)
+
+        if existing is None:
+            if (
+                isinstance(tombstone, dict)
+                and tombstone.get("draft") == request["draft"]
+                and _timestamp(tombstone.get("clearedGeneratedAt")) == expected_time
+            ):
+                _prepare_store_directory(
+                    destination, tighten_existing=not custom_store_configured
+                )
+                return {
+                    "sessionKey": session_key,
+                    "resetAt": tombstone["resetAt"],
+                    "profilePreserved": True,
+                }
+            raise LiveDraftNotFoundError("exact live draft session not found")
+
+        existing_draft = existing.get("draft", {})
+        if any(
+            request["draft"].get(field) != existing_draft.get(field)
+            for field in ("sport", "leagueId", "teamId", "sessionKey")
+        ):
+            raise LiveDraftConflictError(
+                "reset draft identity does not match the saved session"
+            )
+        existing_time = _timestamp(existing.get("generatedAt"))
+        if existing_time is None or existing_time != expected_time:
+            raise LiveDraftConflictError(
+                "live draft changed; rescan before resetting"
+            )
+
+        reset_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        if reset_time <= existing_time:
+            reset_time = existing_time + timedelta(microseconds=1)
+        reset_at = _iso_utc(reset_time)
+        tombstones[session_key] = {
+            "draft": request["draft"],
+            "clearedGeneratedAt": existing["generatedAt"],
+            "resetAt": reset_at,
+        }
+        store[_RESET_TOMBSTONES_KEY] = tombstones
+        del store[session_key]
+        _write_all(
+            store, destination, tighten_existing=not custom_store_configured
+        )
+
+    return {
+        "sessionKey": session_key,
+        "resetAt": reset_at,
+        "profilePreserved": True,
+    }
 
 
 def load_live_draft(
@@ -277,7 +452,11 @@ def load_live_draft(
     """Load the newest context, optionally restricted to one Yahoo league ID."""
 
     with _STORE_LOCK:
-        sessions = list(_read_all(_store_path(path)).values())
+        sessions = [
+            session
+            for session_key, session in _read_all(_store_path(path)).items()
+            if session_key != _RESET_TOMBSTONES_KEY
+        ]
     if league_id is not None:
         sessions = [
             session

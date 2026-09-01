@@ -1,13 +1,17 @@
 import json
 import stat
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 import src.services.live_draft_store as live_draft_store
 from src.services.live_draft_store import (
+    LiveDraftConflictError,
+    LiveDraftNotFoundError,
     LiveDraftValidationError,
     load_live_draft,
+    reset_live_draft,
     save_live_draft,
 )
 
@@ -385,3 +389,175 @@ def test_compares_snapshot_times_as_instants_not_strings(tmp_path: Path) -> None
     saved = save_live_draft(later_with_offset, path)
 
     assert saved["generatedAt"] == later_with_offset["generatedAt"]
+
+
+def reset_request(context: dict) -> dict:
+    return {
+        "schemaVersion": 1,
+        "source": "yahoo-draft-recorder",
+        "expectedGeneratedAt": context["generatedAt"],
+        "draft": {
+            field: context["draft"][field]
+            for field in ("sport", "leagueId", "teamId", "sessionKey")
+        },
+    }
+
+
+def test_reset_removes_only_exact_session_and_retains_private_tombstone(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "live-drafts.json"
+    target = draft_context("111")
+    other = draft_context("222")
+    other["generatedAt"] = "2026-08-31T22:46:00.000Z"
+    save_live_draft(target, path)
+    save_live_draft(other, path)
+
+    result = reset_live_draft(
+        reset_request(target),
+        path,
+        now=datetime.fromisoformat("2026-08-31T23:00:00+00:00"),
+    )
+
+    assert result == {
+        "sessionKey": "f1:111",
+        "resetAt": "2026-08-31T23:00:00Z",
+        "profilePreserved": True,
+    }
+    assert load_live_draft("111", path=path) is None
+    assert load_live_draft("222", path=path)["draft"]["teamId"] == "6"
+    stored = json.loads(path.read_text())
+    assert "f1:111" not in stored
+    assert stored["f1:222"]["draft"]["leagueId"] == "222"
+    tombstone = stored["__resetTombstones"]["f1:111"]
+    assert tombstone["resetAt"] == "2026-08-31T23:00:00Z"
+    assert tombstone["clearedGeneratedAt"] == target["generatedAt"]
+    assert tombstone["draft"] == {
+        field: target["draft"][field]
+        for field in ("sport", "leagueId", "teamId", "sessionKey")
+    }
+    serialized_tombstone = json.dumps(tombstone)
+    assert "J. Gibbs" not in serialized_tombstone
+    assert "picks" not in tombstone
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_reset_tombstone_rejects_stale_replay_but_accepts_new_scan(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "live-drafts.json"
+    target = draft_context()
+    save_live_draft(target, path)
+    reset_live_draft(
+        reset_request(target),
+        path,
+        now=datetime.fromisoformat("2026-08-31T23:00:00+00:00"),
+    )
+
+    with pytest.raises(LiveDraftConflictError, match="reset"):
+        save_live_draft(target, path)
+    assert load_live_draft(target["draft"]["leagueId"], path=path) is None
+
+    restarted = draft_context()
+    restarted["generatedAt"] = "2026-08-31T23:00:01Z"
+    restarted["draft"]["updatedAt"] = restarted["generatedAt"]
+    restarted["picks"] = [
+        {
+            "pickNumber": 1,
+            "player": "New Mock Player",
+            "fantasyTeam": "Team 1",
+            "isUserPick": False,
+        }
+    ]
+
+    saved = save_live_draft(restarted, path)
+
+    assert saved["picks"][0]["player"] == "New Mock Player"
+    assert load_live_draft(target["draft"]["leagueId"], path=path) == saved
+
+
+def test_reset_requires_exact_identity_and_current_snapshot_revision(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "live-drafts.json"
+    target = draft_context()
+    save_live_draft(target, path)
+
+    wrong_team = reset_request(target)
+    wrong_team["draft"]["teamId"] = "7"
+    with pytest.raises(LiveDraftConflictError, match="identity"):
+        reset_live_draft(wrong_team, path)
+
+    stale_revision = reset_request(target)
+    stale_revision["expectedGeneratedAt"] = "2026-08-31T22:44:00Z"
+    with pytest.raises(LiveDraftConflictError, match="changed"):
+        reset_live_draft(stale_revision, path)
+
+    assert load_live_draft(path=path) is not None
+
+
+def test_reset_retry_is_idempotent_without_rewriting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "live-drafts.json"
+    target = draft_context()
+    request = reset_request(target)
+    save_live_draft(target, path)
+    first = reset_live_draft(
+        request,
+        path,
+        now=datetime.fromisoformat("2026-08-31T23:00:00+00:00"),
+    )
+
+    def fail_if_rewritten(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an identical reset retry must not rewrite the store")
+
+    monkeypatch.setattr(live_draft_store.os, "replace", fail_if_rewritten)
+
+    assert reset_live_draft(request, path) == first
+
+
+def test_delayed_reset_retry_cannot_delete_a_restarted_mock(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    original = draft_context()
+    original_request = reset_request(original)
+    save_live_draft(original, path)
+    reset_live_draft(
+        original_request,
+        path,
+        now=datetime.fromisoformat("2026-08-31T23:00:00+00:00"),
+    )
+    restarted = draft_context()
+    restarted["generatedAt"] = "2026-08-31T23:00:01Z"
+    restarted["draft"]["updatedAt"] = restarted["generatedAt"]
+    save_live_draft(restarted, path)
+
+    with pytest.raises(LiveDraftConflictError, match="changed"):
+        reset_live_draft(original_request, path)
+
+    assert load_live_draft(path=path)["generatedAt"] == restarted["generatedAt"]
+
+
+def test_reset_rejects_unknown_fields_private_values_and_missing_session(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "live-drafts.json"
+    target = draft_context()
+    request = reset_request(target)
+
+    with pytest.raises(LiveDraftNotFoundError, match="not found"):
+        reset_live_draft(request, path)
+
+    save_live_draft(target, path)
+    for mutation in (
+        lambda value: value.update({"url": "https://example.test/?auth=secret"}),
+        lambda value: value["draft"].update({"cookie": "secret"}),
+        lambda value: value.update({"expectedGeneratedAt": "secret"}),
+    ):
+        invalid = reset_request(target)
+        mutation(invalid)
+        with pytest.raises(LiveDraftValidationError):
+            reset_live_draft(invalid, path)
+
+    assert "secret" not in path.read_text()
+    assert load_live_draft(path=path) is not None

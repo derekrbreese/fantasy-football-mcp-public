@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createDraftStorage, createSessionOperationLock } = require('../draft-storage.js');
+const {
+  createDraftStorage,
+  createSessionOperationLock,
+  isTabBlockedByReset,
+} = require('../draft-storage.js');
 
 function fakeExtensionStorage(initial = {}) {
   const data = { ...initial };
@@ -79,6 +83,71 @@ test('per-league tombstone prevents cleared legacy session from reappearing', as
   await storage.clearSession('f1:legacy', '2026-08-01T00:01:00.000Z');
   assert.equal(await storage.getSession('f1:legacy'), null);
   assert.deepEqual(await storage.listSessions(), {});
+});
+
+test('reset cleanup preserves unrelated extension data such as imported-profile UI state', async () => {
+  const sessionKey = 'f1:10547893';
+  const profileUiState = { leagueId: '10547893', source: 'DraftSheets-2026.xlsx' };
+  const api = fakeExtensionStorage({
+    [`yahooDraftRecorderSession:${encodeURIComponent(sessionKey)}`]: {
+      sessionKey,
+      picks: [{ pickNumber: 1 }],
+      updatedAt: '2026-09-01T23:15:00.000Z',
+    },
+    yahooDraftProfileUiState: profileUiState,
+  });
+  const storage = createDraftStorage(api);
+
+  await storage.clearSession(sessionKey, '2026-09-01T23:16:00.000Z');
+
+  assert.deepEqual(api.data.yahooDraftProfileUiState, profileUiState);
+  assert.equal(await storage.getSession(sessionKey), null);
+});
+
+test('server-accepted reset atomically clears draft and repair state before reset journal', async () => {
+  const sessionKey = 'f1:10547893';
+  const encoded = encodeURIComponent(sessionKey);
+  const accepted = {
+    schemaVersion: 1,
+    state: 'accepted',
+    sessionKey,
+    expectedGeneratedAt: '2026-09-01T23:15:00.000Z',
+    draft: { sport: 'f1', leagueId: '10547893', teamId: '6', sessionKey },
+    resetAt: '2026-09-01T23:16:00.000Z',
+  };
+  const api = fakeExtensionStorage({
+    [`yahooDraftRecorderSession:${encoded}`]: {
+      ...accepted.draft,
+      updatedAt: accepted.expectedGeneratedAt,
+      picks: [{ pickNumber: 1 }],
+    },
+    [`yahooDraftRecorderPendingRepair:${encoded}`]: { state: 'intent' },
+    [`yahooDraftRecorderPendingReset:${encoded}`]: accepted,
+  });
+  const storage = createDraftStorage(api);
+
+  await storage.finalizeReset(sessionKey, accepted.resetAt);
+
+  assert.deepEqual(api.setCalls[0], {
+    [`yahooDraftRecorderSession:${encoded}`]: null,
+    [`yahooDraftRecorderSessionDeleted:${encoded}`]: { clearedAt: accepted.resetAt },
+    [`yahooDraftRecorderPendingRepair:${encoded}`]: null,
+  });
+  assert.equal(await storage.getSession(sessionKey), null);
+  assert.equal(await storage.getResetAt(sessionKey), accepted.resetAt);
+  assert.equal(await storage.getPendingRepair(sessionKey), null);
+  assert.equal(await storage.getPendingReset(sessionKey), accepted);
+
+  await storage.clearPendingReset(sessionKey);
+  assert.equal(await storage.getPendingReset(sessionKey), null);
+});
+
+test('tabs loaded before reset stay blocked until explicitly authorized or reloaded', () => {
+  const resetAt = '2026-09-01T23:16:00.123456Z';
+  assert.equal(isTabBlockedByReset('2026-09-01T23:15:00.000Z', resetAt, null), true);
+  assert.equal(isTabBlockedByReset('2026-09-01T23:15:00.000Z', resetAt, resetAt), false);
+  assert.equal(isTabBlockedByReset('2026-09-01T23:16:00.124Z', resetAt, null), false);
+  assert.equal(isTabBlockedByReset('not-a-time', resetAt, null), true);
 });
 
 test('same-league scan and repair operations serialize across tabs', async () => {

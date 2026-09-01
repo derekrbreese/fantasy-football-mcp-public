@@ -107,6 +107,263 @@ def structured_profile_payload() -> dict:
     }
 
 
+def reset_payload() -> dict:
+    state = live_state_for_profile()
+    return {
+        "schemaVersion": 1,
+        "source": "yahoo-draft-recorder",
+        "expectedGeneratedAt": state["generatedAt"],
+        "draft": {
+            field: state["draft"][field]
+            for field in ("sport", "leagueId", "teamId", "sessionKey")
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_reset_route_clears_exact_session_and_reports_profile_preserved(
+    monkeypatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        fastmcp_server,
+        "reset_live_draft",
+        lambda payload: calls.append(payload)
+        or {
+            "sessionKey": "nfl:498589",
+            "resetAt": "2026-09-01T17:00:00Z",
+            "profilePreserved": True,
+        },
+    )
+
+    response = await fastmcp_server.receive_live_draft_reset(
+        request_for(
+            "POST",
+            "/draft-reset",
+            payload=reset_payload(),
+            ui_header=None,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response) == {
+        "status": "ok",
+        "sessionKey": "nfl:498589",
+        "resetAt": "2026-09-01T17:00:00Z",
+        "profilePreserved": True,
+    }
+    assert calls == [reset_payload()]
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_reset_route_end_to_end_preserves_profile_store(
+    tmp_path, monkeypatch
+) -> None:
+    live_path = tmp_path / "private" / "live-drafts.json"
+    profile_path = tmp_path / "private" / "draft-profiles.json"
+    profile_path.parent.mkdir(parents=True)
+    profile_sentinel = b'{"profile":"preserved"}\n'
+    profile_path.write_bytes(profile_sentinel)
+    monkeypatch.setenv("FANTASY_FOOTBALL_LIVE_DRAFT_PATH", str(live_path))
+    monkeypatch.setenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH", str(profile_path))
+    state = live_state_for_profile()
+    fastmcp_server.save_live_draft(state)
+
+    response = await fastmcp_server.receive_live_draft_reset(
+        request_for(
+            "POST",
+            "/draft-reset",
+            payload=reset_payload(),
+            ui_header=None,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response)["profilePreserved"] is True
+    assert fastmcp_server.load_live_draft("498589") is None
+    assert profile_path.read_bytes() == profile_sentinel
+    stored = json.loads(live_path.read_text())
+    assert "nfl:498589" not in stored
+    assert stored["__resetTombstones"]["nfl:498589"]["draft"]["teamId"] == "6"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_overrides, expected_status, expected_message",
+    [
+        ({"client": "192.168.1.20"}, 403, "Loopback access required"),
+        (
+            {"origin": "https://football.fantasysports.yahoo.com"},
+            403,
+            "Extension origin required",
+        ),
+        ({"origin": None}, 403, "Extension origin required"),
+        ({"extra_headers": {}}, 403, "Recorder header required"),
+        ({"content_type": "text/plain"}, 415, "Content-Type must be application/json"),
+        ({"content_length": "4097"}, 413, "Payload too large"),
+        ({"content_length": "invalid"}, 400, "Invalid content length"),
+    ],
+)
+async def test_reset_route_rejects_unsafe_transport_before_mutation(
+    monkeypatch, request_overrides, expected_status, expected_message
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "reset_live_draft",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("must not reset")),
+    )
+    defaults = {
+        "payload": reset_payload(),
+        "ui_header": None,
+        "extra_headers": {"x-yahoo-draft-recorder": "1"},
+    }
+    defaults.update(request_overrides)
+
+    response = await fastmcp_server.receive_live_draft_reset(
+        request_for("POST", "/draft-reset", **defaults)
+    )
+
+    assert response.status_code == expected_status
+    assert response_json(response)["message"] == expected_message
+
+
+@pytest.mark.asyncio
+async def test_reset_route_rejects_oversized_actual_body_and_unknown_fields(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def reject_unknown(payload):
+        calls.append(payload)
+        raise fastmcp_server.LiveDraftValidationError("reset request fields are invalid")
+
+    monkeypatch.setattr(
+        fastmcp_server,
+        "reset_live_draft",
+        reject_unknown,
+    )
+    oversized = await fastmcp_server.receive_live_draft_reset(
+        request_for(
+            "POST",
+            "/draft-reset",
+            body=b"{" + b" " * 4_096 + b"}",
+            content_length="1",
+            ui_header=None,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+    unknown = reset_payload()
+    unknown["url"] = "https://example.test/?auth=secret"
+    invalid = await fastmcp_server.receive_live_draft_reset(
+        request_for(
+            "POST",
+            "/draft-reset",
+            payload=unknown,
+            ui_header=None,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+
+    assert oversized.status_code == 413
+    assert invalid.status_code == 400
+    assert "secret" not in json.dumps(response_json(invalid))
+    assert calls == [unknown]
+
+
+@pytest.mark.asyncio
+async def test_reset_route_maps_store_conflicts_and_sanitizes_unexpected_errors(
+    monkeypatch,
+) -> None:
+    request = request_for(
+        "POST",
+        "/draft-reset",
+        payload=reset_payload(),
+        ui_header=None,
+        extra_headers={"x-yahoo-draft-recorder": "1"},
+    )
+    monkeypatch.setattr(
+        fastmcp_server,
+        "reset_live_draft",
+        lambda _payload: (_ for _ in ()).throw(
+            fastmcp_server.LiveDraftConflictError(
+                "live draft changed; rescan before resetting"
+            )
+        ),
+    )
+
+    conflict = await fastmcp_server.receive_live_draft_reset(request)
+
+    assert conflict.status_code == 409
+    assert response_json(conflict)["message"] == (
+        "live draft changed; rescan before resetting"
+    )
+
+    private_detail = "secret token at /Users/private/live-drafts.json"
+    request = request_for(
+        "POST",
+        "/draft-reset",
+        payload=reset_payload(),
+        ui_header=None,
+        extra_headers={"x-yahoo-draft-recorder": "1"},
+    )
+    monkeypatch.setattr(
+        fastmcp_server,
+        "reset_live_draft",
+        lambda _payload: (_ for _ in ()).throw(OSError(private_detail)),
+    )
+
+    unavailable = await fastmcp_server.receive_live_draft_reset(request)
+
+    assert unavailable.status_code == 500
+    assert response_json(unavailable) == {
+        "status": "error",
+        "message": "Draft reset service unavailable",
+    }
+    assert private_detail not in json.dumps(response_json(unavailable))
+
+
+@pytest.mark.asyncio
+async def test_reset_preflight_is_extension_origin_and_loopback_only() -> None:
+    allowed = await fastmcp_server.receive_live_draft_reset(
+        request_for(
+            "OPTIONS",
+            "/draft-reset",
+            origin="moz-extension://draft-recorder",
+            ui_header=None,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+    yahoo = await fastmcp_server.receive_live_draft_reset(
+        request_for(
+            "OPTIONS",
+            "/draft-reset",
+            origin="https://football.fantasysports.yahoo.com",
+            ui_header=None,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+    lan = await fastmcp_server.receive_live_draft_reset(
+        request_for(
+            "OPTIONS",
+            "/draft-reset",
+            origin="moz-extension://draft-recorder",
+            client="192.168.1.20",
+            ui_header=None,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+
+    assert allowed.status_code == 204
+    assert allowed.headers["access-control-allow-origin"] == (
+        "moz-extension://draft-recorder"
+    )
+    assert yahoo.status_code == 403
+    assert lan.status_code == 403
+
+
 @pytest.mark.asyncio
 async def test_structured_profile_route_binds_live_identity_and_saves_allowlist(
     monkeypatch,

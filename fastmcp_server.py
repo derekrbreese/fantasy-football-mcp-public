@@ -30,7 +30,14 @@ from src.services.local_draft_profile_store import (
     sanitize_local_draft_profile,
     save_local_draft_profile,
 )
-from src.services.live_draft_store import LiveDraftValidationError, load_live_draft, save_live_draft
+from src.services.live_draft_store import (
+    LiveDraftConflictError,
+    LiveDraftNotFoundError,
+    LiveDraftValidationError,
+    load_live_draft,
+    reset_live_draft,
+    save_live_draft,
+)
 
 # REMOVED: enhanced_mcp_tools imports - no longer using wrapper tools
 
@@ -697,6 +704,7 @@ _ALLOWED_DRAFT_SYNC_ORIGINS = (
 )
 
 _DRAFT_RECOMMENDATION_MAX_BODY = 4_096
+_DRAFT_RESET_MAX_BODY = 4_096
 _DRAFT_PROFILE_MAX_BODY = 512_000
 _DRAFT_PROFILE_XLSX_MAX_BODY = 2_000_000
 _DRAFT_RECOMMENDATION_FIELDS = frozenset(
@@ -917,6 +925,38 @@ def _draft_sync_headers(request: Request) -> Dict[str, str]:
     return headers
 
 
+def _is_allowed_draft_reset_origin(origin: str) -> bool:
+    return bool(_DRAFT_EXTENSION_ORIGIN.fullmatch(origin))
+
+
+def _draft_reset_headers(request: Request) -> Dict[str, str]:
+    origin = request.headers.get("origin", "")
+    headers = {
+        "Access-Control-Allow-Headers": "Content-Type, X-Yahoo-Draft-Recorder",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Private-Network": "true",
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+        "Referrer-Policy": "no-referrer",
+        "Vary": "Origin",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+    }
+    if _is_allowed_draft_reset_origin(origin):
+        headers["Access-Control-Allow-Origin"] = origin
+    return headers
+
+
+def _draft_reset_error(
+    request: Request, message: str, status_code: int
+) -> JSONResponse:
+    return JSONResponse(
+        {"status": "error", "message": message},
+        status_code=status_code,
+        headers=_draft_reset_headers(request),
+    )
+
+
 @server.custom_route("/draft-sync", methods=["POST", "OPTIONS"], include_in_schema=False)
 async def receive_live_draft(request: Request) -> Response:
     """Receive private draft context only from a local Yahoo draft extension."""
@@ -981,6 +1021,62 @@ async def receive_live_draft(request: Request) -> Response:
             "status": "ok",
             "sessionKey": context["draft"]["sessionKey"],
             "pickCount": len(context["picks"]),
+        },
+        headers=headers,
+    )
+
+
+@server.custom_route("/draft-reset", methods=["POST", "OPTIONS"], include_in_schema=False)
+async def receive_live_draft_reset(request: Request) -> Response:
+    """Clear one exact local draft session without deleting its ranking profile."""
+
+    headers = _draft_reset_headers(request)
+    if not _is_loopback_request(request):
+        return _draft_reset_error(request, "Loopback access required", 403)
+    origin = request.headers.get("origin", "")
+    if not _is_allowed_draft_reset_origin(origin):
+        return _draft_reset_error(request, "Extension origin required", 403)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+    if request.headers.get("x-yahoo-draft-recorder") != "1":
+        return _draft_reset_error(request, "Recorder header required", 403)
+    content_type = request.headers.get("content-type", "")
+    if len(content_type) > 64 or content_type.split(";", 1)[0].strip().lower() != (
+        "application/json"
+    ):
+        return _draft_reset_error(
+            request, "Content-Type must be application/json", 415
+        )
+    raw_content_length = request.headers.get("content-length", "")
+    if not re.fullmatch(r"\d{1,7}", raw_content_length):
+        return _draft_reset_error(request, "Invalid content length", 400)
+    content_length = int(raw_content_length)
+    if content_length > _DRAFT_RESET_MAX_BODY:
+        return _draft_reset_error(request, "Payload too large", 413)
+
+    try:
+        body = await request.body()
+        if len(body) > _DRAFT_RESET_MAX_BODY:
+            return _draft_reset_error(request, "Payload too large", 413)
+        payload = json.loads(body)
+        result = reset_live_draft(payload)
+    except json.JSONDecodeError:
+        return _draft_reset_error(request, "Invalid JSON", 400)
+    except LiveDraftConflictError as exc:
+        return _draft_reset_error(request, str(exc), 409)
+    except LiveDraftNotFoundError:
+        return _draft_reset_error(request, "Exact live draft session not found", 404)
+    except LiveDraftValidationError:
+        return _draft_reset_error(request, "Invalid draft reset request", 400)
+    except Exception:
+        return _draft_reset_error(request, "Draft reset service unavailable", 500)
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "sessionKey": result["sessionKey"],
+            "resetAt": result["resetAt"],
+            "profilePreserved": result["profilePreserved"] is True,
         },
         headers=headers,
     )

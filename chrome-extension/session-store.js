@@ -232,6 +232,28 @@
       if (!validatePending(pending)) {
         return { ok: false, error: 'Pending repair record is invalid; stale sync remains blocked.' };
       }
+      if (dependencies.isSessionReset) {
+        let discardedByReset;
+        try {
+          discardedByReset = await dependencies.isSessionReset(pending.session);
+        } catch (error) {
+          return {
+            ok: false,
+            error: `Pending repair could not be compared with reset state: ${String(error?.message || error)}`,
+          };
+        }
+        if (discardedByReset) {
+          try {
+            await dependencies.clearPending();
+          } catch (error) {
+            return {
+              ok: false,
+              error: `Reset superseded a stale repair, but its journal could not be cleared: ${String(error?.message || error)}`,
+            };
+          }
+          return { ok: true, reconciled: true, discardedByReset: true };
+        }
+      }
 
       let accepted = pending;
       if (pending.state === 'intent') {
@@ -255,9 +277,12 @@
       }
 
       try {
-        await dependencies.persistSession(accepted.session);
+        const syncedSession = validResetTimestamp(accepted.session?.updatedAt)
+          ? { ...accepted.session, lastSyncedAt: accepted.session.updatedAt }
+          : accepted.session;
+        await dependencies.persistSession(syncedSession);
         await dependencies.clearPending();
-        return { ok: true, reconciled: true, session: accepted.session };
+        return { ok: true, reconciled: true, session: syncedSession };
       } catch (error) {
         return {
           ok: false,
@@ -275,12 +300,195 @@
     return { begin, hasPending, reconcile, runAfterReconcile };
   }
 
+  function validResetTimestamp(value) {
+    return typeof value === 'string' &&
+      value.length <= 40 &&
+      /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) &&
+      Number.isFinite(Date.parse(value));
+  }
+
+  function sameDraftIdentity(left, right) {
+    const fields = ['sport', 'leagueId', 'teamId', 'sessionKey'];
+    if (!left || !right || fields.some((field) => (
+      typeof left[field] !== 'string' ||
+      !left[field] ||
+      left[field] !== right[field]
+    ))) return false;
+    return left.sessionKey === `${left.sport}:${left.leagueId}`;
+  }
+
+  function resetIdentity(session) {
+    const sport = typeof session?.sport === 'string' ? session.sport : '';
+    const leagueId = typeof session?.leagueId === 'string' ? session.leagueId : '';
+    const teamId = typeof session?.teamId === 'string' ? session.teamId : '';
+    const sessionKey = typeof session?.sessionKey === 'string' ? session.sessionKey : '';
+    if (
+      !/^[a-z0-9_-]{1,16}$/i.test(sport) ||
+      !/^\d{1,32}$/.test(leagueId) ||
+      !/^\d{1,32}$/.test(teamId) ||
+      sessionKey !== `${sport}:${leagueId}`
+    ) {
+      throw new Error('The active Yahoo session identity is missing or inconsistent.');
+    }
+    const resetRevision = session?.lastSyncedAt === undefined
+      ? session?.updatedAt
+      : session.lastSyncedAt;
+    if (!validResetTimestamp(resetRevision)) {
+      throw new Error('The active Yahoo session must be synced before it can be reset. Rescan first.');
+    }
+    return {
+      sport,
+      leagueId,
+      teamId,
+      sessionKey,
+      updatedAt: resetRevision,
+    };
+  }
+
+  function createDurableResetCoordinator(dependencies) {
+    async function begin(session) {
+      const snapshot = resetIdentity(session);
+      await dependencies.writePending({
+        schemaVersion: 1,
+        state: 'intent',
+        sessionKey: snapshot.sessionKey,
+        expectedGeneratedAt: snapshot.updatedAt,
+        draft: {
+          sport: snapshot.sport,
+          leagueId: snapshot.leagueId,
+          teamId: snapshot.teamId,
+          sessionKey: snapshot.sessionKey,
+        },
+      });
+    }
+
+    function validPending(pending) {
+      if (
+        !pending ||
+        pending.schemaVersion !== 1 ||
+        (pending.state !== 'intent' && pending.state !== 'accepted') ||
+        !validResetTimestamp(pending.expectedGeneratedAt)
+      ) return false;
+      try {
+        const snapshot = resetIdentity({
+          ...pending.draft,
+          updatedAt: pending.expectedGeneratedAt,
+        });
+        if (snapshot.sessionKey !== pending.sessionKey) return false;
+      } catch (_error) {
+        return false;
+      }
+      return pending.state !== 'accepted' || (
+        pending.profilePreserved === true && validResetTimestamp(pending.resetAt)
+      );
+    }
+
+    async function hasPending() {
+      return Boolean(await dependencies.readPending());
+    }
+
+    async function reconcile() {
+      const pending = await dependencies.readPending();
+      if (!pending) return { ok: true, reconciled: false };
+      if (!validPending(pending)) {
+        return { ok: false, error: 'Pending reset record is invalid; scans and sync remain blocked.' };
+      }
+
+      let accepted = pending;
+      if (pending.state === 'intent') {
+        let response;
+        try {
+          response = await dependencies.resetServer({
+            ...pending.draft,
+            updatedAt: pending.expectedGeneratedAt,
+          });
+        } catch (error) {
+          if (error?.status === 404 || error?.status === 409) {
+            try {
+              await dependencies.clearPending();
+            } catch (clearError) {
+              return {
+                ok: false,
+                error: `Draft changed before reset, and the reset journal could not be cleared: ${String(clearError?.message || clearError)}`,
+              };
+            }
+            return {
+              ok: false,
+              retryAfterRescan: true,
+              error: String(error?.message || error),
+            };
+          }
+          return {
+            ok: false,
+            error: `Reset is waiting for server acceptance: ${String(error?.message || error)}`,
+          };
+        }
+        if (
+          response?.status !== 'ok' ||
+          response.sessionKey !== pending.sessionKey ||
+          response.profilePreserved !== true ||
+          !validResetTimestamp(response.resetAt)
+        ) {
+          return {
+            ok: false,
+            error: 'The local server returned an invalid reset acknowledgement; browser state was not cleared.',
+          };
+        }
+        accepted = {
+          ...pending,
+          state: 'accepted',
+          resetAt: response.resetAt,
+          profilePreserved: true,
+        };
+        try {
+          await dependencies.writePending(accepted);
+        } catch (error) {
+          return {
+            ok: false,
+            serverAccepted: true,
+            error: `The server reset the draft, but its durable marker could not be saved; retry Reset safely: ${String(error?.message || error)}`,
+          };
+        }
+      }
+
+      try {
+        await dependencies.finalizeReset(accepted.sessionKey, accepted.resetAt);
+      } catch (error) {
+        return {
+          ok: false,
+          serverAccepted: true,
+          error: `The server reset the draft, but browser cleanup failed; retry Reset safely: ${String(error?.message || error)}`,
+        };
+      }
+      try {
+        await dependencies.clearPending();
+      } catch (error) {
+        return {
+          ok: false,
+          serverAccepted: true,
+          error: `The draft was reset, but its browser journal could not be cleared; retry Reset safely: ${String(error?.message || error)}`,
+        };
+      }
+      return {
+        ok: true,
+        reconciled: true,
+        sessionKey: accepted.sessionKey,
+        resetAt: accepted.resetAt,
+        profilePreserved: true,
+      };
+    }
+
+    return { begin, hasPending, reconcile };
+  }
+
   const api = {
     commitDraftRepair,
     createDurableRepairCoordinator,
+    createDurableResetCoordinator,
     prepareAutomaticAuthoritativeUpdate,
     prepareDraftRepair,
     repairDraftSession,
+    sameDraftIdentity,
     updateDraftSession,
     updateDraftSessionFromAuthoritativeLedger,
   };

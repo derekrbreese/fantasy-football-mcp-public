@@ -64,7 +64,8 @@ This list separates the delivered live-draft baseline from prioritized follow-up
    - Package and sign the extension so it survives browser restarts without temporary installation.
 
 2. **Local session management**
-   - Add explicit list/delete/reset tools for local draft sessions with league-scoped confirmation and no caller-controlled filesystem paths.
+   - The extension popup now provides an explicitly confirmed, exact-active-session mock reset with durable browser/server tombstones and profile preservation.
+   - Add explicit list/delete/reset MCP tools for other saved local draft sessions with league-scoped confirmation and no caller-controlled filesystem paths.
    - Add retention limits for old completed drafts.
 
 3. **End-to-end protocol tests**

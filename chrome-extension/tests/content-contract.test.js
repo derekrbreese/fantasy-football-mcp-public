@@ -63,8 +63,34 @@ test('automatic authoritative rollback exits before persistence and sync', () =>
   assert.doesNotMatch(guardedBranch, /setSession|syncSession/);
 });
 
-test('popup serializes clear operations within the extension context', () => {
+test('popup resets only the exact active Yahoo session and never a latest-session fallback', () => {
   const popupSource = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
 
-  assert.match(popupSource, /operationLock\.run\(sessionKey, \(\) => draftStorage\.clearSession\(sessionKey\)\)/);
+  assert.match(popupSource, /!activeSessionKey.*sameDraftIdentity\(currentSession, activeDiagnostics\)/s);
+  assert.match(popupSource, /coordinator\.begin\(exactSession\)/);
+  assert.match(popupSource, /sendToActiveTab\('YAHOO_DRAFT_RECORDER_RESCAN'/);
+  assert.doesNotMatch(popupSource, /resetCoordinator\.begin\(latestSession/);
+  assert.match(popupSource, /rescanResult\.syncStatus !== 'connected'/);
+});
+
+test('content blocks scans and sync while a durable reset journal exists', () => {
+  const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+
+  assert.match(contentSource, /draftStorage\.getPendingReset\(metadata\.sessionKey\)/);
+  assert.match(contentSource, /reset-pending/);
+  assert.match(contentSource, /isTabBlockedByReset\(contentLoadedAt, resetAt, allowedResetAt\)/);
+  assert.match(contentSource, /message\?\.resetAt/);
+  assert.match(contentSource, /forceSync/);
+  assert.match(contentSource, /lastSyncedAt: snapshotTimestamp/);
+  assert.match(contentSource, /isSessionReset/);
+  assert.match(contentSource, /sport: metadata\.sport/);
+  assert.match(contentSource, /teamId: metadata\.teamId/);
+});
+
+test('popup requires full active identity including team before reset', () => {
+  const popupSource = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
+
+  assert.match(popupSource, /sameDraftIdentity\(session, diagnostics\)/);
+  assert.match(popupSource, /sameDraftIdentity\(exactSession, activeDiagnostics\)/);
+  assert.match(popupSource, /sameDraftIdentity\(pending\.draft, activeIdentity\)/);
 });

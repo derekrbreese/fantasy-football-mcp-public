@@ -9,11 +9,16 @@
   const metadata = YahooDraftParser.parseDraftUrl(window.location.href);
   if (!metadata) return;
 
+  const contentLoadedAt = new Date().toISOString();
   let scanTimer;
   let scanInProgress = null;
   let lastSyncedSignature;
   let lastSyncAttemptAt = 0;
+  let allowedResetAt = null;
   const diagnostics = {
+    sport: metadata.sport,
+    leagueId: metadata.leagueId,
+    teamId: metadata.teamId,
     sessionKey: metadata.sessionKey,
     lastScanAt: null,
     candidateCount: 0,
@@ -27,8 +32,58 @@
     syncError: null,
   };
 
+  async function blockForPendingReset() {
+    if (!await draftStorage.getPendingReset(metadata.sessionKey)) return null;
+    const error = 'A confirmed mock-draft reset is pending reconciliation; scans, repairs, and sync are blocked.';
+    diagnostics.syncStatus = 'reset-pending';
+    diagnostics.syncError = error;
+    return { ...diagnostics, ok: false, error };
+  }
+
+  async function blockForPreResetTab() {
+    const resetAt = await draftStorage.getResetAt(metadata.sessionKey);
+    if (!YahooDraftStorage.isTabBlockedByReset(contentLoadedAt, resetAt, allowedResetAt)) return null;
+    const error = 'This Yahoo tab was open before the mock-draft reset. Reload it, or explicitly rescan it from the recorder popup, before recording resumes.';
+    diagnostics.syncStatus = 'reset-reload-required';
+    diagnostics.syncError = error;
+    return { ...diagnostics, ok: false, error };
+  }
+
+  async function persistSuccessfulOrdinarySync(session, snapshotTimestamp) {
+    const resetBlock = await blockForPendingReset();
+    if (resetBlock) return;
+    const resetAt = await draftStorage.getResetAt(metadata.sessionKey);
+    if (resetAt && Date.parse(snapshotTimestamp) <= Date.parse(resetAt)) return;
+    const current = await draftStorage.getSession(metadata.sessionKey);
+    if (current && !YahooDraftSessionStore.sameDraftIdentity(current, metadata)) return;
+    const currentTime = Date.parse(current?.updatedAt);
+    const snapshotTime = Date.parse(session.updatedAt);
+    if (Number.isFinite(currentTime) && Number.isFinite(snapshotTime) && currentTime > snapshotTime) return;
+    await draftStorage.setSession(metadata.sessionKey, {
+      ...session,
+      lastSyncedAt: snapshotTimestamp,
+    });
+  }
+
+  async function isSessionReset(session) {
+    const resetAt = await draftStorage.getResetAt(metadata.sessionKey);
+    const sessionTime = Date.parse(session?.updatedAt);
+    const resetTime = Date.parse(resetAt);
+    return Number.isFinite(sessionTime) && Number.isFinite(resetTime) && sessionTime <= resetTime;
+  }
+
   async function syncSession(session, options = {}) {
     const isRepair = options.repair === true;
+    const resetBlock = await blockForPendingReset();
+    if (resetBlock) {
+      if (options.requireSuccess) throw new Error(resetBlock.error);
+      return null;
+    }
+    const oldTabBlock = await blockForPreResetTab();
+    if (oldTabBlock) {
+      if (options.requireSuccess) throw new Error(oldTabBlock.error);
+      return null;
+    }
     if (!isRepair && await draftStorage.getPendingRepair(metadata.sessionKey)) {
       diagnostics.syncStatus = 'repair-pending-local-save';
       diagnostics.syncError = 'A durable repair is pending reconciliation; ordinary sync is blocked.';
@@ -52,6 +107,7 @@
         { repair: isRepair },
       );
       const response = await YahooDraftSyncClient.syncDraftContext(context);
+      if (!isRepair) await persistSuccessfulOrdinarySync(session, snapshotTimestamp);
       diagnostics.syncStatus = 'connected';
       diagnostics.lastSyncAt = new Date().toISOString();
       return response;
@@ -67,6 +123,7 @@
     readPending: () => draftStorage.getPendingRepair(metadata.sessionKey),
     writePending: (record) => draftStorage.setPendingRepair(metadata.sessionKey, record),
     clearPending: () => draftStorage.clearPendingRepair(metadata.sessionKey),
+    isSessionReset,
     syncRepair: async (session) => {
       lastSyncedSignature = undefined;
       await syncSession(session, { repair: true, requireSuccess: true });
@@ -75,6 +132,10 @@
   });
 
   async function performScan() {
+    const resetBlock = await blockForPendingReset();
+    if (resetBlock) return resetBlock;
+    const oldTabBlock = await blockForPreResetTab();
+    if (oldTabBlock) return oldTabBlock;
     const reconciliation = await repairCoordinator.reconcile();
     if (!reconciliation.ok) {
       diagnostics.syncStatus = 'repair-pending-local-save';
@@ -139,6 +200,8 @@
     }
     diagnostics.recordedCount = updated.picks.length;
 
+    const resetBeforeWrite = await blockForPendingReset();
+    if (resetBeforeWrite) return resetBeforeWrite;
     if (JSON.stringify(existing?.picks || []) !== JSON.stringify(updated.picks)) {
       await draftStorage.setSession(metadata.sessionKey, updated);
     }
@@ -148,6 +211,10 @@
   }
 
   async function performRepair() {
+    const resetBlock = await blockForPendingReset();
+    if (resetBlock) return resetBlock;
+    const oldTabBlock = await blockForPreResetTab();
+    if (oldTabBlock) return oldTabBlock;
     const reconciliation = await repairCoordinator.reconcile();
     if (!reconciliation.ok) return reconciliation;
     const now = new Date().toISOString();
@@ -178,6 +245,8 @@
     );
     if (!staged.ok) return staged;
 
+    const resetBeforeIntent = await blockForPendingReset();
+    if (resetBeforeIntent) return resetBeforeIntent;
     try {
       await repairCoordinator.begin(metadata.sessionKey, staged.session);
     } catch (error) {
@@ -189,6 +258,12 @@
       };
     }
     const repairResult = await repairCoordinator.reconcile();
+    if (repairResult.discardedByReset) {
+      return {
+        ok: false,
+        error: 'This repair was superseded by a completed mock-draft reset. Reload or explicitly rescan this Yahoo tab.',
+      };
+    }
     if (!repairResult.ok) {
       diagnostics.syncStatus = 'repair-pending-local-save';
       diagnostics.syncError = repairResult.error;
@@ -212,7 +287,25 @@
     };
   }
 
-  function scanNow() {
+  function scanNow(options = {}) {
+    if (options.forceSync === true) {
+      lastSyncedSignature = undefined;
+      diagnostics.syncStatus = 'not-attempted';
+      const precedingOperation = scanInProgress;
+      const operation = (precedingOperation
+        ? precedingOperation.catch(() => undefined)
+        : Promise.resolve())
+        .then(() => operationLock.run(metadata.sessionKey, performScan))
+        .catch((error) => {
+          console.warn('[Yahoo Draft Recorder] Scan failed:', error);
+          return { ...diagnostics, error: error.message };
+        })
+        .finally(() => {
+          if (scanInProgress === operation) scanInProgress = null;
+        });
+      scanInProgress = operation;
+      return operation;
+    }
     if (!scanInProgress) {
       const operation = operationLock.run(metadata.sessionKey, performScan)
         .catch((error) => {
@@ -225,6 +318,20 @@
       scanInProgress = operation;
     }
     return scanInProgress;
+  }
+
+  async function rescanFromMessage(message) {
+    if (message?.resetAt) {
+      const storedResetAt = await draftStorage.getResetAt(metadata.sessionKey);
+      if (
+        storedResetAt === message.resetAt &&
+        Number.isFinite(Date.parse(storedResetAt)) &&
+        Date.now() > Date.parse(storedResetAt)
+      ) {
+        allowedResetAt = storedResetAt;
+      }
+    }
+    return scanNow({ forceSync: message?.forceSync === true });
   }
 
   function repairNow() {
@@ -254,7 +361,7 @@
       return false;
     }
     if (message?.type === 'YAHOO_DRAFT_RECORDER_RESCAN') {
-      scanNow().then(sendResponse);
+      rescanFromMessage(message).then(sendResponse);
       return true;
     }
     if (message?.type === 'YAHOO_DRAFT_RECORDER_REPAIR') {

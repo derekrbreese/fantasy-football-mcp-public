@@ -6,11 +6,277 @@ const { analyzeLedger } = require('../ledger-health.js');
 const {
   commitDraftRepair,
   createDurableRepairCoordinator,
+  createDurableResetCoordinator,
   prepareAutomaticAuthoritativeUpdate,
   repairDraftSession,
+  sameDraftIdentity,
   updateDraftSessionFromAuthoritativeLedger,
   updateDraftSession,
 } = require('../session-store.js');
+
+const RESET_METADATA = {
+  sport: 'f1', leagueId: '10547893', teamId: '6', sessionKey: 'f1:10547893',
+};
+
+test('exact active draft identity includes team ID, not only sport and league', () => {
+  assert.equal(sameDraftIdentity(RESET_METADATA, { ...RESET_METADATA }), true);
+  assert.equal(sameDraftIdentity(RESET_METADATA, { ...RESET_METADATA, teamId: '7' }), false);
+  assert.equal(sameDraftIdentity(RESET_METADATA, { ...RESET_METADATA, sessionKey: 'f1:other' }), false);
+});
+
+function resetHarness(overrides = {}) {
+  let pending = overrides.pending || null;
+  const operations = [];
+  const coordinator = createDurableResetCoordinator({
+    readPending: async () => pending,
+    writePending: async (record) => {
+      operations.push(`write:${record.state}`);
+      pending = record;
+    },
+    clearPending: async () => {
+      operations.push('clear-journal');
+      pending = null;
+    },
+    resetServer: async (snapshot) => {
+      operations.push(`server:${snapshot.updatedAt}`);
+      return {
+        status: 'ok',
+        sessionKey: RESET_METADATA.sessionKey,
+        resetAt: '2026-09-01T23:16:00.000Z',
+        profilePreserved: true,
+      };
+    },
+    finalizeReset: async (_sessionKey, resetAt) => operations.push(`finalize:${resetAt}`),
+    ...overrides,
+  });
+  return { coordinator, getPending: () => pending, operations };
+}
+
+test('successful reset journals intent, resets server, then finalizes browser at server time', async () => {
+  const existing = {
+    ...RESET_METADATA,
+    updatedAt: '2026-09-01T23:15:00.000Z',
+    picks: [{ pickNumber: 1 }],
+  };
+  const { coordinator, getPending, operations } = resetHarness();
+  await coordinator.begin(existing);
+  const result = await coordinator.reconcile();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.profilePreserved, true);
+  assert.equal(getPending(), null);
+  assert.deepEqual(operations, [
+    'write:intent',
+    'server:2026-09-01T23:15:00.000Z',
+    'write:accepted',
+    'finalize:2026-09-01T23:16:00.000Z',
+    'clear-journal',
+  ]);
+});
+
+test('reset intent rejects a mismatched session identity before journaling', async () => {
+  const { coordinator, getPending, operations } = resetHarness();
+  await assert.rejects(
+    coordinator.begin({
+      ...RESET_METADATA,
+      leagueId: 'other',
+      updatedAt: '2026-09-01T23:15:00.000Z',
+    }),
+    /identity/i,
+  );
+  assert.equal(getPending(), null);
+  assert.deepEqual(operations, []);
+});
+
+test('server reset failure preserves exact browser state and error', async () => {
+  const existing = {
+    ...RESET_METADATA,
+    updatedAt: '2026-09-01T23:15:00.000Z',
+    picks: [{ pickNumber: 1 }],
+  };
+  let pending;
+  let finalizeCalls = 0;
+  const { coordinator } = resetHarness({
+    readPending: async () => pending,
+    writePending: async (record) => { pending = record; },
+    resetServer: async () => { throw new Error('Draft changed; rescan before reset.'); },
+    finalizeReset: async () => { finalizeCalls += 1; },
+  });
+  await coordinator.begin(existing);
+  const result = await coordinator.reconcile();
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Draft changed; rescan before reset\./);
+  assert.equal(pending.state, 'intent');
+  assert.equal(finalizeCalls, 0);
+});
+
+test('draft-changed conflict clears reset intent so a rescan can refresh the snapshot', async () => {
+  const existing = {
+    ...RESET_METADATA,
+    updatedAt: '2026-09-01T23:15:00.000Z',
+    picks: [{ pickNumber: 1 }],
+  };
+  let pending;
+  let finalizeCalls = 0;
+  const coordinator = createDurableResetCoordinator({
+    readPending: async () => pending,
+    writePending: async (record) => { pending = record; },
+    clearPending: async () => { pending = null; },
+    resetServer: async () => {
+      const error = new Error('Draft changed; rescan before reset.');
+      error.status = 409;
+      throw error;
+    },
+    finalizeReset: async () => { finalizeCalls += 1; },
+  });
+  await coordinator.begin(existing);
+  const result = await coordinator.reconcile();
+
+  assert.equal(result.ok, false);
+  assert.equal(result.retryAfterRescan, true);
+  assert.equal(pending, null);
+  assert.equal(finalizeCalls, 0);
+});
+
+test('missing server session clears reset intent so a forced resync can recover', async () => {
+  const existing = {
+    ...RESET_METADATA,
+    updatedAt: '2026-09-01T23:15:00.000Z',
+    picks: [{ pickNumber: 1 }],
+  };
+  let pending;
+  const coordinator = createDurableResetCoordinator({
+    readPending: async () => pending,
+    writePending: async (record) => { pending = record; },
+    clearPending: async () => { pending = null; },
+    resetServer: async () => {
+      const error = new Error('Exact live draft session not found');
+      error.status = 404;
+      throw error;
+    },
+    finalizeReset: async () => assert.fail('404 must not clear local state'),
+  });
+  await coordinator.begin(existing);
+  const result = await coordinator.reconcile();
+
+  assert.equal(result.ok, false);
+  assert.equal(result.retryAfterRescan, true);
+  assert.equal(pending, null);
+});
+
+test('invalid reset acknowledgement cannot clear browser state', async () => {
+  const existing = {
+    ...RESET_METADATA,
+    updatedAt: '2026-09-01T23:15:00.000Z',
+    picks: [{ pickNumber: 1 }],
+  };
+  let pending;
+  let finalizeCalls = 0;
+  const { coordinator } = resetHarness({
+    readPending: async () => pending,
+    writePending: async (record) => { pending = record; },
+    resetServer: async () => ({
+      status: 'ok',
+      sessionKey: 'f1:different',
+      resetAt: '2026-09-01T23:16:00.000Z',
+      profilePreserved: true,
+    }),
+    finalizeReset: async () => { finalizeCalls += 1; },
+  });
+  await coordinator.begin(existing);
+  const result = await coordinator.reconcile();
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /invalid reset acknowledgement/i);
+  assert.equal(pending.state, 'intent');
+  assert.equal(finalizeCalls, 0);
+});
+
+test('accepted reset survives reload and retries browser finalization without another POST', async () => {
+  const existing = {
+    ...RESET_METADATA,
+    updatedAt: '2026-09-01T23:15:00.000Z',
+    picks: [{ pickNumber: 1 }],
+  };
+  let pending;
+  let serverCalls = 0;
+  let finalizeCalls = 0;
+  const dependencies = {
+    readPending: async () => pending,
+    writePending: async (record) => { pending = record; },
+    clearPending: async () => { pending = null; },
+    resetServer: async () => {
+      serverCalls += 1;
+      return {
+        status: 'ok',
+        sessionKey: RESET_METADATA.sessionKey,
+        resetAt: '2026-09-01T23:16:00.000Z',
+        profilePreserved: true,
+      };
+    },
+    finalizeReset: async () => {
+      finalizeCalls += 1;
+      if (finalizeCalls === 1) throw new Error('storage unavailable');
+    },
+  };
+  const firstPopup = createDurableResetCoordinator(dependencies);
+  await firstPopup.begin(existing);
+  const result = await firstPopup.reconcile();
+
+  assert.equal(result.ok, false);
+  assert.equal(result.serverAccepted, true);
+  assert.equal(pending.state, 'accepted');
+  assert.match(result.error, /server reset the draft.*retry/i);
+
+  const reloadedPopup = createDurableResetCoordinator(dependencies);
+  const retry = await reloadedPopup.reconcile();
+  assert.equal(retry.ok, true);
+  assert.equal(serverCalls, 1);
+  assert.equal(finalizeCalls, 2);
+  assert.equal(pending, null);
+});
+
+test('accepted-marker failure leaves intent so an idempotent server retry can recover', async () => {
+  const existing = {
+    ...RESET_METADATA,
+    updatedAt: '2026-09-01T23:15:00.000Z',
+    picks: [{ pickNumber: 1 }],
+  };
+  let pending;
+  let writeCalls = 0;
+  let serverCalls = 0;
+  const dependencies = {
+    readPending: async () => pending,
+    writePending: async (record) => {
+      writeCalls += 1;
+      if (writeCalls === 2) throw new Error('marker unavailable');
+      pending = record;
+    },
+    clearPending: async () => { pending = null; },
+    resetServer: async () => {
+      serverCalls += 1;
+      return {
+        status: 'ok',
+        sessionKey: RESET_METADATA.sessionKey,
+        resetAt: '2026-09-01T23:16:00.000Z',
+        profilePreserved: true,
+      };
+    },
+    finalizeReset: async () => undefined,
+  };
+  const coordinator = createDurableResetCoordinator(dependencies);
+  await coordinator.begin(existing);
+  const result = await coordinator.reconcile();
+  assert.equal(result.ok, false);
+  assert.equal(pending.state, 'intent');
+  assert.match(result.error, /durable marker/i);
+
+  const retry = await createDurableResetCoordinator(dependencies).reconcile();
+  assert.equal(retry.ok, true);
+  assert.equal(serverCalls, 2);
+  assert.equal(pending, null);
+});
 
 for (const currentPickNumber of [null, 21]) {
   test(`automatic authoritative scan cannot replace saved pick 50 with visible pick 20 (current pick ${currentPickNumber || 'unavailable'})`, () => {
@@ -328,6 +594,58 @@ test('durable accepted repair survives reload and reconciles before another tab 
     'persist:2:1',
     'auto-scan',
   ]);
+});
+
+test('successful durable repair advances the proven synced revision used by reset', async () => {
+  let pending = null;
+  let storedSession = null;
+  const repaired = {
+    ...RESET_METADATA,
+    updatedAt: '2026-09-01T23:20:00.000Z',
+    lastSyncedAt: '2026-09-01T23:15:00.000Z',
+    picks: [{ pickNumber: 1 }],
+  };
+  const coordinator = createDurableRepairCoordinator({
+    readPending: async () => pending,
+    writePending: async (record) => { pending = record; },
+    clearPending: async () => { pending = null; },
+    syncRepair: async () => undefined,
+    persistSession: async (session) => { storedSession = session; },
+  });
+
+  await coordinator.begin(RESET_METADATA.sessionKey, repaired);
+  const result = await coordinator.reconcile();
+
+  assert.equal(result.ok, true);
+  assert.equal(storedSession.lastSyncedAt, repaired.updatedAt);
+});
+
+test('repair intent written after reset cleanup is discarded without stale sync or deadlock', async () => {
+  let pending = null;
+  let syncCalls = 0;
+  let persistCalls = 0;
+  const staleRepair = {
+    ...RESET_METADATA,
+    updatedAt: '2026-09-01T23:15:00.000Z',
+    picks: [{ pickNumber: 1 }],
+  };
+  const coordinator = createDurableRepairCoordinator({
+    readPending: async () => pending,
+    writePending: async (record) => { pending = record; },
+    clearPending: async () => { pending = null; },
+    isSessionReset: async (session) => session.updatedAt === staleRepair.updatedAt,
+    syncRepair: async () => { syncCalls += 1; },
+    persistSession: async () => { persistCalls += 1; },
+  });
+
+  await coordinator.begin(RESET_METADATA.sessionKey, staleRepair);
+  const result = await coordinator.reconcile();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.discardedByReset, true);
+  assert.equal(pending, null);
+  assert.equal(syncCalls, 0);
+  assert.equal(persistCalls, 0);
 });
 
 test('durable repair intent suppresses stale work and retries marked sync after reload', async () => {

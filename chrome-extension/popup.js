@@ -22,12 +22,14 @@
     diagnostics: document.querySelector('#diagnostics'),
     csv: document.querySelector('#export-csv'),
     json: document.querySelector('#export-json'),
-    clear: document.querySelector('#clear'),
+    reset: document.querySelector('#reset'),
   };
 
   let activeTabId;
   let activeSessionKey;
+  let activeDiagnostics;
   let currentSession;
+  let resetReconciliationInProgress = null;
 
   elements.assistant.hidden = typeof webext.sidebarAction?.open !== 'function';
 
@@ -40,10 +42,10 @@
     return tabs[0];
   }
 
-  async function sendToActiveTab(type) {
+  async function sendToActiveTab(type, details = {}) {
     if (!activeTabId) return null;
     try {
-      return await extensionApi.sendTabMessage(activeTabId, { type });
+      return await extensionApi.sendTabMessage(activeTabId, { type, ...details });
     } catch (_error) {
       return null;
     }
@@ -59,6 +61,10 @@
     cell.textContent = text || '—';
     if (className) cell.className = className;
     row.appendChild(cell);
+  }
+
+  function resetRevision(session) {
+    return session?.lastSyncedAt === undefined ? session?.updatedAt : session.lastSyncedAt;
   }
 
   function render(session, diagnostics) {
@@ -110,7 +116,10 @@
     elements.empty.hidden = picks.length > 0;
     elements.csv.disabled = picks.length === 0;
     elements.json.disabled = picks.length === 0;
-    elements.clear.disabled = !session;
+    const canResetActiveSession = isLive &&
+      YahooDraftSessionStore.sameDraftIdentity(session, diagnostics) &&
+      YahooDraftSyncClient.validIsoTimestamp(resetRevision(session));
+    elements.reset.disabled = !canResetActiveSession;
     elements.rescan.disabled = !isLive;
     elements.repair.disabled = !isLive;
     elements.diagnostics.disabled = !isLive;
@@ -140,19 +149,89 @@
     return Object.values(sessions).sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')))[0];
   }
 
-  async function refresh() {
-    const [sessions, diagnostics] = await Promise.all([
+  function repairCoordinatorFor(sessionKey) {
+    return YahooDraftSessionStore.createDurableRepairCoordinator({
+      readPending: () => draftStorage.getPendingRepair(sessionKey),
+      writePending: (record) => draftStorage.setPendingRepair(sessionKey, record),
+      clearPending: () => draftStorage.clearPendingRepair(sessionKey),
+      isSessionReset: async (session) => {
+        const resetAt = await draftStorage.getResetAt(sessionKey);
+        const sessionTime = Date.parse(session?.updatedAt);
+        const resetTime = Date.parse(resetAt);
+        return Number.isFinite(sessionTime) && Number.isFinite(resetTime) && sessionTime <= resetTime;
+      },
+      syncRepair: async (session) => {
+        const timestamp = YahooDraftAgentContext.validIsoTimestamp(session?.updatedAt);
+        if (!timestamp) throw new Error('Pending repair has no valid snapshot timestamp.');
+        const context = YahooDraftAgentContext.sessionToAgentContext(
+          session,
+          timestamp,
+          { repair: true },
+        );
+        await YahooDraftSyncClient.syncDraftContext(context);
+      },
+      persistSession: (session) => draftStorage.setSession(sessionKey, session),
+    });
+  }
+
+  function resetCoordinatorFor(sessionKey) {
+    return YahooDraftSessionStore.createDurableResetCoordinator({
+      readPending: () => draftStorage.getPendingReset(sessionKey),
+      writePending: (record) => draftStorage.setPendingReset(sessionKey, record),
+      clearPending: () => draftStorage.clearPendingReset(sessionKey),
+      resetServer: (session) => YahooDraftSyncClient.resetDraftSession(session),
+      finalizeReset: (exactSessionKey, resetAt) => {
+        if (exactSessionKey !== sessionKey) throw new Error('Reset acknowledgement changed leagues.');
+        return draftStorage.finalizeReset(sessionKey, resetAt);
+      },
+    });
+  }
+
+  async function reconcilePendingReset(sessionKey, activeIdentity) {
+    if (!sessionKey) return null;
+    const pending = await draftStorage.getPendingReset(sessionKey);
+    if (!pending) return null;
+    if (!YahooDraftSessionStore.sameDraftIdentity(pending.draft, activeIdentity)) {
+      return {
+        ok: false,
+        error: 'A pending reset belongs to a different Yahoo team. Open that exact draft tab to resume it.',
+      };
+    }
+    if (!resetReconciliationInProgress) {
+      resetReconciliationInProgress = operationLock
+        .run(sessionKey, () => resetCoordinatorFor(sessionKey).reconcile())
+        .finally(() => { resetReconciliationInProgress = null; });
+    }
+    return resetReconciliationInProgress;
+  }
+
+  async function refresh(options = {}) {
+    let [sessions, diagnostics] = await Promise.all([
       readSessions(),
       sendToActiveTab('YAHOO_DRAFT_RECORDER_STATUS'),
     ]);
     activeSessionKey = diagnostics?.sessionKey || null;
+    activeDiagnostics = diagnostics || null;
+    let resumedReset = null;
+    if (options.resumeReset !== false && activeSessionKey) {
+      resumedReset = await reconcilePendingReset(activeSessionKey, diagnostics);
+      if (resumedReset?.ok) sessions = await readSessions();
+    }
     const saved = activeSessionKey ? sessions[activeSessionKey] : latestSession(sessions);
     const session = saved || (diagnostics ? {
+      sport: diagnostics.sport,
+      leagueId: diagnostics.leagueId,
+      teamId: diagnostics.teamId,
       sessionKey: diagnostics.sessionKey,
-      leagueId: diagnostics.sessionKey.split(':').slice(1).join(':'),
       picks: [],
     } : null);
     render(session, diagnostics);
+    if (resumedReset?.ok) {
+      setStatus('Reset reconciled safely. The imported profile was preserved; rescan this Yahoo page to begin recording again. Close older tabs for this mock draft.', 'warning');
+    } else if (resumedReset && !resumedReset.ok) {
+      setStatus(resumedReset.error || 'Reset is still pending; retry Reset after checking the local server.', 'error');
+    }
+    return { diagnostics, resumedReset, session };
   }
 
   function download(content, extension, mimeType) {
@@ -168,7 +247,13 @@
 
   elements.rescan.addEventListener('click', async () => {
     setStatus('Scanning the Yahoo draft page…');
-    await sendToActiveTab('YAHOO_DRAFT_RECORDER_RESCAN');
+    const resetAt = activeSessionKey
+      ? await draftStorage.getResetAt(activeSessionKey)
+      : null;
+    await sendToActiveTab('YAHOO_DRAFT_RECORDER_RESCAN', {
+      forceSync: true,
+      ...(resetAt ? { resetAt } : {}),
+    });
     await refresh();
   });
 
@@ -223,11 +308,74 @@
     download(`${JSON.stringify(context, null, 2)}\n`, 'agent-context.json', 'application/json');
   });
 
-  elements.clear.addEventListener('click', async () => {
-    if (!currentSession || !window.confirm('Clear every recorded pick for this draft?')) return;
-    const sessionKey = currentSession.sessionKey;
-    await operationLock.run(sessionKey, () => draftStorage.clearSession(sessionKey));
-    await refresh();
+  elements.reset.addEventListener('click', async () => {
+    if (
+      !activeSessionKey ||
+      !currentSession ||
+      !YahooDraftSessionStore.sameDraftIdentity(currentSession, activeDiagnostics) ||
+      !YahooDraftSyncClient.validIsoTimestamp(resetRevision(currentSession))
+    ) {
+      setStatus('Open the exact Yahoo mock draft tab and rescan it before resetting.', 'error');
+      return;
+    }
+    const confirmed = window.confirm(
+      `Reset recorded picks for active League ${currentSession.leagueId}? This cannot be undone and clears only this exact mock-draft session from the browser and local MCP server. Your imported ranking/profile settings are preserved.`,
+    );
+    if (!confirmed) return;
+
+    const sessionKey = activeSessionKey;
+    setStatus('Resetting this exact mock-draft session…');
+    let result;
+    try {
+      result = await operationLock.run(sessionKey, async () => {
+        const repairResult = await repairCoordinatorFor(sessionKey).reconcile();
+        if (!repairResult.ok) return repairResult;
+
+        const coordinator = resetCoordinatorFor(sessionKey);
+        if (!await coordinator.hasPending()) {
+          const exactSession = await draftStorage.getSession(sessionKey);
+          if (!YahooDraftSessionStore.sameDraftIdentity(exactSession, activeDiagnostics)) {
+            return { ok: false, error: 'The active draft changed before reset. Rescan and try again.' };
+          }
+          await coordinator.begin(exactSession);
+        }
+        return coordinator.reconcile();
+      });
+    } catch (error) {
+      result = { ok: false, error: String(error?.message || error) };
+    }
+
+    if (!result?.ok) {
+      if (result?.retryAfterRescan) {
+        await sendToActiveTab('YAHOO_DRAFT_RECORDER_RESCAN', { forceSync: true });
+      }
+      await refresh({ resumeReset: false });
+      setStatus(result?.error || 'Reset failed without clearing this draft. Retry after checking the local server.', 'error');
+      return;
+    }
+
+    const readyToRescan = await YahooDraftSyncClient.waitUntilAfterReset(result.resetAt);
+    let rescanResult = null;
+    if (readyToRescan) {
+      rescanResult = await sendToActiveTab('YAHOO_DRAFT_RECORDER_RESCAN', {
+        forceSync: true,
+        resetAt: result.resetAt,
+      });
+    }
+    await refresh({ resumeReset: false });
+    if (!readyToRescan || !rescanResult) {
+      setStatus('Reset complete and imported profile preserved. Wait a moment, then reload or rescan this Yahoo page. Close older tabs for the same mock draft.', 'warning');
+      return;
+    }
+    if (rescanResult.error) {
+      setStatus(`Reset complete and imported profile preserved, but the fresh page scan needs attention: ${rescanResult.error} Close older tabs for this mock draft.`, 'warning');
+      return;
+    }
+    if (rescanResult.syncStatus !== 'connected') {
+      setStatus('Reset complete and imported profile preserved. The page was rescanned, but server sync is still offline or pending, so recommendations may not update yet. Keep the server running and rescan again. Close older tabs for this mock draft.', 'warning');
+      return;
+    }
+    setStatus('Reset complete. Imported profile preserved and the current Yahoo page was rescanned from a fresh ledger. Close older tabs for this mock draft.');
   });
 
   webext.storage.onChanged.addListener((changes, area) => {

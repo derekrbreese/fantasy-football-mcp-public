@@ -27,11 +27,11 @@ This does not require Chrome's **Load unpacked** feature:
 4. Select `chrome-extension/manifest.json` from this repository.
 5. Open or reload a Yahoo live draft under `https://football.fantasysports.yahoo.com/draftclient/...`.
 6. Open **Results → Round by Round** once, then click the extension icon and select **Rescan page**.
-7. Use the popup to review, export, or clear recorded picks.
+7. Use the popup to review, export, repair, or reset the exact active mock draft.
 
 ## Draft Assistant sidebar and dashboard
 
-Firefox exposes a persistent **Fantasy Draft Assistant** sidebar. Open the recorder popup and select **Open Draft Assistant**, or use Firefox's sidebar menu. The recorder popup remains the place for scan, repair, export, and Clear controls; the sidebar is a read-only recommendation surface that stays open beside Yahoo. Chrome users can select **Full dashboard** in the popup instead.
+Firefox exposes a persistent **Fantasy Draft Assistant** sidebar. Open the recorder popup and select **Open Draft Assistant**, or use Firefox's sidebar menu. The recorder popup remains the place for scan, repair, export, and exact-session mock-reset controls; the sidebar is a read-only recommendation surface that stays open beside Yahoo. Chrome users can select **Full dashboard** in the popup instead.
 
 The sidebar selects a league only from the active Yahoo draft tab or an explicit league choice. It never silently falls back to the newest saved league. Select a strategy and use **Refresh recommendations** to request the top five options. Each card shows roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, an explicitly uncalibrated confidence, and explicitly uncalibrated heuristic/simulation probabilities. The panel also surfaces exact ledger blockers and prominently degrades stale state, inferred team counts, unresolved drafted identities, unavailable roster settings, and unknown injury/news data. It never injects UI into Yahoo and never selects or drafts a player.
 
@@ -52,7 +52,30 @@ allowlisted FantasyPros injury/news attribution and recent headlines. Provider c
 remain server-side; the extension never receives the key. Missing, unresolved, stale,
 or API-tier-limited evidence is shown as unknown/limited rather than healthy.
 
-If the popup reports a ledger problem, it lists the exact missing pick numbers, duplicate pick numbers, and sanitized details/count for unnumbered observations. Missing and duplicate numbers come from the coherent raw authoritative table and remain present in the saved and server-bound pick list; saved-session observations supply the unnumbered details. Conflicting or malformed Yahoo tables show an explicit recovery error instead of appearing healthy, and leaving the authoritative table clears its raw scan status without erasing saved defects. An automatic scan never replaces a saved ledger with a shorter visible prefix, even when Yahoo’s current-pick text makes that prefix look current; it retains and does not sync the saved state and directs the user to explicit repair. While the complete current **Results → Round by Round** ledger is visible, select **Full rescan & repair** and confirm the replacement. The recorder stages a replacement only when every nonempty result row has the expected three-cell Yahoo shape and parses safely, responsive table copies agree, the numbered result is contiguous and unique, and—when Yahoo exposes the current pick—the ledger ends immediately before it. A repair that would lower the saved maximum additionally requires that live current-pick evidence, so it is unavailable while Yahoo is paused or otherwise hides the current pick. The recorder then sends the staged context to the local server with an explicit repair marker and saves it in browser storage only after the server accepts it. Server rejection or unavailability leaves the exact saved browser session unchanged. A durable per-league repair journal survives reloads and sibling tabs; if server acceptance or browser persistence is interrupted, the recorder blocks stale work and reconciles that journal before any further scan or ordinary sync. Same-league scans and repairs are serialized across Yahoo tabs, while independent per-league storage keys prevent another league from being overwritten. Clear atomically records a timestamped league tombstone and removes its pending repair journal; a pre-Clear scan or repair that writes afterward remains hidden, while a genuinely later scan can resume recording. Legacy aggregate cleanup is separately serialized in the extension context so concurrent league clears preserve unrelated drafts. Legacy aggregate sessions remain readable and migrate safely on their next update. Recommendations remain blocked until the authoritative ledger passes those checks.
+## Mock-draft reset and ledger repair
+
+These controls have different purposes:
+
+1. Use **Reset mock draft** when starting a test over. Keep the local server running,
+   open the exact Yahoo mock-draft tab, close older tabs for the same mock/session, and
+   confirm Reset in the popup. Reset is disabled for a merely saved/latest draft.
+2. The popup first reconciles any durable repair, records a durable reset intent, and
+   asks the loopback server to reset only the active sport/league/team/session at the
+   exact last-synced timestamp. A changed draft returns an error without deleting it;
+   rescan and confirm Reset again.
+3. After server acceptance, browser picks, the pending repair journal, and legacy data
+   for only that session are cleared behind a server-timestamped tombstone. The separate
+   imported DraftSheets profile is preserved. Interrupted reset cleanup resumes when
+   the popup is reopened, while all scans and sync remain blocked behind its journal.
+4. The popup waits until a fresh browser timestamp is strictly later than the server
+   reset, then rescans the current Yahoo page. If the page cannot be rescanned, wait a
+   moment and use **Rescan page**. A new/empty mock begins clean; an in-progress page
+   correctly rebuilds from the picks Yahoo currently shows.
+5. Use **Full rescan & repair** instead when you want to keep the current draft but fix
+   gaps, duplicates, unnumbered observations, or a phantom high pick. Open the complete
+   **Results → Round by Round** table before confirming repair.
+
+If the popup reports a ledger problem, it lists the exact missing pick numbers, duplicate pick numbers, and sanitized details/count for unnumbered observations. Missing and duplicate numbers come from the coherent raw authoritative table and remain present in the saved and server-bound pick list; saved-session observations supply the unnumbered details. Conflicting or malformed Yahoo tables show an explicit recovery error instead of appearing healthy, and leaving the authoritative table clears its raw scan status without erasing saved defects. An automatic scan never replaces a saved ledger with a shorter visible prefix, even when Yahoo’s current-pick text makes that prefix look current; it retains and does not sync the saved state and directs the user to explicit repair. While the complete current **Results → Round by Round** ledger is visible, select **Full rescan & repair** and confirm the replacement. The recorder stages a replacement only when every nonempty result row has the expected three-cell Yahoo shape and parses safely, responsive table copies agree, the numbered result is contiguous and unique, and—when Yahoo exposes the current pick—the ledger ends immediately before it. A repair that would lower the saved maximum additionally requires that live current-pick evidence, so it is unavailable while Yahoo is paused or otherwise hides the current pick. The recorder then sends the staged context to the local server with an explicit repair marker and saves it in browser storage only after the server accepts it. Server rejection or unavailability leaves the exact saved browser session unchanged. Durable per-league repair and reset journals survive reloads and sibling tabs; if server acceptance or browser persistence is interrupted, the recorder blocks stale work and reconciles that journal before any further scan or ordinary sync. Same-league scans and repairs are serialized across Yahoo tabs, while independent per-league storage keys prevent another league from being overwritten. Reset uses the server's reset time for its exact-league tombstone and removes that league's pending repair state; any pre-reset scan or repair written afterward remains hidden/rejected, while a genuinely later rescan can begin again. Legacy aggregate cleanup is separately serialized in the extension context so concurrent league resets preserve unrelated drafts. Legacy aggregate sessions remain readable and migrate safely on their next update. Recommendations remain blocked until the authoritative ledger passes those checks.
 
 After changing the code, use **Reload** for the add-on in `about:debugging`, then reload the Yahoo draft tab.
 
@@ -91,7 +114,7 @@ CSV remains available for spreadsheet use.
 - Pick history stays in the current browser profile and, when local sync is available, in the user-owned MCP state file on the same computer.
 - No draft data is sent to Yahoo beyond normal page use, to the extension developer, or to any third party.
 - The extension does not store or sync the draft URL, Yahoo cookies, the `auth` query parameter, or Yahoo credentials.
-- Host access is limited to Yahoo's `/draftclient/` pages and loopback draft sync/recommendation/dashboard routes.
+- Host access is limited to Yahoo's `/draftclient/` pages and loopback draft sync/reset/recommendation/dashboard routes.
 
 ## Yahoo layout changes
 
@@ -109,4 +132,4 @@ No package installation is required; the tests use Node's built-in test runner.
 npm --prefix chrome-extension test
 ```
 
-The tests cover URL sanitization, fixture-based Round-by-Round parsing and unexpected cell shapes, privacy-minimal diagnostics, authoritative duplicate/gap persistence into agent context, raw/saved ledger-health merging, exact ledger issue reporting, guarded and durable full repair, cross-league storage interleaving, same-league tab serialization, reload reconciliation, duplicate merging, local session updates, loopback sync and recommendation requests, explicit league selection, bounded recommendation view-models, inert text-only rendering, DOM snapshotting, Firefox/Chrome API compatibility, and CSV/JSON export safety.
+The tests cover URL sanitization, fixture-based Round-by-Round parsing and unexpected cell shapes, privacy-minimal diagnostics, authoritative duplicate/gap persistence into agent context, raw/saved ledger-health merging, exact ledger issue reporting, guarded and durable full repair/reset, cross-league storage interleaving, same-league tab serialization, reload reconciliation, duplicate merging, local session updates, loopback sync/reset/recommendation requests, explicit league selection, bounded recommendation view-models, inert text-only rendering, DOM snapshotting, Firefox/Chrome API compatibility, and CSV/JSON export safety.

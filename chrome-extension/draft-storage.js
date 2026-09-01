@@ -5,6 +5,7 @@
   const SESSION_PREFIX = 'yahooDraftRecorderSession:';
   const TOMBSTONE_PREFIX = 'yahooDraftRecorderSessionDeleted:';
   const PENDING_REPAIR_PREFIX = 'yahooDraftRecorderPendingRepair:';
+  const PENDING_RESET_PREFIX = 'yahooDraftRecorderPendingReset:';
 
   function suffix(prefix, sessionKey) {
     return `${prefix}${encodeURIComponent(sessionKey)}`;
@@ -19,11 +20,27 @@
     }
   }
 
+  function timestampMillis(value) {
+    if (typeof value !== 'string' || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) return null;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function isTabBlockedByReset(contentLoadedAt, resetAt, allowedResetAt) {
+    const resetTime = timestampMillis(resetAt);
+    if (resetTime === null) return false;
+    const loadedTime = timestampMillis(contentLoadedAt);
+    if (loadedTime === null) return true;
+    if (loadedTime > resetTime) return false;
+    return allowedResetAt !== resetAt;
+  }
+
   function createDraftStorage(extensionApi, options = {}) {
     const operationLock = createSessionOperationLock(options.lockManager);
     const sessionStorageKey = (sessionKey) => suffix(SESSION_PREFIX, sessionKey);
     const tombstoneStorageKey = (sessionKey) => suffix(TOMBSTONE_PREFIX, sessionKey);
     const pendingRepairStorageKey = (sessionKey) => suffix(PENDING_REPAIR_PREFIX, sessionKey);
+    const pendingResetStorageKey = (sessionKey) => suffix(PENDING_RESET_PREFIX, sessionKey);
 
     async function readValue(key) {
       const result = await extensionApi.storageGet(key);
@@ -52,6 +69,11 @@
       const legacy = await readValue(LEGACY_SESSIONS_KEY);
       const legacySession = legacy?.[sessionKey];
       return isVisibleAfterClear(legacySession, tombstone) ? legacySession : null;
+    }
+
+    async function getResetAt(sessionKey) {
+      const tombstone = await readValue(tombstoneStorageKey(sessionKey));
+      return clearedAtFromTombstone(tombstone);
     }
 
     async function listSessions() {
@@ -87,7 +109,7 @@
       });
     }
 
-    async function clearSession(sessionKey, clearedAt = new Date().toISOString()) {
+    async function clearSessionData(sessionKey, clearedAt) {
       await extensionApi.storageSet({
         [sessionStorageKey(sessionKey)]: null,
         [tombstoneStorageKey(sessionKey)]: { clearedAt },
@@ -106,6 +128,14 @@
       });
     }
 
+    function clearSession(sessionKey, clearedAt = new Date().toISOString()) {
+      return clearSessionData(sessionKey, clearedAt);
+    }
+
+    function finalizeReset(sessionKey, resetAt) {
+      return clearSessionData(sessionKey, resetAt);
+    }
+
     async function getPendingRepair(sessionKey) {
       const pending = await readValue(pendingRepairStorageKey(sessionKey));
       return pending && typeof pending === 'object' ? pending : null;
@@ -119,13 +149,31 @@
       return extensionApi.storageSet({ [pendingRepairStorageKey(sessionKey)]: null });
     }
 
+    async function getPendingReset(sessionKey) {
+      const pending = await readValue(pendingResetStorageKey(sessionKey));
+      return pending && typeof pending === 'object' ? pending : null;
+    }
+
+    function setPendingReset(sessionKey, pending) {
+      return extensionApi.storageSet({ [pendingResetStorageKey(sessionKey)]: pending });
+    }
+
+    function clearPendingReset(sessionKey) {
+      return extensionApi.storageSet({ [pendingResetStorageKey(sessionKey)]: null });
+    }
+
     return {
       clearPendingRepair,
+      clearPendingReset,
       clearSession,
+      finalizeReset,
       getPendingRepair,
+      getPendingReset,
+      getResetAt,
       getSession,
       listSessions,
       setPendingRepair,
+      setPendingReset,
       setSession,
     };
   }
@@ -135,7 +183,8 @@
       key === LEGACY_SESSIONS_KEY ||
       key.startsWith(SESSION_PREFIX) ||
       key.startsWith(TOMBSTONE_PREFIX) ||
-      key.startsWith(PENDING_REPAIR_PREFIX)
+      key.startsWith(PENDING_REPAIR_PREFIX) ||
+      key.startsWith(PENDING_RESET_PREFIX)
     ));
   }
 
@@ -156,11 +205,13 @@
   const api = {
     LEGACY_SESSIONS_KEY,
     PENDING_REPAIR_PREFIX,
+    PENDING_RESET_PREFIX,
     SESSION_PREFIX,
     TOMBSTONE_PREFIX,
     createDraftStorage,
     createSessionOperationLock,
     isRelevantStorageChange,
+    isTabBlockedByReset,
   };
   globalScope.YahooDraftStorage = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
