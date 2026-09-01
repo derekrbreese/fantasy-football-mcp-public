@@ -79,6 +79,8 @@ enhanced_mcp_*.py
 !chrome-extension/tests/**
 !tests/
 !tests/test_live_draft_store.py
+!tests/test_local_draft_profile_store.py
+!tests/unit/test_fantasypros_provider.py
 !tests/unit/test_live_draft_recommender.py
 !tests/unit/test_live_draft_recommendation_service.py
 

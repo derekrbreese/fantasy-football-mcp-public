@@ -9,6 +9,9 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      # Render provides the external access boundary; local runs remain loopback-only.
+      - key: HOST
+        value: 0.0.0.0
       - key: DEBUG
         value: true
       - key: ALLOWED_REDIRECT_URIS

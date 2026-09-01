@@ -56,6 +56,18 @@ pip install -r requirements.txt
 
 Copy `.env.example` to `.env` and provide your Yahoo developer credentials. Do not commit `.env`, Yahoo token JSON files, OAuth state, refresh tokens, or other authentication artifacts.
 
+Live-draft recommendations can run without Yahoo Fantasy API approval after a local
+DraftSheets/CSV/JSON profile is imported from the private dashboard. For timestamped
+injury and recent-news evidence, set the optional FantasyPros public API key in the
+same ignored `.env` file:
+
+```env
+FANTASY_PROS_API=...
+```
+
+The key is sent only in the `x-api-key` header to FantasyPros. It is never returned,
+logged, placed in browser storage, or written to either local draft-state file.
+
 ## Yahoo API access
 
 Creating a Yahoo developer application is no longer sufficient by itself to use the Fantasy Sports API. Apply for Fantasy API access through Yahoo's developer access process and associate the approval with your existing client ID.
@@ -82,7 +94,21 @@ The optional [Yahoo Fantasy Draft Recorder](chrome-extension/README.md) works in
 
 When this FastMCP server is running locally on port 8765 (`HOST=127.0.0.1 PORT=8765 python fastmcp_server.py`), the extension also syncs sanitized draft context to a loopback-only endpoint. Agents can call `ff_get_live_draft_state` to retrieve every pick, your roster, and rosters grouped by fantasy team before advising on the next selection. Local server state is written to `~/.fantasy-football-mcp/live-drafts.json` with user-only permissions.
 
-Call `ff_get_live_draft_recommendation` with a Yahoo `league_key` during the draft. One in-process orchestrator filters drafted players and combines focused value, roster-construction, positional-run, opponent-survival, risk/news, deterministic simulation, and critic components. It returns a primary pick, alternatives, confidence, estimated return probability, roster impact, risks, and a contingency. The opponent and simulation probabilities are explicitly labeled as uncalibrated heuristics; optional news is used only when a ranking source includes timestamped attribution, and missing news is reported as unknown rather than healthy. Recommendations are blocked when the pick ledger is incomplete, duplicated, or unnumbered.
+Firefox also provides a persistent **Draft Assistant** sidebar for top-five recommendations alongside Yahoo, while the recorder popup keeps scan, repair, export, and Clear controls. The sidebar uses only the active Yahoo draft league or an explicit saved-league choice; it never silently selects the newest session. A wider loopback-only dashboard at `http://127.0.0.1:8765/draft-dashboard` provides a configurable board of up to twenty candidates, roster construction, recent draft history, specialist comparisons, critic checks, and data-source diagnostics. Both surfaces share the same safe text-only renderer, show exact ledger blockers and uncertainty/degradation labels, and are recommendation-only: they never inject controls into Yahoo or draft a player.
+
+The dashboard can also import a league-bound local draft profile. The supported
+DraftSheets 2026 workbook is parsed in memory, reduced to the top 500 allowlisted ECR
+rows and roster settings, and then discarded; CSV/JSON inputs are allowlisted in the
+browser before posting. Raw workbooks are limited to 2 MB and never persist, and
+filenames, URLs, formulas, notes, and arbitrary cells are excluded. Sanitized profiles
+are isolated by the recorder's exact sport/league/team/session identity and stored at
+`~/.fantasy-football-mcp/draft-profiles.json` with user-only permissions. When an exact
+profile exists, recommendations use its rankings and league settings and make zero
+Yahoo API calls. Yahoo remains a fallback only when no matching profile exists.
+
+The UI sends only an allowlisted league ID and bounded strategy/count/ranking/simulation settings to `POST /draft-recommendation`; it never resends the ledger, team ID, session key, credentials, cookies, page URLs, query parameters, or arbitrary browser fields. The server independently resolves exactly one saved session. It either loads an exact-identity local profile, or resolves the Yahoo league key, verifies the authenticated Yahoo team, and serializes Yahoo calls before bounded deterministic scoring. It rechecks both the draft snapshot and selected profile after scoring and suppresses every candidate if either changed. The route accepts only loopback clients with an exact local-dashboard or extension origin and returns no-store responses.
+
+Call `ff_get_live_draft_recommendation` with `league_id` during an API-free draft, or with a Yahoo `league_key` when using the Yahoo fallback. One in-process orchestrator filters drafted players and combines focused value, roster-construction, positional-run, opponent-survival, risk/news, deterministic simulation, and critic components. It returns a primary pick, alternatives, confidence, estimated return probability, roster impact, risks, recent allowlisted headlines, and a contingency. FantasyPros calls happen only in the service layer and are cached and bounded; the scorer accepts only attributed fresh status and structured news categories and never interprets arbitrary article text. Current injury status uses a recent provider snapshot, recent news expires by publication time, limited provider coverage is explicit, and every missing/unresolved/stale record remains unknown. Unknown per-player risk is removed from that candidate's weights rather than treated as healthy or neutral. The opponent and simulation probabilities are explicitly labeled as uncalibrated heuristics. Recommendations are blocked when the pick ledger is incomplete, duplicated, or unnumbered.
 
 For Firefox, load `chrome-extension/manifest.json` from **This Firefox** in `about:debugging`. See the extension README for full setup, privacy, persistence, and testing instructions.
 

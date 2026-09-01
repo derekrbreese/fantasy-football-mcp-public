@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Yahoo Fantasy Draft Recorder",
-  "description": "Records Yahoo Fantasy Football draft picks locally and shares live draft context with a local MCP server.",
-  "version": "0.3.8",
+  "description": "Records Yahoo Fantasy Football draft picks locally and shows private recommendations from a local MCP server.",
+  "version": "0.4.0",
   "browser_specific_settings": {
     "gecko": {
       "id": "yahoo-draft-recorder@fantasy-football-mcp",
@@ -20,6 +20,11 @@
   "action": {
     "default_title": "Yahoo Draft Recorder",
     "default_popup": "popup.html"
+  },
+  "sidebar_action": {
+    "default_title": "Fantasy Draft Assistant",
+    "default_panel": "assistant.html",
+    "open_at_install": false
   },
   "content_scripts": [
     {

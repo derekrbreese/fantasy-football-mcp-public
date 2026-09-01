@@ -13,6 +13,11 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Conservative player resolution, stale-state warnings, and incomplete-ledger blocking.
 - Popup ledger diagnostics with exact missing, duplicate, and sanitized unnumbered-pick details, plus guarded authoritative full repair.
 - Per-league browser storage and durable, cross-tab repair reconciliation without aggregate session-map races.
+- Persistent Firefox Draft Assistant sidebar with explicit league selection, shared fail-closed recommendation components, and no Yahoo-page injection or draft actions.
+- Loopback-only local dashboard with a configurable recommendation board, roster and draft-history views, specialist comparisons, critic checks, and data-source diagnostics.
+- Exact-session local DraftSheets/JSON profile import with bounded parsing, private atomic storage, and zero Yahoo API calls when a matching profile is available.
+- Optional bounded FantasyPros injury/news enrichment with explicit free-tier coverage, freshness, attribution, and per-player unknown-data weighting.
+- Strict local recommendation UI boundary: allowlisted bounded requests, exact saved/Yahoo league resolution, authenticated-team verification, serialized Yahoo calls, post-scoring snapshot revalidation, and no-store responses.
 - Uncalibrated labels for heuristic probabilities and confidence.
 - Passing Python and extension test suites for the delivered paths.
 
@@ -27,11 +32,12 @@ This list separates the delivered live-draft baseline from prioritized follow-up
    - Use IDs before conservative normalized-name matching; add fixtures for suffixes, same-surname players, trades, and DST aliases.
 
 3. **Auditable injury/news enrichment**
-   - Add an optional provider contract containing normalized status, source, source timestamp, and retrieval timestamp.
-   - Expire stale reports and distinguish unavailable feed, unknown player, and known healthy status.
+   - Delivered the optional provider contract with normalized status, source/item/snapshot timestamps, bounded caches and identity lookups, explicit limited-coverage warnings, and unknown-data semantics.
+   - Next, evaluate identity coverage and freshness behavior against completed draft snapshots before treating provider coverage as comprehensive.
 
 4. **Scoring-settings fidelity**
-   - Incorporate passing-touchdown values, reception scoring, TE premiums, keeper costs, and custom roster eligibility into value and roster scoring.
+   - Roster-slot and team-count import is delivered for the local DraftSheets path.
+   - Incorporate passing-touchdown values, reception scoring, TE premiums, keeper costs, and custom roster eligibility into value and roster scoring; imported point values are not yet modeled directly.
 
 ## P1 — recommendation quality and latency
 

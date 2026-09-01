@@ -15,6 +15,8 @@
     empty: document.querySelector('#empty-state'),
     ledgerHealth: document.querySelector('#ledger-health'),
     ledgerIssues: document.querySelector('#ledger-issues'),
+    assistant: document.querySelector('#open-assistant'),
+    dashboard: document.querySelector('#open-dashboard'),
     rescan: document.querySelector('#rescan'),
     repair: document.querySelector('#repair'),
     diagnostics: document.querySelector('#diagnostics'),
@@ -26,6 +28,8 @@
   let activeTabId;
   let activeSessionKey;
   let currentSession;
+
+  elements.assistant.hidden = typeof webext.sidebarAction?.open !== 'function';
 
   async function readSessions() {
     return draftStorage.listSessions();
@@ -61,6 +65,9 @@
     currentSession = session;
     const picks = session?.picks || [];
     const isLive = Boolean(diagnostics?.sessionKey);
+    const activeLeagueId = isLive && session?.sessionKey === diagnostics.sessionKey
+      ? session?.leagueId
+      : null;
 
     elements.indicator.classList.toggle('live', isLive);
     elements.indicator.title = isLive ? 'Watching this Yahoo draft' : 'No Yahoo draft detected';
@@ -107,6 +114,9 @@
     elements.rescan.disabled = !isLive;
     elements.repair.disabled = !isLive;
     elements.diagnostics.disabled = !isLive;
+    elements.dashboard.href = activeLeagueId && /^\d{1,32}$/.test(activeLeagueId)
+      ? `http://127.0.0.1:8765/draft-dashboard#leagueId=${encodeURIComponent(activeLeagueId)}`
+      : 'http://127.0.0.1:8765/draft-dashboard';
 
     if (!isLive) {
       setStatus(session ? 'Showing a saved draft. Open its Yahoo draft page to resume recording.' : 'Open a Yahoo live draft to begin recording.');
@@ -160,6 +170,21 @@
     setStatus('Scanning the Yahoo draft page…');
     await sendToActiveTab('YAHOO_DRAFT_RECORDER_RESCAN');
     await refresh();
+  });
+
+  elements.assistant.addEventListener('click', () => {
+    try {
+      const opening = webext.sidebarAction?.open?.();
+      if (opening === undefined && typeof webext.sidebarAction?.open !== 'function') {
+        setStatus('The persistent sidebar is unavailable in this browser. Use Full dashboard instead.', 'warning');
+        return;
+      }
+      Promise.resolve(opening)
+        .then(() => window.close())
+        .catch((error) => setStatus(`Could not open Draft Assistant: ${String(error?.message || error)}`, 'error'));
+    } catch (error) {
+      setStatus(`Could not open Draft Assistant: ${String(error?.message || error)}`, 'error');
+    }
   });
 
   elements.repair.addEventListener('click', async () => {

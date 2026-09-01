@@ -159,6 +159,10 @@ def rankings() -> list[dict]:
             "average_draft_position": 14.0,
             "rank": 10,
             "injury_status": "Questionable",
+            "injury_source": "FantasyPros",
+            "injury_updated_at": datetime.now(timezone.utc).isoformat(),
+            "injury_fresh": True,
+            "retrievedAt": datetime.now(timezone.utc).isoformat(),
         },
         {
             "name": "Patrick Mahomes",
@@ -267,7 +271,114 @@ def test_risk_news_treats_missing_status_as_unknown_not_healthy() -> None:
     )
     assert lamb["risk"]["status"] == "unknown"
     assert achane["risk"]["status"] == "questionable"
-    assert achane["scores"]["riskNews"] < lamb["scores"]["riskNews"]
+    assert lamb["scores"]["riskNews"] is None
+    assert lamb["effectiveWeights"]["riskNews"] == 0
+    assert achane["scores"]["riskNews"] == 42
+    assert achane["effectiveWeights"]["riskNews"] > 0
+
+
+def test_stale_or_unattributed_injury_status_is_unknown_and_not_scored() -> None:
+    candidates = rankings()
+    player = next(item for item in candidates if item["name"] == "CeeDee Lamb")
+    player.update(
+        {
+            "injury_status": "Out",
+            "injury_source": "FantasyPros",
+            "injury_updated_at": "2026-01-01T00:00:00Z",
+            "injury_fresh": False,
+        }
+    )
+
+    result = LiveDraftRecommendationEngine(simulations=8).recommend(
+        live_context(), candidates, {"teams": 4}, count=6
+    )
+
+    lamb = next(
+        item for item in result["recommendations"] if item["player"]["name"] == "CeeDee Lamb"
+    )
+    assert lamb["risk"] == {
+        "status": "unknown",
+        "source": "FantasyPros",
+        "updatedAt": "2026-01-01T00:00:00Z",
+        "fresh": False,
+        "available": False,
+        "basis": "unknown",
+        "injuryFresh": False,
+        "newsFresh": False,
+        "recentNews": [],
+    }
+    assert lamb["scores"]["riskNews"] is None
+    assert lamb["effectiveWeights"]["riskNews"] == 0
+
+
+def test_scorer_independently_rejects_old_snapshot_even_when_fresh_flag_is_true() -> None:
+    candidates = rankings()
+    player = next(item for item in candidates if item["name"] == "CeeDee Lamb")
+    player.update(
+        {
+            "injury_status": "out",
+            "injury_source": "FantasyPros",
+            "injury_updated_at": "2026-01-01T00:00:00Z",
+            "injury_snapshot_at": "2026-01-01T00:00:00Z",
+            "injury_fresh": True,
+        }
+    )
+
+    result = LiveDraftRecommendationEngine(simulations=0).recommend(
+        live_context(),
+        candidates,
+        {"teams": 4},
+        count=6,
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    lamb = next(
+        item for item in result["recommendations"] if item["player"]["name"] == "CeeDee Lamb"
+    )
+    assert lamb["risk"]["status"] == "unknown"
+    assert lamb["risk"]["fresh"] is False
+    assert lamb["scores"]["riskNews"] is None
+
+
+def test_recent_news_category_is_evaluated_without_scoring_headline_text() -> None:
+    candidates = rankings()
+    player = next(item for item in candidates if item["name"] == "CeeDee Lamb")
+    player.update(
+        {
+            "news_source": "FantasyPros",
+            "news_updated_at": datetime.now(timezone.utc).isoformat(),
+            "news_fresh": True,
+            "recentNews": [
+                {
+                    "headline": "Returns to team drills",
+                    "category": "Injuries",
+                    "publishedAt": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+        }
+    )
+
+    result = LiveDraftRecommendationEngine(simulations=8).recommend(
+        live_context(), candidates, {"teams": 4}, count=6
+    )
+
+    lamb = next(
+        item for item in result["recommendations"] if item["player"]["name"] == "CeeDee Lamb"
+    )
+    assert result["capabilities"]["externalNews"] is True
+    assert lamb["risk"]["status"] == "unknown"
+    assert lamb["risk"]["newsFresh"] is True
+    assert lamb["risk"]["recentNews"] == [
+        {
+            "headline": "Returns to team drills",
+            "category": "Injuries",
+            "publishedAt": lamb["risk"]["recentNews"][0]["publishedAt"],
+        }
+    ]
+    assert lamb["scores"]["riskNews"] == 48
+    assert lamb["effectiveWeights"]["riskNews"] > 0
+    assert lamb["risk"]["basis"] == "recent-news-category"
+    assert any("headline text was not scored" in reason for reason in lamb["reasoning"])
 
 
 def test_custom_roster_positions_raise_superflex_qb_priority() -> None:
@@ -354,6 +465,19 @@ def test_simulation_budget_is_bounded() -> None:
     )
 
     assert result["specialists"]["scenarioSimulator"]["simulations"] == 512
+
+
+def test_oversized_authoritative_team_count_is_bounded_before_projections() -> None:
+    result = LiveDraftRecommendationEngine(simulations=0).recommend(
+        live_context(), rankings(), {"teams": 1_000_000_000}, count=1
+    )
+
+    assert result["state"]["teamCount"] == 20
+    assert result["state"]["health"]["teamCountSource"] == "league-clamped"
+    assert result["state"]["picksUntilUserTurn"] is not None
+    assert result["state"]["picksUntilUserTurn"] <= 39
+    assert result["status"] == "degraded"
+    assert any("clamped" in warning.lower() for warning in result["warnings"])
 
 
 def test_naive_generated_time_is_treated_as_utc() -> None:

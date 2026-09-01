@@ -9,9 +9,13 @@ This module wraps the existing Yahoo Fantasy Football tooling defined in
 
 import json
 import os
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Literal, Optional, Sequence, Union
+from urllib.parse import urlsplit
 
 from fastmcp import Context, FastMCP
 from mcp.types import ContentBlock, TextContent
@@ -20,6 +24,12 @@ from starlette.responses import JSONResponse, Response
 
 import fantasy_football_multi_league
 from src.services.live_draft_recommendation_service import get_live_draft_recommendation
+from src.services.local_draft_profile_store import (
+    LocalDraftProfileValidationError,
+    profile_from_draftsheets_xlsx,
+    sanitize_local_draft_profile,
+    save_local_draft_profile,
+)
 from src.services.live_draft_store import LiveDraftValidationError, load_live_draft, save_live_draft
 
 # REMOVED: enhanced_mcp_tools imports - no longer using wrapper tools
@@ -96,7 +106,9 @@ _TOOL_PROMPTS: Dict[str, str] = {
     ),
     "ff_get_live_draft_recommendation": (
         "Get one low-latency next-pick answer from the synced Yahoo draft ledger. "
-        "Runs value, roster, dynamics, opponent, risk/news, simulation, and critic specialists."
+        "Uses an exact-session local profile when available, with Yahoo as fallback, "
+        "then runs value, roster, dynamics, opponent, risk/news, simulation, and critic "
+        "specialists."
     ),
     "ff_get_waiver_wire": (
         "List waiver-wire candidates sorted by rank, points, or trends to aid "
@@ -639,15 +651,16 @@ async def ff_get_live_draft_state(
 @server.tool(
     name="ff_get_live_draft_recommendation",
     description=(
-        "Recommend the next pick from the private live Yahoo ledger and current Yahoo "
-        "rankings. Returns a primary pick, alternatives, confidence, return probability, "
-        "roster impact, risks, specialist details, and a contingency plan."
+        "Recommend the next pick from the private live Yahoo ledger and an exact-session "
+        "local draft profile when available, with Yahoo as the authenticated fallback. "
+        "Returns a primary pick, alternatives, confidence, return probability, roster "
+        "impact, risks, specialist details, and a contingency plan."
     ),
     meta=_tool_meta("ff_get_live_draft_recommendation"),
 )
 async def ff_get_live_draft_recommendation(
     ctx: Context,
-    league_key: str,
+    league_key: Optional[str] = None,
     league_id: Optional[str] = None,
     strategy: Literal["conservative", "aggressive", "balanced"] = "balanced",
     count: int = 5,
@@ -683,11 +696,211 @@ _ALLOWED_DRAFT_SYNC_ORIGINS = (
     "chrome-extension://",
 )
 
+_DRAFT_RECOMMENDATION_MAX_BODY = 4_096
+_DRAFT_PROFILE_MAX_BODY = 512_000
+_DRAFT_PROFILE_XLSX_MAX_BODY = 2_000_000
+_DRAFT_RECOMMENDATION_FIELDS = frozenset(
+    {"schemaVersion", "leagueId", "strategy", "count", "rankingCount", "simulations"}
+)
+_DRAFT_PROFILE_FIELDS = frozenset(
+    {
+        "schemaVersion",
+        "leagueId",
+        "importedAt",
+        "format",
+        "asOf",
+        "rankings",
+        "leagueSettings",
+    }
+)
+_DRAFT_PROFILE_FORMATS = frozenset({"draftsheets-2026", "csv", "json"})
+_DRAFT_PROFILE_XLSX_MEDIA_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+_DRAFT_PROFILE_ROSTER_ORDER = (
+    "QB",
+    "RB",
+    "WR",
+    "TE",
+    "FLEX",
+    "SUPERFLEX",
+    "K",
+    "DST",
+    "BN",
+    "IR",
+)
+_DRAFT_LEAGUE_ID = re.compile(r"^\d{1,32}$")
+_DRAFT_EXTENSION_ORIGIN = re.compile(
+    r"^(?:moz|chrome)-extension://[A-Za-z0-9._-]{1,128}$"
+)
+_DRAFT_DASHBOARD_DIRECTORY = Path(__file__).resolve().parent / "src" / "dashboard"
+_DRAFT_SHARED_UI_DIRECTORY = Path(__file__).resolve().parent / "chrome-extension"
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
 
 def _is_allowed_draft_sync_origin(origin: str) -> bool:
     return origin == _ALLOWED_DRAFT_SYNC_ORIGINS[0] or origin.startswith(
         _ALLOWED_DRAFT_SYNC_ORIGINS[1:]
     )
+
+
+def _is_loopback_request(request: Request) -> bool:
+    client_host = request.client.host if request.client else ""
+    return client_host in _LOOPBACK_HOSTS
+
+
+def _is_same_loopback_origin(request: Request, origin: str) -> bool:
+    try:
+        origin_parts = urlsplit(origin)
+        host_parts = urlsplit(f"//{request.headers.get('host', '')}")
+        origin_port = origin_parts.port
+        host_port = host_parts.port
+    except ValueError:
+        return False
+    if (
+        origin_parts.scheme != "http"
+        or origin_parts.hostname not in _LOOPBACK_HOSTS
+        or host_parts.hostname not in _LOOPBACK_HOSTS
+        or origin_parts.username is not None
+        or origin_parts.password is not None
+        or origin_parts.path
+        or origin_parts.query
+        or origin_parts.fragment
+    ):
+        return False
+    return origin_parts.hostname == host_parts.hostname and origin_port == host_port
+
+
+def _is_allowed_draft_ui_origin(request: Request, origin: str) -> bool:
+    return bool(_DRAFT_EXTENSION_ORIGIN.fullmatch(origin)) or _is_same_loopback_origin(
+        request, origin
+    )
+
+
+def _draft_ui_headers(request: Request) -> Dict[str, str]:
+    origin = request.headers.get("origin", "")
+    headers = {
+        "Access-Control-Allow-Headers": (
+            "Content-Type, X-Fantasy-Draft-UI, X-Fantasy-League-ID, "
+            "X-Fantasy-Team-Count, X-Fantasy-Roster-Positions"
+        ),
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Private-Network": "true",
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+        "Referrer-Policy": "no-referrer",
+        "Vary": "Origin",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+    }
+    if origin and _is_allowed_draft_ui_origin(request, origin):
+        headers["Access-Control-Allow-Origin"] = origin
+    return headers
+
+
+def _draft_dashboard_headers() -> Dict[str, str]:
+    return {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": (
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "connect-src 'self'; img-src 'self' data:; base-uri 'none'; "
+            "frame-ancestors 'none'; form-action 'self'"
+        ),
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+    }
+
+
+def _draft_json_error(
+    request: Request, message: str, status_code: int
+) -> JSONResponse:
+    return JSONResponse(
+        {"status": "error", "message": message},
+        status_code=status_code,
+        headers=_draft_ui_headers(request),
+    )
+
+
+def _clamped_draft_integer(
+    payload: Dict[str, Any], field: str, default: int, minimum: int, maximum: int
+) -> int:
+    value = payload.get(field, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LiveDraftValidationError(f"{field} must be an integer")
+    return max(minimum, min(value, maximum))
+
+
+def _profile_iso(value: Any, field: str) -> datetime:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        raise LocalDraftProfileValidationError(f"{field} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise LocalDraftProfileValidationError(
+            f"{field} must be an ISO-8601 timestamp"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise LocalDraftProfileValidationError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _load_bound_live_draft(league_id: str) -> dict[str, Any] | None:
+    context = load_live_draft(league_id=league_id, reject_ambiguous=True)
+    if not isinstance(context, dict):
+        return None
+    draft = context.get("draft")
+    if not isinstance(draft, dict) or draft.get("leagueId") != league_id:
+        raise LiveDraftValidationError(
+            "synced draft identity does not match the selected Yahoo league"
+        )
+    return context
+
+
+def _profile_response(profile: Dict[str, Any]) -> Dict[str, Any]:
+    provenance = profile.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    return {
+        "status": "success",
+        "leagueId": profile["draft"]["leagueId"],
+        "rankingCount": len(profile["rankings"]),
+        "asOf": provenance.get("asOf"),
+        "format": provenance.get("format"),
+    }
+
+
+def _profile_roster_headers(request: Request) -> tuple[int, dict[str, int]]:
+    raw_teams = request.headers.get("x-fantasy-team-count", "")
+    if not re.fullmatch(r"\d{1,2}", raw_teams):
+        raise LocalDraftProfileValidationError("team-count header is invalid")
+    teams = int(raw_teams)
+    if teams < 2 or teams > 20:
+        raise LocalDraftProfileValidationError("team-count header is invalid")
+    raw_roster = request.headers.get("x-fantasy-roster-positions", "")
+    if not raw_roster or len(raw_roster) > 160:
+        raise LocalDraftProfileValidationError("roster-positions header is invalid")
+    positions: dict[str, int] = {}
+    previous_index = -1
+    for token in raw_roster.split(","):
+        match = re.fullmatch(r"([A-Z]+)=(\d{1,2})", token)
+        if not match:
+            raise LocalDraftProfileValidationError("roster-positions header is invalid")
+        position, raw_count = match.groups()
+        if position not in _DRAFT_PROFILE_ROSTER_ORDER or position in positions:
+            raise LocalDraftProfileValidationError("roster-positions header is invalid")
+        order_index = _DRAFT_PROFILE_ROSTER_ORDER.index(position)
+        if order_index <= previous_index:
+            raise LocalDraftProfileValidationError("roster-positions header is invalid")
+        previous_index = order_index
+        count = int(raw_count)
+        if count < 1 or count > 30:
+            raise LocalDraftProfileValidationError("roster-positions header is invalid")
+        positions[position] = count
+    if not positions or sum(positions.values()) > 40:
+        raise LocalDraftProfileValidationError("roster-positions header is invalid")
+    return teams, positions
 
 
 def _draft_sync_headers(request: Request) -> Dict[str, str]:
@@ -771,6 +984,351 @@ async def receive_live_draft(request: Request) -> Response:
         },
         headers=headers,
     )
+
+
+@server.custom_route(
+    "/draft-profile", methods=["POST", "OPTIONS"], include_in_schema=False
+)
+async def receive_draft_profile(request: Request) -> Response:
+    """Save one strict local ranking/settings profile bound to a synced draft."""
+
+    headers = _draft_ui_headers(request)
+    if not _is_loopback_request(request):
+        return _draft_json_error(request, "Loopback access required", 403)
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return _draft_json_error(request, "Origin required", 403)
+    if not _is_allowed_draft_ui_origin(request, origin):
+        return _draft_json_error(request, "Origin not allowed", 403)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+    if request.headers.get("x-fantasy-draft-ui") != "1":
+        return _draft_json_error(request, "UI header required", 403)
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        return _draft_json_error(request, "Content-Type must be application/json", 415)
+    try:
+        content_length = int(request.headers.get("content-length", "0") or 0)
+    except ValueError:
+        return _draft_json_error(request, "Invalid content length", 400)
+    if content_length < 0:
+        return _draft_json_error(request, "Invalid content length", 400)
+    if content_length > _DRAFT_PROFILE_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+    body = await request.body()
+    if len(body) > _DRAFT_PROFILE_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _draft_json_error(request, "Request body must be valid JSON", 400)
+    if not isinstance(payload, dict):
+        return _draft_json_error(request, "Request body must be a JSON object", 400)
+    if set(payload) - _DRAFT_PROFILE_FIELDS:
+        return _draft_json_error(request, "Unsupported field in draft profile", 400)
+    league_id = payload.get("leagueId")
+    if not isinstance(league_id, str) or not _DRAFT_LEAGUE_ID.fullmatch(league_id):
+        return _draft_json_error(request, "leagueId has an invalid format", 400)
+    if payload.get("schemaVersion") != 1 or isinstance(payload.get("schemaVersion"), bool):
+        return _draft_json_error(request, "schemaVersion 1 is required", 400)
+    format_name = payload.get("format")
+    if format_name not in _DRAFT_PROFILE_FORMATS:
+        return _draft_json_error(request, "profile format is unsupported", 400)
+    try:
+        imported_at = _profile_iso(payload.get("importedAt"), "importedAt")
+        as_of_value = payload.get("asOf")
+        as_of = (
+            _profile_iso(as_of_value, "asOf").date().isoformat()
+            if as_of_value not in (None, "")
+            else None
+        )
+        context = _load_bound_live_draft(league_id)
+        if context is None:
+            return _draft_json_error(
+                request,
+                "No synced live draft exists for the selected Yahoo league",
+                404,
+            )
+        provenance: Dict[str, Any] = {
+            "kind": "user-import",
+            "format": format_name,
+        }
+        if as_of is not None:
+            provenance["asOf"] = as_of
+        profile = sanitize_local_draft_profile(
+            {
+                "schemaVersion": 1,
+                "source": "local-draft-profile",
+                "season": imported_at.year,
+                "importedAt": payload.get("importedAt"),
+                "draft": context["draft"],
+                "rankings": payload.get("rankings"),
+                "leagueSettings": payload.get("leagueSettings"),
+                "provenance": provenance,
+            }
+        )
+        saved = save_local_draft_profile(profile)
+    except (LocalDraftProfileValidationError, LiveDraftValidationError) as exc:
+        return _draft_json_error(request, str(exc), 400)
+    except Exception:
+        return _draft_json_error(request, "Draft profile service unavailable", 500)
+    return JSONResponse(_profile_response(saved), headers=headers)
+
+
+@server.custom_route(
+    "/draft-profile-xlsx", methods=["POST", "OPTIONS"], include_in_schema=False
+)
+async def receive_draft_profile_xlsx(request: Request) -> Response:
+    """Parse a bounded workbook in memory and persist only its allowlisted profile."""
+
+    headers = _draft_ui_headers(request)
+    if not _is_loopback_request(request):
+        return _draft_json_error(request, "Loopback access required", 403)
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return _draft_json_error(request, "Origin required", 403)
+    if not _is_allowed_draft_ui_origin(request, origin):
+        return _draft_json_error(request, "Origin not allowed", 403)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+    if request.headers.get("x-fantasy-draft-ui") != "1":
+        return _draft_json_error(request, "UI header required", 403)
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != _DRAFT_PROFILE_XLSX_MEDIA_TYPE:
+        return _draft_json_error(request, "Content-Type must be the XLSX media type", 415)
+    try:
+        content_length = int(request.headers.get("content-length", "0") or 0)
+    except ValueError:
+        return _draft_json_error(request, "Invalid content length", 400)
+    if content_length <= 0:
+        return _draft_json_error(request, "XLSX body must not be empty", 400)
+    if content_length > _DRAFT_PROFILE_XLSX_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+    body = await request.body()
+    if not body:
+        return _draft_json_error(request, "XLSX body must not be empty", 400)
+    if len(body) > _DRAFT_PROFILE_XLSX_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+    league_id = request.headers.get("x-fantasy-league-id", "")
+    if not _DRAFT_LEAGUE_ID.fullmatch(league_id):
+        return _draft_json_error(request, "league header has an invalid format", 400)
+    try:
+        teams, roster = _profile_roster_headers(request)
+        context = _load_bound_live_draft(league_id)
+        if context is None:
+            return _draft_json_error(
+                request,
+                "No synced live draft exists for the selected Yahoo league",
+                404,
+            )
+        imported_at = datetime.now(timezone.utc)
+        profile = profile_from_draftsheets_xlsx(
+            body,
+            draft=context["draft"],
+            imported_at=imported_at.isoformat().replace("+00:00", "Z"),
+            season=imported_at.year,
+            roster_overrides=roster,
+        )
+        profile["leagueSettings"] = {
+            "teams": teams,
+            "rosterPositions": [
+                {"position": position, "count": roster[position]}
+                for position in _DRAFT_PROFILE_ROSTER_ORDER
+                if position in roster
+            ],
+        }
+        saved = save_local_draft_profile(sanitize_local_draft_profile(profile))
+    except (LocalDraftProfileValidationError, LiveDraftValidationError) as exc:
+        return _draft_json_error(request, str(exc), 400)
+    except Exception:
+        return _draft_json_error(request, "Draft profile service unavailable", 500)
+    return JSONResponse(_profile_response(saved), headers=headers)
+
+
+@server.custom_route(
+    "/draft-recommendation", methods=["POST", "OPTIONS"], include_in_schema=False
+)
+async def receive_live_draft_recommendation(request: Request) -> Response:
+    """Serve one bounded recommendation to a trusted local draft UI."""
+
+    headers = _draft_ui_headers(request)
+    if not _is_loopback_request(request):
+        return _draft_json_error(request, "Loopback access required", 403)
+
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return _draft_json_error(request, "Origin required", 403)
+    if not _is_allowed_draft_ui_origin(request, origin):
+        return _draft_json_error(request, "Origin not allowed", 403)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+
+    if request.headers.get("x-fantasy-draft-ui") != "1":
+        return _draft_json_error(request, "UI header required", 403)
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        return _draft_json_error(request, "Content-Type must be application/json", 415)
+    try:
+        content_length = int(request.headers.get("content-length", "0") or 0)
+    except ValueError:
+        return _draft_json_error(request, "Invalid content length", 400)
+    if content_length < 0:
+        return _draft_json_error(request, "Invalid content length", 400)
+    if content_length > _DRAFT_RECOMMENDATION_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+
+    body = await request.body()
+    if len(body) > _DRAFT_RECOMMENDATION_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _draft_json_error(request, "Request body must be valid JSON", 400)
+    if not isinstance(payload, dict):
+        return _draft_json_error(request, "Request body must be a JSON object", 400)
+    if set(payload) - _DRAFT_RECOMMENDATION_FIELDS:
+        return _draft_json_error(request, "Unsupported field in recommendation request", 400)
+    schema_version = payload.get("schemaVersion")
+    if isinstance(schema_version, bool) or schema_version != 1:
+        return _draft_json_error(request, "schemaVersion 1 is required", 400)
+    league_id = payload.get("leagueId")
+    if not isinstance(league_id, str) or not _DRAFT_LEAGUE_ID.fullmatch(league_id):
+        return _draft_json_error(request, "leagueId has an invalid format", 400)
+    strategy = payload.get("strategy", "balanced")
+    if strategy not in {"conservative", "balanced", "aggressive"}:
+        return _draft_json_error(request, "strategy is invalid", 400)
+    try:
+        count = _clamped_draft_integer(payload, "count", 5, 1, 20)
+        ranking_count = _clamped_draft_integer(
+            payload, "rankingCount", 250, 25, 500
+        )
+        simulations = _clamped_draft_integer(
+            payload, "simulations", 256, 0, 512
+        )
+    except LiveDraftValidationError as exc:
+        return _draft_json_error(request, str(exc), 400)
+
+    async def call_yahoo_tool(name: str, **arguments: Any) -> Dict[str, Any]:
+        return await _call_legacy_tool(name, **arguments)
+
+    try:
+        result = await get_live_draft_recommendation(
+            call_yahoo_tool,
+            league_key=None,
+            league_id=league_id,
+            strategy=strategy,
+            count=count,
+            ranking_count=ranking_count,
+            simulations=simulations,
+            require_authenticated_team=True,
+        )
+    except LiveDraftValidationError as exc:
+        return _draft_json_error(request, str(exc), 400)
+    except Exception:
+        return _draft_json_error(request, "Recommendation service unavailable", 502)
+    return JSONResponse(result, headers=headers)
+
+
+def _serve_draft_dashboard_asset(request: Request, filename: str, media_type: str) -> Response:
+    if not _is_loopback_request(request):
+        return JSONResponse(
+            {"status": "error", "message": "Loopback access required"},
+            status_code=403,
+            headers=_draft_dashboard_headers(),
+        )
+    try:
+        content = (_DRAFT_DASHBOARD_DIRECTORY / filename).read_bytes()
+    except OSError:
+        return Response(
+            content="Draft dashboard asset unavailable",
+            status_code=500,
+            media_type="text/plain",
+            headers=_draft_dashboard_headers(),
+        )
+    return Response(content=content, media_type=media_type, headers=_draft_dashboard_headers())
+
+
+@server.custom_route("/draft-dashboard", methods=["GET"], include_in_schema=False)
+@server.custom_route("/draft-dashboard/", methods=["GET"], include_in_schema=False)
+async def serve_draft_dashboard(request: Request) -> Response:
+    """Serve the private, no-store live-draft dashboard shell."""
+
+    return _serve_draft_dashboard_asset(request, "index.html", "text/html")
+
+
+@server.custom_route(
+    "/draft-dashboard/app.js", methods=["GET"], include_in_schema=False
+)
+async def serve_draft_dashboard_script(request: Request) -> Response:
+    return _serve_draft_dashboard_asset(request, "app.js", "text/javascript")
+
+
+@server.custom_route(
+    "/draft-dashboard/draft-profile-client.js",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def serve_draft_profile_client(request: Request) -> Response:
+    return _serve_draft_dashboard_asset(
+        request, "draft-profile-client.js", "text/javascript"
+    )
+
+
+@server.custom_route(
+    "/draft-dashboard/styles.css", methods=["GET"], include_in_schema=False
+)
+async def serve_draft_dashboard_styles(request: Request) -> Response:
+    return _serve_draft_dashboard_asset(request, "styles.css", "text/css")
+
+
+def _serve_shared_draft_ui_script(request: Request, filename: str) -> Response:
+    if not _is_loopback_request(request):
+        return JSONResponse(
+            {"status": "error", "message": "Loopback access required"},
+            status_code=403,
+            headers=_draft_dashboard_headers(),
+        )
+    try:
+        content = (_DRAFT_SHARED_UI_DIRECTORY / filename).read_bytes()
+    except OSError:
+        return Response(
+            content="Shared draft UI asset unavailable",
+            status_code=500,
+            media_type="text/plain",
+            headers=_draft_dashboard_headers(),
+        )
+    return Response(
+        content=content,
+        media_type="text/javascript",
+        headers=_draft_dashboard_headers(),
+    )
+
+
+@server.custom_route(
+    "/draft-dashboard/shared/recommendation-client.js",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def serve_draft_recommendation_client(request: Request) -> Response:
+    return _serve_shared_draft_ui_script(request, "recommendation-client.js")
+
+
+@server.custom_route(
+    "/draft-dashboard/shared/recommendation-view-model.js",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def serve_draft_recommendation_view_model(request: Request) -> Response:
+    return _serve_shared_draft_ui_script(request, "recommendation-view-model.js")
+
+
+@server.custom_route(
+    "/draft-dashboard/shared/recommendation-renderer.js",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def serve_draft_recommendation_renderer(request: Request) -> Response:
+    return _serve_shared_draft_ui_script(request, "recommendation-renderer.js")
 
 
 @server.tool(
@@ -1853,7 +2411,7 @@ def run_http_server(
 ) -> None:
     """Start the FastMCP server using the HTTP transport."""
 
-    resolved_host = host or os.getenv("HOST", "0.0.0.0")
+    resolved_host = host or os.getenv("HOST", "127.0.0.1")
     resolved_port = port or int(os.getenv("PORT", "8000"))
 
     server.run(

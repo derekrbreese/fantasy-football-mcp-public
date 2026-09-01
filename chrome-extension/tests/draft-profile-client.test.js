@@ -1,0 +1,372 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const {
+  MAX_PROFILE_RANKINGS,
+  buildDraftProfileRequest,
+  describeProfileFreshness,
+  parseDraftProfileFile,
+  parseRosterPositions,
+  saveDraftProfile,
+  saveDraftProfileXlsx,
+} = require('../../src/dashboard/draft-profile-client.js');
+
+test('parses a DraftSheets ECR CSV locally and allowlists ranking fields', () => {
+  const source = [
+    'RK,PLAYER NAME,TEAM,POS,BYE WEEK,TIER,PRIVATE NOTES,PLAYER URL',
+    '2,"Doe, John",nyj,RB1,9,1,manager secret,https://example.test/?token=secret',
+    '1,Arizona Cardinals,ari,D/ST,8,1,cookie=value,https://example.test/private',
+  ].join('\r\n');
+
+  const parsed = parseDraftProfileFile(source, 'rankings.csv');
+
+  assert.equal(parsed.format, 'draftsheets-2026');
+  assert.deepEqual(parsed.rankings, [
+    { name: 'Arizona Cardinals', position: 'DST', team: 'ARI', rank: 1, bye_week: 8 },
+    { name: 'Doe, John', position: 'RB', team: 'NYJ', rank: 2, bye_week: 9 },
+  ]);
+  assert.equal(JSON.stringify(parsed).includes('secret'), false);
+  assert.equal(JSON.stringify(parsed).includes('http'), false);
+  assert.equal(JSON.stringify(parsed).includes('TIER'), false);
+});
+
+test('normalizes generic CSV aliases and optional ADP without inventing missing values', () => {
+  const parsed = parseDraftProfileFile([
+    'Rank,Name,Position,NFL Team,ADP,Bye',
+    '1,Player One,QB,buf,3.25,7',
+    '2,Player Two,WR,,,',
+  ].join('\n'), 'board.CSV');
+
+  assert.equal(parsed.format, 'csv');
+  assert.deepEqual(parsed.rankings, [
+    {
+      name: 'Player One',
+      position: 'QB',
+      team: 'BUF',
+      rank: 1,
+      average_draft_position: 3.25,
+      bye_week: 7,
+    },
+    { name: 'Player Two', position: 'WR', rank: 2 },
+  ]);
+});
+
+test('rejects malformed, ambiguous, or oversized generic CSV instead of guessing', () => {
+  assert.throws(
+    () => parseDraftProfileFile('Rank,Name\n1,Player One', 'board.csv'),
+    /Position/,
+  );
+  assert.throws(
+    () => parseDraftProfileFile('Rank,Name,Position\n1,"Unclosed,QB', 'board.csv'),
+    /quoted field/,
+  );
+  assert.throws(
+    () => parseDraftProfileFile('Rank,Name,Position\n1,One,QB\n1,Two,RB', 'board.csv'),
+    /duplicate rank 1/i,
+  );
+
+  const rows = ['Rank,Name,Position'];
+  for (let rank = 1; rank <= MAX_PROFILE_RANKINGS + 1; rank += 1) {
+    rows.push(`${rank},Player ${rank},WR`);
+  }
+  assert.throws(
+    () => parseDraftProfileFile(rows.join('\n'), 'generic.csv'),
+    /at most 500/,
+  );
+});
+
+test('takes the top 500 ranked rows from a recognized DraftSheets export', () => {
+  const rows = ['RK,PLAYER NAME,TEAM,POS,BYE WEEK'];
+  for (let rank = 520; rank >= 1; rank -= 1) {
+    rows.push(`${rank},Player ${rank},BUF,WR${rank},7`);
+  }
+
+  const parsed = parseDraftProfileFile(rows.join('\n'), 'ECR.csv');
+
+  assert.equal(parsed.format, 'draftsheets-2026');
+  assert.equal(parsed.rankings.length, 500);
+  assert.equal(parsed.rankings[0].rank, 1);
+  assert.equal(parsed.rankings.at(-1).rank, 500);
+  assert.equal(parsed.truncatedCount, 20);
+});
+
+test('parses strict JSON while omitting unknown private fields', () => {
+  const parsed = parseDraftProfileFile(JSON.stringify({
+    schemaVersion: 1,
+    asOf: '2026-08-31T00:00:00Z',
+    pageUrl: 'https://example.test/?auth=secret',
+    rankings: [{
+      rank: 1,
+      name: 'Player One',
+      position: 'TE1',
+      team: 'kc',
+      average_draft_position: 4.5,
+      bye_week: 10,
+      notes: 'private manager note',
+      injury_status: 'Healthy',
+    }],
+  }), 'profile.json');
+
+  assert.deepEqual(parsed, {
+    format: 'json',
+    asOf: '2026-08-31T00:00:00.000Z',
+    rankings: [{
+      name: 'Player One',
+      position: 'TE',
+      team: 'KC',
+      rank: 1,
+      average_draft_position: 4.5,
+      bye_week: 10,
+    }],
+    truncatedCount: 0,
+  });
+  assert.equal(JSON.stringify(parsed).includes('secret'), false);
+  assert.equal(JSON.stringify(parsed).includes('private'), false);
+  assert.equal(JSON.stringify(parsed).includes('Healthy'), false);
+});
+
+test('does not accept a URL or spreadsheet formula disguised as a player name', () => {
+  for (const name of ['https://example.test/?token=secret', '=HYPERLINK("https://example.test")']) {
+    assert.throws(
+      () => parseDraftProfileFile(JSON.stringify({
+        schemaVersion: 1,
+        rankings: [{ rank: 1, name, position: 'QB', team: 'BUF' }],
+      }), 'profile.json'),
+      /Player name.*invalid/,
+    );
+  }
+});
+
+test('uploads bounded XLSX bytes without transmitting its filename', async () => {
+  const bytes = Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]);
+  let captured;
+  const result = await saveDraftProfileXlsx({
+    size: bytes.byteLength,
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    name: 'private-manager-rankings.xlsx',
+    arrayBuffer: async () => bytes.buffer,
+  }, '498589', {
+    leagueSettings: {
+      teams: 12,
+      rosterPositions: parseRosterPositions({
+        QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, K: 1, DST: 1, BN: 6, IR: 1,
+      }),
+    },
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return {
+        ok: true,
+        json: async () => ({ status: 'success', leagueId: '498589', rankingCount: 500 }),
+      };
+    },
+  });
+
+  assert.equal(captured.url, '/draft-profile-xlsx');
+  assert.equal(captured.options.headers['X-Fantasy-League-ID'], '498589');
+  assert.equal(captured.options.headers['X-Fantasy-Team-Count'], '12');
+  assert.equal(
+    captured.options.headers['X-Fantasy-Roster-Positions'],
+    'QB=1,RB=2,WR=2,TE=1,FLEX=1,K=1,DST=1,BN=6,IR=1',
+  );
+  assert.equal(
+    captured.options.headers['Content-Type'],
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  );
+  assert.deepEqual([...captured.options.body], [...bytes]);
+  assert.equal(JSON.stringify(captured).includes('private-manager'), false);
+  assert.equal(Object.hasOwn(captured.options.headers, 'Content-Disposition'), false);
+  assert.equal(result.rankingCount, 500);
+});
+
+test('rejects malformed or oversized XLSX before network access', async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; };
+  await assert.rejects(
+    saveDraftProfileXlsx({
+      size: 4,
+      arrayBuffer: async () => Uint8Array.from([1, 2, 3, 4]).buffer,
+    }, '498589', { fetchImpl }),
+    /valid XLSX/,
+  );
+  await assert.rejects(
+    saveDraftProfileXlsx({
+      size: 2_000_001,
+      arrayBuffer: async () => new ArrayBuffer(0),
+    }, '498589', { fetchImpl }),
+    /2 MB/,
+  );
+  assert.equal(calls, 0);
+});
+
+test('constructs the canonical allowlisted per-league profile request', () => {
+  const request = buildDraftProfileRequest({
+    leagueId: '498589',
+    format: 'draftsheets-2026',
+    asOf: '2026-08-31',
+    rankings: [{
+      rank: 1,
+      name: 'Player One',
+      position: 'WR',
+      team: 'BUF',
+      average_draft_position: 2.5,
+      bye_week: 7,
+      pageUrl: 'https://example.test/secret',
+    }],
+    leagueSettings: {
+      teams: 12,
+      rosterPositions: parseRosterPositions({
+        QB: 1,
+        RB: 2,
+        WR: 2,
+        TE: 1,
+        FLEX: 1,
+        K: 1,
+        DST: 1,
+        BN: 6,
+        IR: 1,
+      }),
+      cookie: 'secret',
+    },
+    rawFile: 'must not leave the browser',
+  }, new Date('2026-09-01T12:34:56Z'));
+
+  assert.deepEqual(request, {
+    schemaVersion: 1,
+    leagueId: '498589',
+    importedAt: '2026-09-01T12:34:56.000Z',
+    format: 'draftsheets-2026',
+    asOf: '2026-08-31T00:00:00.000Z',
+    rankings: [{
+      name: 'Player One',
+      position: 'WR',
+      team: 'BUF',
+      rank: 1,
+      average_draft_position: 2.5,
+      bye_week: 7,
+    }],
+    leagueSettings: {
+      teams: 12,
+      rosterPositions: [
+        { position: 'QB', count: 1 },
+        { position: 'RB', count: 2 },
+        { position: 'WR', count: 2 },
+        { position: 'TE', count: 1 },
+        { position: 'FLEX', count: 1 },
+        { position: 'K', count: 1 },
+        { position: 'DST', count: 1 },
+        { position: 'BN', count: 6 },
+        { position: 'IR', count: 1 },
+      ],
+    },
+  });
+  assert.equal(JSON.stringify(request).includes('secret'), false);
+  assert.equal(JSON.stringify(request).includes('rawFile'), false);
+});
+
+test('posts only canonical JSON to the same-origin draft-profile route', async () => {
+  let captured;
+  const result = await saveDraftProfile({
+    leagueId: '498589',
+    format: 'csv',
+    rankings: [{ rank: 1, name: 'Player One', position: 'QB' }],
+    leagueSettings: {
+      teams: 12,
+      rosterPositions: [{ position: 'QB', count: 1 }],
+    },
+  }, {
+    now: new Date('2026-09-01T12:34:56Z'),
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return {
+        ok: true,
+        json: async () => ({ status: 'success', leagueId: '498589', rankingCount: 1 }),
+      };
+    },
+  });
+
+  assert.equal(captured.url, '/draft-profile');
+  assert.equal(captured.options.method, 'POST');
+  assert.equal(captured.options.cache, 'no-store');
+  assert.equal(captured.options.credentials, 'omit');
+  assert.equal(captured.options.headers['Content-Type'], 'application/json');
+  assert.equal(captured.options.headers['X-Fantasy-Draft-UI'], '1');
+  assert.equal(Object.hasOwn(JSON.parse(captured.options.body), 'rawFile'), false);
+  assert.deepEqual(result, { status: 'success', leagueId: '498589', rankingCount: 1 });
+});
+
+test('rejects unsafe endpoints and cross-league responses', async () => {
+  const profile = {
+    leagueId: '498589',
+    format: 'json',
+    rankings: [{ rank: 1, name: 'Player One', position: 'QB' }],
+    leagueSettings: {
+      teams: 12,
+      rosterPositions: [{ position: 'QB', count: 1 }],
+    },
+  };
+
+  await assert.rejects(
+    saveDraftProfile(profile, {
+      endpoint: 'https://example.test/draft-profile',
+      fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+    }),
+    /same-origin/,
+  );
+  await assert.rejects(
+    saveDraftProfile(profile, {
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({ status: 'success', leagueId: '999' }),
+      }),
+    }),
+    /did not match/,
+  );
+  await assert.rejects(
+    saveDraftProfile(profile, {
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({ status: 'error', leagueId: '498589' }),
+      }),
+    }),
+    /did not confirm success/,
+  );
+});
+
+test('labels freshness without claiming an undated source is current', () => {
+  const now = new Date('2026-09-01T12:00:00Z');
+  assert.deepEqual(describeProfileFreshness(null, now), {
+    kind: 'unknown',
+    label: 'Source date unknown',
+  });
+  assert.deepEqual(describeProfileFreshness('2026-08-31T00:00:00Z', now), {
+    kind: 'fresh',
+    label: 'Current · source dated Aug 31, 2026',
+  });
+  assert.deepEqual(describeProfileFreshness('2026-07-01T00:00:00Z', now), {
+    kind: 'stale',
+    label: 'Stale · source dated Jul 1, 2026',
+  });
+});
+
+test('dashboard exposes a local import form while retaining recommendation controls', () => {
+  const html = fs.readFileSync(
+    path.join(__dirname, '../../src/dashboard/index.html'),
+    'utf8',
+  );
+  const appSource = fs.readFileSync(
+    path.join(__dirname, '../../src/dashboard/app.js'),
+    'utf8',
+  );
+
+  assert.match(html, /id="draft-profile-form"/);
+  assert.match(html, /id="draft-profile-file"/);
+  assert.match(html, /accept="\.xlsx,\.csv,\.json/);
+  assert.match(html, /id="profile-source-status"/);
+  assert.match(html, /DraftSheets \.xlsx/);
+  assert.match(html, /id="recommendation-form"/);
+  assert.match(html, /draft-profile-client\.js/);
+  assert.match(appSource, /\.textContent\s*=/);
+  assert.doesNotMatch(appSource, /profile-source-status[^\n]*innerHTML/);
+});

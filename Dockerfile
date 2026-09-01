@@ -28,6 +28,8 @@ USER app
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
+# Container ingress is an explicit deployment boundary; local runs default to loopback.
+ENV HOST=0.0.0.0
 
 # Expose port (Cloud Run will set PORT env var)
 EXPOSE 8080

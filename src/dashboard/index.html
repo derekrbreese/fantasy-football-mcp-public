@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Live Draft Assistant</title>
+    <link rel="stylesheet" href="/draft-dashboard/styles.css">
+    <script src="/draft-dashboard/shared/recommendation-client.js" defer></script>
+    <script src="/draft-dashboard/shared/recommendation-view-model.js" defer></script>
+    <script src="/draft-dashboard/shared/recommendation-renderer.js" defer></script>
+    <script src="/draft-dashboard/draft-profile-client.js" defer></script>
+    <script src="/draft-dashboard/app.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div>
+        <p class="eyebrow">Yahoo Fantasy Football · private loopback UI</p>
+        <h1>Live Draft Assistant</h1>
+        <p class="subtitle">Deep recommendations, roster construction, draft history, and scenario analysis.</p>
+      </div>
+      <div class="privacy-badge" aria-label="Privacy status">
+        <span class="privacy-dot" aria-hidden="true"></span>
+        Local only · no cache
+      </div>
+    </header>
+
+    <main>
+      <section class="control-panel" aria-labelledby="controls-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Recommendation controls</p>
+            <h2 id="controls-title">Choose the active league</h2>
+          </div>
+          <p class="hint">The league ID must match one unambiguous recorder session. Yahoo access is needed only when no matching local profile exists.</p>
+        </div>
+        <form id="recommendation-form">
+          <label class="wide-field">
+            <span>Yahoo league ID</span>
+            <input id="league-id" name="leagueId" required maxlength="32" pattern="[0-9]{1,32}" inputmode="numeric" autocomplete="off" placeholder="10462193">
+          </label>
+          <label>
+            <span>Strategy</span>
+            <select id="strategy" name="strategy">
+              <option value="balanced" selected>Balanced</option>
+              <option value="conservative">Conservative</option>
+              <option value="aggressive">Aggressive</option>
+            </select>
+          </label>
+          <label>
+            <span>Recommendations</span>
+            <input id="count" name="count" type="number" min="1" max="20" value="8">
+          </label>
+          <label>
+            <span>Ranking pool</span>
+            <input id="ranking-count" name="rankingCount" type="number" min="25" max="500" value="250">
+          </label>
+          <label>
+            <span>Simulations</span>
+            <select id="simulations" name="simulations">
+              <option value="0">Off</option>
+              <option value="64">64 · quick</option>
+              <option value="256" selected>256 · standard</option>
+              <option value="512">512 · detailed</option>
+            </select>
+          </label>
+          <button id="refresh-button" type="submit">Refresh analysis</button>
+        </form>
+      </section>
+
+      <section class="profile-panel" aria-labelledby="profile-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">API-free ranking source</p>
+            <h2 id="profile-title">Local draft profile</h2>
+          </div>
+          <p class="hint">Bind rankings and league settings to the league ID above. Drafted players still come from the live Firefox recorder.</p>
+        </div>
+        <form id="draft-profile-form" class="profile-form">
+          <label class="profile-file-field">
+            <span>Draft profile</span>
+            <input
+              id="draft-profile-file"
+              name="draftProfile"
+              type="file"
+              required
+              accept=".xlsx,.csv,.json,text/csv,application/json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            >
+          </label>
+          <label>
+            <span>Source date (CSV/JSON)</span>
+            <input id="profile-as-of" name="asOf" type="date">
+          </label>
+          <label>
+            <span>League teams</span>
+            <input id="profile-team-count" name="teams" type="number" min="2" max="20" value="12" required>
+          </label>
+          <button id="import-profile-button" type="submit">Import profile</button>
+
+          <fieldset class="roster-fieldset">
+            <legend>Roster slots</legend>
+            <div class="roster-slot-grid">
+              <label><span>QB</span><input data-roster-position="QB" type="number" min="0" max="30" value="1" required></label>
+              <label><span>RB</span><input data-roster-position="RB" type="number" min="0" max="30" value="2" required></label>
+              <label><span>WR</span><input data-roster-position="WR" type="number" min="0" max="30" value="2" required></label>
+              <label><span>TE</span><input data-roster-position="TE" type="number" min="0" max="30" value="1" required></label>
+              <label><span>FLEX</span><input data-roster-position="FLEX" type="number" min="0" max="30" value="1" required></label>
+              <label><span>K</span><input data-roster-position="K" type="number" min="0" max="30" value="1" required></label>
+              <label><span>DST</span><input data-roster-position="DST" type="number" min="0" max="30" value="1" required></label>
+              <label><span>Bench</span><input data-roster-position="BN" type="number" min="0" max="30" value="6" required></label>
+              <label><span>IR</span><input data-roster-position="IR" type="number" min="0" max="30" value="1" required></label>
+            </div>
+          </fieldset>
+        </form>
+        <div class="profile-help">
+          <p><strong>Supported:</strong> DraftSheets .xlsx, or the ECR tab exported as CSV, plus schemaVersion 1 JSON. DraftSheets imports use the top 500 players by overall rank.</p>
+          <p>CSV and JSON are reduced to allowlisted ranking fields in your browser. XLSX bytes go only to the bounded loopback parser and are never stored; filenames, URLs, notes, and arbitrary cells are not persisted.</p>
+        </div>
+        <div id="profile-source-status" class="profile-source-status unknown" role="status" aria-live="polite">
+          <strong id="profile-source-title">No local profile imported</strong>
+          <span id="profile-source-detail">Recommendations require a league-bound ranking profile while Yahoo API access is unavailable.</span>
+          <span id="profile-freshness">Source date unknown</span>
+        </div>
+      </section>
+
+      <div id="request-status" class="request-status idle" role="status" aria-live="polite">
+        Enter the league ID recorded by the extension to begin.
+      </div>
+
+      <section id="quality-panel" class="quality-panel hidden" aria-labelledby="quality-title">
+        <div>
+          <p class="eyebrow">Decision readiness</p>
+          <h2 id="quality-title">Ledger and data quality</h2>
+        </div>
+        <div id="quality-summary" class="quality-summary"></div>
+        <div id="diagnostic-details" class="diagnostic-details"></div>
+      </section>
+
+      <section id="draft-summary" class="summary-grid hidden" aria-label="Draft summary">
+        <article><span>Current pick</span><strong id="current-pick">—</strong></article>
+        <article><span>Your next pick</span><strong id="next-pick">—</strong></article>
+        <article><span>Picks recorded</span><strong id="pick-count">—</strong></article>
+        <article><span>Team count</span><strong id="team-count">—</strong></article>
+      </section>
+
+      <section id="recommendations-panel" class="content-section hidden" aria-labelledby="recommendations-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Ranked board</p>
+            <h2 id="recommendations-title">Next-pick recommendations</h2>
+          </div>
+          <p class="hint">Confidence and return probability are uncalibrated heuristics.</p>
+        </div>
+        <div id="recommendation-view" class="recommendation-view"></div>
+      </section>
+
+      <div class="analysis-grid">
+        <section id="scenario-panel" class="content-section hidden" aria-labelledby="scenario-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Scenario controls</p>
+              <h2 id="scenario-title">Specialist comparison</h2>
+            </div>
+            <p class="hint">Scores are deterministic 0–100 signals; scenario simulation is uncalibrated.</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Player</th><th>Value</th><th>Roster</th><th>Dynamics</th><th>Opponent</th><th>Risk/news</th><th>Scenario</th></tr>
+              </thead>
+              <tbody id="scenario-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="roster-panel" class="content-section hidden" aria-labelledby="roster-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Construction</p>
+              <h2 id="roster-title">Your roster</h2>
+            </div>
+          </div>
+          <div id="roster-counts" class="roster-counts"></div>
+          <ol id="roster-list" class="compact-list"></ol>
+        </section>
+      </div>
+
+      <section id="history-panel" class="content-section hidden" aria-labelledby="history-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Authoritative ledger</p>
+            <h2 id="history-title">Recent draft history</h2>
+          </div>
+          <p class="hint">Newest recorded picks first.</p>
+        </div>
+        <ol id="draft-history" class="history-list"></ol>
+      </section>
+    </main>
+
+    <footer>
+      Missing injury or news data is <strong>unknown</strong>, never assumed healthy. Opponent-return and simulation outputs are explicitly uncalibrated until evaluated.
+    </footer>
+  </body>
+</html>

@@ -94,7 +94,7 @@ main { padding: 16px 20px 14px; }
 .ledger-health p { margin-top: 4px; overflow-wrap: anywhere; }
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
-button {
+button, .button-link {
   padding: 8px 11px;
   border: 1px solid #cbd7d0;
   border-radius: 8px;
@@ -105,7 +105,8 @@ button {
   font-size: 12px;
   font-weight: 700;
 }
-button:hover:not(:disabled) { border-color: #5f1a8b; color: #5f1a8b; }
+.button-link { display: inline-flex; align-items: center; text-decoration: none; }
+button:hover:not(:disabled), .button-link:hover { border-color: #5f1a8b; color: #5f1a8b; }
 button:disabled { cursor: default; opacity: .48; }
 
 .table-wrap {

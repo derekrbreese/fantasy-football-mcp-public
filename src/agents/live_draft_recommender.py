@@ -65,6 +65,10 @@ _STRATEGY_WEIGHTS = {
     },
 }
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+# Yahoo league creation and the local profile contract both top out at 20 teams.
+# Enforcing the same ceiling here bounds snake-turn and simulation work even when
+# an upstream league payload is malformed.
+_MAX_TEAM_COUNT = 20
 
 
 def _number(value: Any, default: float) -> float:
@@ -188,6 +192,9 @@ def reconcile_live_draft(
     if resolved_team_count < 2:
         resolved_team_count = 12
         team_count_source = "default"
+    elif resolved_team_count > _MAX_TEAM_COUNT:
+        resolved_team_count = _MAX_TEAM_COUNT
+        team_count_source = f"{team_count_source}-clamped"
 
     user_picks = [
         p
@@ -218,7 +225,12 @@ def reconcile_live_draft(
         reference = reference.replace(tzinfo=timezone.utc)
     age_seconds = max(0.0, (reference - generated).total_seconds()) if generated else None
     warnings: list[str] = []
-    if team_count_source != "league":
+    if team_count_source.endswith("-clamped"):
+        warnings.append(
+            f"Team count exceeded the supported maximum of {_MAX_TEAM_COUNT} and was "
+            "clamped; snake-turn projections may be inaccurate"
+        )
+    elif team_count_source != "league":
         warnings.append(
             f"Team count was inferred from {team_count_source}; snake-turn projections may be inaccurate"
         )
@@ -426,6 +438,8 @@ class OpponentModelAgent:
 
 class RiskNewsAgent:
     name = "riskNews"
+    _INJURY_MAX_AGE_SECONDS = 86_400.0
+    _NEWS_MAX_AGE_SECONDS = 172_800.0
     _SCORES = {
         "healthy": 82.0,
         "probable": 74.0,
@@ -438,20 +452,114 @@ class RiskNewsAgent:
         "not active": 8.0,
         "suspended": 12.0,
         "day-to-day": 48.0,
-        "unknown": 64.0,
+    }
+    _NEWS_SCORES = {
+        "injury": 48.0,
+        "injuries": 48.0,
+        "transaction": 56.0,
     }
 
-    def score(self, candidate: Candidate) -> tuple[float, dict[str, Any]]:
+    def __init__(self, reference_time: datetime | None = None):
+        now = reference_time or datetime.now(timezone.utc)
+        self.reference_time = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+
+    def _recent(self, value: Any, maximum_age_seconds: float) -> bool:
+        parsed = _parse_time(value)
+        if parsed is None:
+            return False
+        age = (self.reference_time.astimezone(timezone.utc) - parsed).total_seconds()
+        return -300.0 <= age <= maximum_age_seconds
+
+    def _fresh_signal(
+        self, candidate: Candidate, prefix: str
+    ) -> tuple[bool, str | None, str | None]:
+        source_value = candidate.raw.get(f"{prefix}_source")
+        updated_value = candidate.raw.get(f"{prefix}_updated_at")
+        source = str(source_value).strip()[:80] if isinstance(source_value, str) else ""
+        updated_at = (
+            updated_value[:40]
+            if isinstance(updated_value, str) and _parse_time(updated_value) is not None
+            else None
+        )
+        if prefix == "injury":
+            freshness_value = (
+                candidate.raw.get("injury_snapshot_at")
+                or candidate.raw.get("retrievedAt")
+            )
+            maximum_age = self._INJURY_MAX_AGE_SECONDS
+        else:
+            freshness_value = updated_at
+            maximum_age = self._NEWS_MAX_AGE_SECONDS
+        fresh = bool(
+            candidate.raw.get(f"{prefix}_fresh") is True
+            and source
+            and updated_at
+            and self._recent(freshness_value, maximum_age)
+        )
+        return fresh, source or None, updated_at
+
+    def _recent_news(
+        self, candidate: Candidate, *, fresh: bool
+    ) -> list[dict[str, str]]:
+        if not fresh or not isinstance(candidate.raw.get("recentNews"), list):
+            return []
+        result: list[dict[str, str]] = []
+        for raw in candidate.raw["recentNews"][:3]:
+            if not isinstance(raw, Mapping):
+                continue
+            headline = str(raw.get("headline") or "").strip()[:240]
+            published = str(raw.get("publishedAt") or "").strip()[:40]
+            if not headline or not self._recent(published, self._NEWS_MAX_AGE_SECONDS):
+                continue
+            item = {"headline": headline, "publishedAt": published}
+            category = str(raw.get("category") or "").strip()[:80]
+            if category:
+                item["category"] = category
+            result.append(item)
+        return result
+
+    def injury_available(self, candidate: Candidate) -> bool:
+        fresh, _source, _updated_at = self._fresh_signal(candidate, "injury")
         raw_status = candidate.raw.get("injury_status") or candidate.raw.get("status")
         status = str(raw_status).strip().lower() if raw_status else "unknown"
-        score = self._SCORES.get(status, 48.0)
-        source = candidate.raw.get("news_source") or candidate.raw.get("injury_source")
-        updated_at = candidate.raw.get("news_updated_at") or candidate.raw.get("injury_updated_at")
+        return fresh and status in self._SCORES
+
+    def news_available(self, candidate: Candidate) -> bool:
+        fresh, _source, _updated_at = self._fresh_signal(candidate, "news")
+        return fresh and bool(self._recent_news(candidate, fresh=fresh))
+
+    def score(self, candidate: Candidate) -> tuple[float | None, dict[str, Any]]:
+        injury_fresh, injury_source, injury_updated_at = self._fresh_signal(
+            candidate, "injury"
+        )
+        news_fresh, news_source, news_updated_at = self._fresh_signal(candidate, "news")
+        raw_status = candidate.raw.get("injury_status") or candidate.raw.get("status")
+        supplied_status = str(raw_status).strip().lower() if raw_status else "unknown"
+        injury_available = injury_fresh and supplied_status in self._SCORES
+        status = supplied_status if injury_available else "unknown"
+        recent_news = self._recent_news(candidate, fresh=news_fresh)
+        news_scores = [
+            self._NEWS_SCORES[str(item.get("category") or "").casefold()]
+            for item in recent_news
+            if str(item.get("category") or "").casefold() in self._NEWS_SCORES
+        ]
+        score = self._SCORES[status] if injury_available else min(news_scores, default=None)
+        available = score is not None
+        basis = (
+            "injury-status"
+            if injury_available
+            else ("recent-news-category" if news_scores else "unknown")
+        )
         return score, {
             "status": status,
-            "source": source,
-            "updatedAt": updated_at,
-            "fresh": bool(source and updated_at),
+            "source": injury_source or news_source,
+            "updatedAt": injury_updated_at or news_updated_at,
+            "fresh": injury_fresh or news_fresh,
+            "available": available,
+            "basis": basis,
+            "injuryFresh": injury_fresh,
+            "newsFresh": news_fresh,
+            "recentNews": recent_news,
         }
 
 
@@ -543,19 +651,36 @@ class LiveDraftRecommendationEngine:
         *,
         strategy: str = "balanced",
         count: int = 5,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         league = dict(league_info or {})
         team_count = int(_number(league.get("teams") or league.get("num_teams"), 0)) or None
-        state = reconcile_live_draft(live_context, team_count=team_count)
+        reference_time = now or datetime.now(timezone.utc)
+        state = reconcile_live_draft(
+            live_context, team_count=team_count, now=reference_time
+        )
         warnings = list(state["health"]["warnings"])
-        risk_available = any(
-            item.get("injury_status") or item.get("status")
-            for item in rankings
+        risk_agent = RiskNewsAgent(reference_time)
+        ranking_candidates = [
+            Candidate.from_mapping(item, index)
+            for index, item in enumerate(rankings, start=1)
             if isinstance(item, Mapping)
+        ]
+        injury_available = any(
+            risk_agent.injury_available(candidate)
+            for candidate in ranking_candidates
+            if candidate is not None
         )
         news_available = any(
-            item.get("news_source") for item in rankings if isinstance(item, Mapping)
+            risk_agent.news_available(candidate)
+            for candidate in ranking_candidates
+            if candidate is not None
+        )
+        risk_available = any(
+            risk_agent.score(candidate)[0] is not None
+            for candidate in ranking_candidates
+            if candidate is not None
         )
         base = {
             "source": "live-draft-specialist-suite",
@@ -564,7 +689,7 @@ class LiveDraftRecommendationEngine:
             "state": state,
             "capabilities": {
                 "externalNews": news_available,
-                "injuryStatus": risk_available,
+                "injuryStatus": injury_available,
                 "opponentModel": "heuristic",
                 "scenarioSimulation": self.simulations > 0,
                 "llmOnRequestPath": False,
@@ -573,7 +698,8 @@ class LiveDraftRecommendationEngine:
         }
         if not state["health"]["complete"]:
             warnings.append(
-                "Recommendation blocked because a pick-number gap makes availability uncertain"
+                "Recommendation blocked because gaps, duplicate pick numbers, or unnumbered "
+                "picks make availability uncertain"
             )
             return self._empty_result(base, "blocked", self._draft_advice(state), started)
         if not rankings:
@@ -608,7 +734,6 @@ class LiveDraftRecommendationEngine:
         dynamics_agent = DraftDynamicsAgent(state["picks"])
         value_agent = PlayerValueAgent()
         opponent_agent = OpponentModelAgent()
-        risk_agent = RiskNewsAgent()
         scenario_agent = ScenarioSimulatorAgent(self.simulations, self.random_seed)
         weights = dict(_STRATEGY_WEIGHTS[base["strategy"]])
         if not risk_available:
@@ -637,7 +762,18 @@ class LiveDraftRecommendationEngine:
                 "riskNews": risk,
                 "scenario": scenario,
             }
-            overall = sum(scores[key] * weights[key] for key in weights)
+            effective_weights = dict(weights)
+            if risk is None:
+                effective_weights["riskNews"] = 0.0
+                active_total = sum(effective_weights.values())
+                effective_weights = {
+                    key: value / active_total for key, value in effective_weights.items()
+                }
+            overall = sum(
+                score * effective_weights[key]
+                for key, score in scores.items()
+                if score is not None
+            )
             reasoning = self._reasoning(
                 candidate,
                 value_detail,
@@ -657,7 +793,13 @@ class LiveDraftRecommendationEngine:
                         "byeWeek": candidate.raw.get("bye") or candidate.raw.get("bye_week"),
                     },
                     "overallScore": round(overall, 2),
-                    "scores": {key: round(value, 2) for key, value in scores.items()},
+                    "scores": {
+                        key: round(value, 2) if value is not None else None
+                        for key, value in scores.items()
+                    },
+                    "effectiveWeights": {
+                        key: round(value, 6) for key, value in effective_weights.items()
+                    },
                     "returnProbability": opponent_detail["returnProbability"],
                     "rosterImpact": roster_detail["impact"],
                     "reasoning": reasoning,
@@ -683,7 +825,7 @@ class LiveDraftRecommendationEngine:
             data_quality = (
                 0.92
                 if not risk_available
-                else (0.88 if item["risk"]["status"] == "unknown" else 0.96)
+                else (0.88 if item["risk"]["available"] is False else 0.96)
             )
             confidence = (
                 0.45 + item["overallScore"] / 200.0 + min(0.08, max(0.0, margin) / 100.0)
@@ -744,6 +886,19 @@ class LiveDraftRecommendationEngine:
             )
         if risk["status"] != "unknown":
             reasons.append(f"injury/news status is {risk['status']}")
+        elif risk.get("basis") == "recent-news-category":
+            categories = sorted(
+                {
+                    str(item.get("category") or "news")
+                    for item in risk.get("recentNews", [])
+                    if str(item.get("category") or "").casefold()
+                    in RiskNewsAgent._NEWS_SCORES
+                }
+            )
+            reasons.append(
+                "recent structured news category adds caution "
+                f"({', '.join(categories)}); headline text was not scored"
+            )
         else:
             reasons.append("injury/news status is unknown, not assumed healthy")
         reasons.append(f"heuristic chance to return is {opponent['returnProbability']:.0%}")

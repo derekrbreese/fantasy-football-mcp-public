@@ -77,6 +77,20 @@ def test_saves_and_loads_latest_live_draft_context(tmp_path: Path) -> None:
     assert json.loads(path.read_text())["f1:222"]["summary"]["totalPicks"] == 2
 
 
+def test_rejects_ambiguous_session_lookup_for_same_league_id(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    first = draft_context("111")
+    second = draft_context("111")
+    second["draft"]["sport"] = "nfl"
+    second["draft"]["sessionKey"] = "nfl:111"
+    second["generatedAt"] = "2026-08-31T22:46:00.000Z"
+    save_live_draft(first, path)
+    save_live_draft(second, path)
+
+    with pytest.raises(LiveDraftValidationError, match="ambiguous"):
+        load_live_draft("111", path=path, reject_ambiguous=True)
+
+
 def test_creates_private_store_directory(tmp_path: Path) -> None:
     path = tmp_path / "private" / "live-drafts.json"
 

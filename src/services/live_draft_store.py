@@ -269,7 +269,10 @@ def save_live_draft(value: Any, path: Optional[Union[str, Path]] = None) -> Dict
 
 
 def load_live_draft(
-    league_id: Optional[str] = None, path: Optional[Union[str, Path]] = None
+    league_id: Optional[str] = None,
+    path: Optional[Union[str, Path]] = None,
+    *,
+    reject_ambiguous: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Load the newest context, optionally restricted to one Yahoo league ID."""
 
@@ -281,6 +284,14 @@ def load_live_draft(
             for session in sessions
             if session.get("draft", {}).get("leagueId") == league_id
         ]
+    if reject_ambiguous and len(sessions) > 1:
+        session_keys = {
+            session.get("draft", {}).get("sessionKey") for session in sessions
+        }
+        if len(session_keys) > 1:
+            raise LiveDraftValidationError(
+                "live draft league identity is ambiguous across stored sessions"
+            )
     if not sessions:
         return None
     minimum = datetime.min.replace(tzinfo=timezone.utc)

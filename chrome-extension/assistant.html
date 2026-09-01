@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fantasy Draft Assistant</title>
+    <link rel="stylesheet" href="assistant.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <p class="eyebrow">YAHOO FANTASY</p>
+      <h1>Draft Assistant</h1>
+      <p class="subtitle">Private recommendations from your loopback MCP server</p>
+    </header>
+
+    <main class="app-main">
+      <section class="controls" aria-label="Recommendation controls">
+        <label for="league-select">Yahoo league</label>
+        <select id="league-select">
+          <option value="">Choose a recorded league</option>
+        </select>
+
+        <label for="strategy-select">Strategy</label>
+        <select id="strategy-select">
+          <option value="balanced" selected>Balanced</option>
+          <option value="conservative">Conservative</option>
+          <option value="aggressive">Aggressive</option>
+        </select>
+
+        <div class="control-actions">
+          <button id="refresh-recommendations" type="button" disabled>Refresh recommendations</button>
+          <a
+            id="open-dashboard"
+            class="dashboard-link"
+            href="http://127.0.0.1:8765/draft-dashboard"
+            target="_blank"
+            rel="noopener noreferrer"
+            hidden
+          >Open full dashboard</a>
+        </div>
+        <p id="controller-status" class="controller-status" role="status">
+          Choose the active Yahoo league to begin.
+        </p>
+      </section>
+
+      <div id="recommendation-view" class="recommendation-view"></div>
+    </main>
+
+    <footer>
+      <strong>Advisory only.</strong> This extension never selects or drafts a player.
+    </footer>
+
+    <script src="webext-api.js"></script>
+    <script src="draft-storage.js"></script>
+    <script src="recommendation-client.js"></script>
+    <script src="recommendation-view-model.js"></script>
+    <script src="recommendation-renderer.js"></script>
+    <script src="recommendation-sidebar-state.js"></script>
+    <script src="assistant.js"></script>
+  </body>
+</html>
