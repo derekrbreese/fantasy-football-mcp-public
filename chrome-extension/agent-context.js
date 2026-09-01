@@ -22,7 +22,18 @@
     return result;
   }
 
-  function sessionToAgentContext(session, generatedAt = new Date().toISOString()) {
+  function validIsoTimestamp(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return null;
+    const timestamp = Date.parse(value);
+    if (!Number.isFinite(timestamp)) return null;
+    const normalizedInput = value.includes('.') ? value : value.replace(/Z$/, '.000Z');
+    return new Date(timestamp).toISOString() === normalizedInput ? value : null;
+  }
+
+  function sessionToAgentContext(session, generatedAt, options = {}) {
+    const contextTimestamp = validIsoTimestamp(generatedAt) ||
+      validIsoTimestamp(session?.updatedAt) ||
+      new Date().toISOString();
     const picks = (session?.picks || [])
       .map(safePick)
       .sort((left, right) => Number(left.pickNumber || Number.MAX_SAFE_INTEGER) - Number(right.pickNumber || Number.MAX_SAFE_INTEGER));
@@ -39,7 +50,8 @@
     return {
       schemaVersion: 1,
       source: 'yahoo-draft-recorder',
-      generatedAt,
+      ...(options.repair === true ? { repair: true } : {}),
+      generatedAt: contextTimestamp,
       draft: {
         sport: session?.sport,
         leagueId: session?.leagueId,
@@ -59,7 +71,7 @@
     };
   }
 
-  const api = { sessionToAgentContext };
+  const api = { sessionToAgentContext, validIsoTimestamp };
   globalScope.YahooDraftAgentContext = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

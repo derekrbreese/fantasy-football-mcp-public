@@ -76,6 +76,15 @@ def _sanitize_pick(value: Any) -> Dict[str, Any]:
     return pick
 
 
+def _repair_requested(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    repair = value.get("repair", False)
+    if not isinstance(repair, bool):
+        raise LiveDraftValidationError("repair must be a boolean")
+    return repair
+
+
 def sanitize_live_draft_context(value: Any) -> Dict[str, Any]:
     """Validate and whitelist the extension payload before writing it to disk."""
 
@@ -95,9 +104,14 @@ def sanitize_live_draft_context(value: Any) -> Dict[str, Any]:
     if not _SESSION_KEY.fullmatch(session_key):
         raise LiveDraftValidationError("sessionKey has an invalid format")
 
+    sport = _safe_string(draft.get("sport"), "sport", 32)
+    league_id = _safe_string(draft.get("leagueId"), "leagueId", 64)
+    if session_key != f"{sport}:{league_id}":
+        raise LiveDraftValidationError("sessionKey must equal sport:leagueId")
+
     clean_draft: Dict[str, Any] = {
-        "sport": _safe_string(draft.get("sport"), "sport", 32),
-        "leagueId": _safe_string(draft.get("leagueId"), "leagueId", 64),
+        "sport": sport,
+        "leagueId": league_id,
         "teamId": _safe_string(draft.get("teamId"), "teamId", 64),
         "sessionKey": session_key,
     }
@@ -105,8 +119,24 @@ def sanitize_live_draft_context(value: Any) -> Dict[str, Any]:
     if updated_at:
         clean_draft["updatedAt"] = updated_at
 
+    repair = _repair_requested(value)
+
     picks = [_sanitize_pick(pick) for pick in picks_value]
     picks.sort(key=lambda pick: pick.get("pickNumber", MAX_PICKS + 1))
+    if repair:
+        if not picks:
+            raise LiveDraftValidationError("repair must include at least one pick")
+        pick_numbers = [pick.get("pickNumber") for pick in picks]
+        if any(pick_number is None for pick_number in pick_numbers):
+            raise LiveDraftValidationError(
+                "repair picks must all be positively numbered"
+            )
+        if len(set(pick_numbers)) != len(pick_numbers):
+            raise LiveDraftValidationError("repair pick numbers must be unique")
+        if pick_numbers != list(range(1, len(pick_numbers) + 1)):
+            raise LiveDraftValidationError(
+                "repair pick numbers must be contiguous from 1"
+            )
     user_roster = [pick for pick in picks if pick["isUserPick"]]
     team_rosters: Dict[str, list[Dict[str, Any]]] = {}
     for pick in picks:
@@ -154,10 +184,34 @@ def _read_all(path: Path) -> Dict[str, Dict[str, Any]]:
     return value
 
 
+def _prepare_store_directory(destination: Path, tighten_existing: bool) -> None:
+    parent = destination.parent
+    try:
+        parent.mkdir(mode=0o700, parents=True, exist_ok=False)
+        created = True
+    except FileExistsError:
+        if not parent.is_dir():
+            raise
+        created = False
+
+    if created:
+        parent.chmod(0o700)
+    elif tighten_existing:
+        if parent.is_symlink():
+            raise LiveDraftValidationError(
+                "default live draft store directory cannot be a symbolic link"
+            )
+        parent.chmod(0o700)
+
+
 def save_live_draft(value: Any, path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     """Atomically save one sanitized draft session and return it."""
 
+    repair = _repair_requested(value)
     context = sanitize_live_draft_context(value)
+    custom_store_configured = path is not None or bool(
+        os.getenv("FANTASY_FOOTBALL_LIVE_DRAFT_PATH")
+    )
     destination = _store_path(path)
     with _STORE_LOCK:
         sessions = _read_all(destination)
@@ -168,12 +222,37 @@ def save_live_draft(value: Any, path: Optional[Union[str, Path]] = None) -> Dict
             incoming_time = _timestamp(context.get("generatedAt"))
             existing_pick = existing.get("summary", {}).get("latestOverallPick", 0)
             incoming_pick = context.get("summary", {}).get("latestOverallPick", 0)
-            if incoming_pick < existing_pick or (
+            if repair:
+                existing_draft = existing.get("draft", {})
+                if any(
+                    context["draft"].get(field) != existing_draft.get(field)
+                    for field in ("sport", "leagueId", "teamId", "sessionKey")
+                ):
+                    raise LiveDraftValidationError(
+                        "repair draft identity does not match the saved session"
+                    )
+                if (
+                    context.get("generatedAt") == existing.get("generatedAt")
+                    and context == existing
+                ):
+                    _prepare_store_directory(
+                        destination, tighten_existing=not custom_store_configured
+                    )
+                    return existing
+                if (
+                    existing_time is None
+                    or incoming_time is None
+                    or incoming_time <= existing_time
+                ):
+                    raise LiveDraftValidationError(
+                        "repair snapshot must be newer than the saved session"
+                    )
+            elif incoming_pick < existing_pick or (
                 existing_time and (incoming_time is None or incoming_time < existing_time)
             ):
                 raise LiveDraftValidationError("stale live draft snapshot rejected")
         sessions[session_key] = context
-        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _prepare_store_directory(destination, tighten_existing=not custom_store_configured)
         handle, temporary_name = tempfile.mkstemp(
             prefix=".live-drafts-", suffix=".json", dir=destination.parent
         )

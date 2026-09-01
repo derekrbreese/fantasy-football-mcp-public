@@ -10,6 +10,7 @@ test('uses Firefox promise-based browser APIs', async () => {
       local: {
         async get(key) { return { [key]: { saved: true } }; },
         async set(value) { return value; },
+        async remove(key) { return key; },
       },
       onChanged: {},
     },
@@ -26,6 +27,7 @@ test('uses Firefox promise-based browser APIs', async () => {
     tabId: 9,
     message: { type: 'STATUS' },
   });
+  assert.equal(await api.storageRemove('drafts'), 'drafts');
   assert.equal(api.native, browser);
 });
 
@@ -36,6 +38,7 @@ test('uses Chromium callback-based chrome APIs', async () => {
       local: {
         get(key, callback) { callback({ [key]: [1, 2] }); },
         set(_value, callback) { callback(); },
+        remove(_key, callback) { callback(); },
       },
       onChanged: {},
     },
@@ -50,6 +53,7 @@ test('uses Chromium callback-based chrome APIs', async () => {
   assert.deepEqual(await api.queryTabs({ active: true }), [{ id: 3 }]);
   assert.deepEqual(await api.sendTabMessage(3, { type: 'STATUS' }), { ok: true });
   await api.storageSet({ drafts: [] });
+  await api.storageRemove('drafts');
   assert.equal(api.native, chrome);
 });
 

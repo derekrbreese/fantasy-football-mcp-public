@@ -13,7 +13,7 @@ When Yahoo exposes the data in the draft row, each pick includes:
 - Fantasy team/manager
 - Local recording timestamp
 
-The extension scans the existing draft log when it loads and then watches DOM changes for new picks. Duplicate observations are merged using the overall pick number. Yahoo's **Results → Round by Round** table provides the authoritative all-team ledger; open that view once to backfill every completed pick. The smaller `Last:` banner continues capturing new picks while other draft tabs are visible.
+The extension scans the existing draft log when it loads and then watches DOM changes for new picks. Ordinary non-ledger observations are merged using the overall pick number. A coherent Yahoo **Results → Round by Round** table instead replaces the stored numbered ledger exactly, preserving missing and duplicate pick numbers so server recommendations remain blocked. Only conservatively unmatched unnumbered live observations remain alongside it; initialed names require matching position and NFL team. Later non-ledger scans preserve that authoritative numbered state while appending genuinely new pick numbers. Open Round by Round once to backfill every completed pick. The smaller `Last:` banner continues capturing new picks while other draft tabs are visible.
 
 Rows labeled **Your Team** are marked as your picks and are highlighted in the popup.
 
@@ -28,6 +28,8 @@ This does not require Chrome's **Load unpacked** feature:
 5. Open or reload a Yahoo live draft under `https://football.fantasysports.yahoo.com/draftclient/...`.
 6. Open **Results → Round by Round** once, then click the extension icon and select **Rescan page**.
 7. Use the popup to review, export, or clear recorded picks.
+
+If the popup reports a ledger problem, it lists the exact missing pick numbers, duplicate pick numbers, and sanitized details/count for unnumbered observations. Missing and duplicate numbers come from the coherent raw authoritative table and remain present in the saved and server-bound pick list; saved-session observations supply the unnumbered details. Conflicting or malformed Yahoo tables show an explicit recovery error instead of appearing healthy, and leaving the authoritative table clears its raw scan status without erasing saved defects. An automatic scan never replaces a saved ledger with a shorter visible prefix, even when Yahoo’s current-pick text makes that prefix look current; it retains and does not sync the saved state and directs the user to explicit repair. While the complete current **Results → Round by Round** ledger is visible, select **Full rescan & repair** and confirm the replacement. The recorder stages a replacement only when every nonempty result row has the expected three-cell Yahoo shape and parses safely, responsive table copies agree, the numbered result is contiguous and unique, and—when Yahoo exposes the current pick—the ledger ends immediately before it. A repair that would lower the saved maximum additionally requires that live current-pick evidence, so it is unavailable while Yahoo is paused or otherwise hides the current pick. The recorder then sends the staged context to the local server with an explicit repair marker and saves it in browser storage only after the server accepts it. Server rejection or unavailability leaves the exact saved browser session unchanged. A durable per-league repair journal survives reloads and sibling tabs; if server acceptance or browser persistence is interrupted, the recorder blocks stale work and reconciles that journal before any further scan or ordinary sync. Same-league scans and repairs are serialized across Yahoo tabs, while independent per-league storage keys prevent another league from being overwritten. Clear atomically records a timestamped league tombstone and removes its pending repair journal; a pre-Clear scan or repair that writes afterward remains hidden, while a genuinely later scan can resume recording. Legacy aggregate cleanup is separately serialized in the extension context so concurrent league clears preserve unrelated drafts. Legacy aggregate sessions remain readable and migrate safely on their next update. Recommendations remain blocked until the authoritative ledger passes those checks.
 
 After changing the code, use **Reload** for the add-on in `about:debugging`, then reload the Yahoo draft tab.
 
@@ -68,7 +70,7 @@ CSV remains available for spreadsheet use.
 
 ## Yahoo layout changes
 
-Yahoo can change its draft page without notice. Detection favors semantic attributes (`data-pick-number`, player/team labels, ARIA labels) and falls back to common draft-row text formats. If the popup says rows were found but could not be parsed, capture the HTML for one completed-pick row from DevTools so its selector can be added to `dom-scanner.js`.
+Yahoo can change its draft page without notice. Detection favors semantic attributes (`data-pick-number`, player/team labels, ARIA labels) and falls back to common draft-row text formats. **Save diagnostics** exports only structural counters and allowlisted field-presence counts; it excludes raw page text, CSS classes, test IDs, ARIA text, URLs, query strings, chat, and manager text. If the popup says rows were found but could not be parsed, compare those counters with a locally inspected completed-pick row so `dom-scanner.js` can be updated without sharing raw page content.
 
 ## Store preparation
 
@@ -82,4 +84,4 @@ No package installation is required; the tests use Node's built-in test runner.
 npm --prefix chrome-extension test
 ```
 
-The tests cover URL sanitization, Round-by-Round parsing, duplicate merging, local session updates, agent-context creation, loopback sync requests, DOM snapshotting, Firefox/Chrome API compatibility, and CSV/JSON export safety.
+The tests cover URL sanitization, fixture-based Round-by-Round parsing and unexpected cell shapes, privacy-minimal diagnostics, authoritative duplicate/gap persistence into agent context, raw/saved ledger-health merging, exact ledger issue reporting, guarded and durable full repair, cross-league storage interleaving, same-league tab serialization, reload reconciliation, duplicate merging, local session updates, loopback sync requests, DOM snapshotting, Firefox/Chrome API compatibility, and CSV/JSON export safety.

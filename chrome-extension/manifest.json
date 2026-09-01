@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Yahoo Fantasy Draft Recorder",
   "description": "Records Yahoo Fantasy Football draft picks locally and shares live draft context with a local MCP server.",
-  "version": "0.3.2",
+  "version": "0.3.8",
   "browser_specific_settings": {
     "gecko": {
       "id": "yahoo-draft-recorder@fantasy-football-mcp",
@@ -27,9 +27,11 @@
       "js": [
         "webext-api.js",
         "draft-parser.js",
+        "ledger-health.js",
         "dom-scanner.js",
         "agent-context.js",
         "sync-client.js",
+        "draft-storage.js",
         "session-store.js",
         "content.js"
       ],

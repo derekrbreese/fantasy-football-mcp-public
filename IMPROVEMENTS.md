@@ -11,6 +11,8 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Deterministic value, roster, dynamics, opponent, risk/news, scenario, and critic specialists.
 - Yahoo roster-slot support, including Superflex aliases.
 - Conservative player resolution, stale-state warnings, and incomplete-ledger blocking.
+- Popup ledger diagnostics with exact missing, duplicate, and sanitized unnumbered-pick details, plus guarded authoritative full repair.
+- Per-league browser storage and durable, cross-tab repair reconciliation without aggregate session-map races.
 - Uncalibrated labels for heuristic probabilities and confidence.
 - Passing Python and extension test suites for the delivered paths.
 
@@ -28,11 +30,7 @@ This list separates the delivered live-draft baseline from prioritized follow-up
    - Add an optional provider contract containing normalized status, source, source timestamp, and retrieval timestamp.
    - Expire stale reports and distinguish unavailable feed, unknown player, and known healthy status.
 
-4. **Ledger repair workflow**
-   - Show exact missing/duplicate/unnumbered picks in the popup.
-   - Add a safe full-rescan/repair action and fixture-based tests for Yahoo markup changes.
-
-5. **Scoring-settings fidelity**
+4. **Scoring-settings fidelity**
    - Incorporate passing-touchdown values, reception scoring, TE premiums, keeper costs, and custom roster eligibility into value and roster scoring.
 
 ## P1 — recommendation quality and latency

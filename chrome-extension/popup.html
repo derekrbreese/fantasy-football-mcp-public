@@ -29,8 +29,15 @@
 
       <p id="status" class="status">Open a Yahoo live draft to begin recording.</p>
 
+      <section id="ledger-health" class="ledger-health" aria-live="polite" hidden>
+        <strong>Ledger needs repair</strong>
+        <p id="ledger-issues"></p>
+        <p>Recommendations remain blocked until the numbered ledger is contiguous.</p>
+      </section>
+
       <div class="toolbar">
         <button id="rescan" type="button">Rescan page</button>
+        <button id="repair" type="button">Full rescan &amp; repair</button>
         <button id="diagnostics" type="button">Save diagnostics</button>
         <button id="export-csv" type="button" disabled>Export CSV</button>
         <button id="export-json" type="button" disabled>Agent JSON</button>
@@ -61,6 +68,8 @@
     </footer>
 
     <script src="webext-api.js"></script>
+    <script src="draft-storage.js"></script>
+    <script src="ledger-health.js"></script>
     <script src="agent-context.js"></script>
     <script src="export.js"></script>
     <script src="popup.js"></script>

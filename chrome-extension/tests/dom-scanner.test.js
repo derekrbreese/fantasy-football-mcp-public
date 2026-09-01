@@ -1,12 +1,16 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { loadDomFixture } = require('./dom-fixture.js');
 
 const {
   collectDiagnosticSnapshots,
+  findCurrentPickNumber,
   findLiveDraftSnapshot,
   findRoundByRoundSnapshots,
+  scanAuthoritativeRoundByRoundTables,
   snapshotPickElement,
 } = require('../dom-scanner.js');
+const { parseRoundByRoundSnapshot } = require('../draft-parser.js');
 
 function node(textContent) {
   return { textContent };
@@ -146,33 +150,119 @@ test('ignores unrelated three-column tables', () => {
   assert.deepEqual(findRoundByRoundSnapshots(root), []);
 });
 
-test('collects sanitized football-related DOM diagnostics without URLs', () => {
+test('extracts the sanitized Yahoo Round by Round DOM fixture', () => {
+  assert.deepEqual(findRoundByRoundSnapshots(loadDomFixture('yahoo-round-by-round.html')), [
+    { roundText: 'ROUND 1', pickText: '1', playerText: 'J. Chase\nWR\nCIN\nBye 10', fantasyTeamText: 'Team 1' },
+    { roundText: 'ROUND 1', pickText: '2', playerText: 'B. Robinson\nRB\nATL\nBye 5', fantasyTeamText: 'Your Team' },
+    { roundText: 'ROUND 1', pickText: '3', playerText: 'J. Jefferson\nWR\nMIN\nBye 6', fantasyTeamText: 'Team 3' },
+  ]);
+});
+
+test('collapses identical responsive copies into one authoritative ledger', () => {
+  const result = scanAuthoritativeRoundByRoundTables(
+    loadDomFixture('yahoo-round-by-round-responsive-duplicate.html'),
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.tableCount, 2);
+  assert.equal(result.distinctTableCount, 1);
+  assert.equal(result.apparentRowCount, 2);
+  assert.deepEqual(result.snapshots.map((snapshot) => snapshot.pickText), ['1', '2']);
+});
+
+test('retains every apparent row so malformed Yahoo markup cannot pass repair', () => {
+  const result = scanAuthoritativeRoundByRoundTables(
+    loadDomFixture('yahoo-round-by-round-malformed.html'),
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.apparentRowCount, 3);
+  assert.deepEqual(result.snapshots.map((snapshot) => snapshot.pickText), ['1', 'Loading', '3']);
+  assert.equal(result.snapshots.map(parseRoundByRoundSnapshot).filter(Boolean).length, 1);
+});
+
+test('counts unexpected cell counts and role-cell rows so repair fails closed', () => {
+  const result = scanAuthoritativeRoundByRoundTables(
+    loadDomFixture('yahoo-round-by-round-unexpected-shapes.html'),
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.apparentRowCount, 4);
+  assert.equal(result.snapshots.map(parseRoundByRoundSnapshot).filter(Boolean).length, 1);
+  assert.deepEqual(result.snapshots.slice(1).map((snapshot) => snapshot.cellShape), [
+    'td:2',
+    'td:4',
+    'role-cell:3',
+  ]);
+});
+
+test('rejects conflicting Round by Round tables as ambiguous', () => {
+  const first = loadDomFixture('yahoo-round-by-round.html').querySelectorAll('table')[0];
+  const partial = loadDomFixture('yahoo-round-by-round-malformed.html').querySelectorAll('table')[0];
+  const result = scanAuthoritativeRoundByRoundTables({
+    querySelectorAll: (selector) => (selector === 'table' ? [first, partial] : []),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.tableCount, 2);
+  assert.equal(result.distinctTableCount, 2);
+  assert.match(result.error, /conflicting/i);
+});
+
+test('finds the live current pick even when no last-pick banner is present', () => {
+  const root = {
+    querySelectorAll: () => [
+      { innerText: 'Whole page ROUND 4, PICK 37 plus other content' },
+      { innerText: 'YOUR TURN\n• ROUND 4, PICK 37' },
+    ],
+  };
+
+  assert.equal(findCurrentPickNumber(root), 37);
+});
+
+test('collects only structural diagnostic counters from adversarial DOM', () => {
   const playerRow = {
     tagName: 'DIV',
-    textContent: 'RB J. COOK III RB · Buf · Bye 7 Round 2 Pick 19',
-    className: 'results-row player-card',
+    textContent: 'Secret manager chat https://example.test/?auth=secret Round 2 Pick 19',
+    className: 'secret-manager-chat auth=secret',
     childElementCount: 4,
     getAttribute(name) {
       return {
         role: 'row',
-        'data-testid': 'team-result',
-        'aria-label': 'James Cook result',
+        'data-pick-number': '19',
+        'data-testid': 'secret-query-string',
+        'aria-label': 'Private Manager Name',
         href: 'https://example.test/?auth=secret',
       }[name] ?? null;
     },
+    querySelector() { return null; },
   };
-  const unrelated = { ...playerRow, textContent: 'Settings Help', className: 'footer' };
-  const root = { querySelectorAll: () => [playerRow, unrelated] };
-
-  assert.deepEqual(collectDiagnosticSnapshots(root), [
-    {
-      tag: 'div',
-      role: 'row',
-      className: 'results-row player-card',
-      testId: 'team-result',
-      ariaLabel: 'James Cook result',
-      childCount: 4,
-      text: 'RB J. COOK III RB · Buf · Bye 7 Round 2 Pick 19',
+  const root = {
+    querySelectorAll(selector) {
+      if (selector === 'table') return [];
+      return [playerRow];
     },
-  ]);
+  };
+
+  const diagnostics = collectDiagnosticSnapshots(root);
+  assert.deepEqual(diagnostics, {
+    candidateCount: 1,
+    snapshottedCandidateCount: 1,
+    roundByRoundTableCount: 0,
+    roundByRoundDistinctTableCount: 0,
+    roundByRoundApparentRowCount: 0,
+    fieldPresence: {
+      pickNumber: 1,
+      roundNumber: 0,
+      roundPick: 0,
+      player: 0,
+      position: 0,
+      nflTeam: 0,
+      fantasyTeam: 0,
+    },
+  });
+  const serialized = JSON.stringify(diagnostics);
+  for (const forbidden of ['secret', 'Manager', 'chat', 'https:', 'auth=', 'className', 'testId', 'ariaLabel']) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
 });

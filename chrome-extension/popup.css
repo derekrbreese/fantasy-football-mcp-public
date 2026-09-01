@@ -82,6 +82,17 @@ main { padding: 16px 20px 14px; }
 .status.warning { color: #9a5900; }
 .status.error { color: #a72e2e; }
 
+.ledger-health {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #e2b66f;
+  border-radius: 8px;
+  color: #714100;
+  background: #fff7e8;
+  font-size: 12px;
+}
+.ledger-health p { margin-top: 4px; overflow-wrap: anywhere; }
+
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
 button {
   padding: 8px 11px;

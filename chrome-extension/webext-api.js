@@ -37,6 +37,9 @@
       storageSet(value) {
         return call(native.storage.local.set, native.storage.local, [value]);
       },
+      storageRemove(key) {
+        return call(native.storage.local.remove, native.storage.local, [key]);
+      },
       queryTabs(query) {
         return call(native.tabs.query, native.tabs, [query]);
       },

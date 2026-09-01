@@ -48,3 +48,27 @@ test('does not include credentials, URLs, or arbitrary session properties', () =
   assert.equal('auth' in context.draft, false);
   assert.equal('url' in context.draft, false);
 });
+
+test('adds a top-level repair marker only for explicit repair sync', () => {
+  const session = { sport: 'f1', leagueId: '123', teamId: '6', sessionKey: 'f1:123', picks: [] };
+
+  assert.equal(sessionToAgentContext(session, '2026-08-31T22:45:00.000Z').repair, undefined);
+  assert.equal(
+    sessionToAgentContext(session, '2026-08-31T22:45:00.000Z', { repair: true }).repair,
+    true,
+  );
+});
+
+test('defaults generatedAt to the validated session snapshot time', () => {
+  const session = {
+    sport: 'f1',
+    leagueId: '123',
+    teamId: '6',
+    sessionKey: 'f1:123',
+    updatedAt: '2026-08-31T22:44:58.255Z',
+    picks: [],
+  };
+
+  assert.equal(sessionToAgentContext(session).generatedAt, session.updatedAt);
+  assert.equal(sessionToAgentContext(session, 'not-an-iso-time').generatedAt, session.updatedAt);
+});

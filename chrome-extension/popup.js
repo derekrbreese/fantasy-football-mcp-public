@@ -1,9 +1,11 @@
 (function initPopup() {
   'use strict';
 
-  const STORAGE_KEY = 'yahooDraftRecorderSessions';
   const extensionApi = YahooDraftWebExtension.createWebExtensionApi(globalThis);
   const webext = extensionApi.native;
+  const lockManager = globalThis.navigator?.locks;
+  const draftStorage = YahooDraftStorage.createDraftStorage(extensionApi, { lockManager });
+  const operationLock = YahooDraftStorage.createSessionOperationLock(lockManager);
   const elements = {
     indicator: document.querySelector('#recording-indicator'),
     draftName: document.querySelector('#draft-name'),
@@ -11,7 +13,10 @@
     status: document.querySelector('#status'),
     tbody: document.querySelector('#picks'),
     empty: document.querySelector('#empty-state'),
+    ledgerHealth: document.querySelector('#ledger-health'),
+    ledgerIssues: document.querySelector('#ledger-issues'),
     rescan: document.querySelector('#rescan'),
+    repair: document.querySelector('#repair'),
     diagnostics: document.querySelector('#diagnostics'),
     csv: document.querySelector('#export-csv'),
     json: document.querySelector('#export-json'),
@@ -23,12 +28,7 @@
   let currentSession;
 
   async function readSessions() {
-    const result = await extensionApi.storageGet(STORAGE_KEY);
-    return result[STORAGE_KEY] || {};
-  }
-
-  function writeSessions(sessions) {
-    return extensionApi.storageSet({ [STORAGE_KEY]: sessions });
+    return draftStorage.listSessions();
   }
 
   async function getActiveTab() {
@@ -68,6 +68,15 @@
     elements.count.textContent = String(picks.length);
     elements.tbody.replaceChildren();
 
+    const savedHealth = YahooDraftLedgerHealth.analyzeLedger(picks);
+    const health = YahooDraftLedgerHealth.mergeVisibleLedgerHealth(
+      diagnostics?.authoritativeLedgerHealth,
+      savedHealth,
+    );
+    const issues = YahooDraftLedgerHealth.formatLedgerIssues(health);
+    elements.ledgerHealth.hidden = !issues;
+    elements.ledgerIssues.textContent = issues;
+
     for (const pick of [...picks].reverse()) {
       const row = document.createElement('tr');
       if (pick.isUserPick === true || /^Your Team$/i.test(pick.fantasyTeam || '')) row.classList.add('user-pick');
@@ -96,12 +105,15 @@
     elements.json.disabled = picks.length === 0;
     elements.clear.disabled = !session;
     elements.rescan.disabled = !isLive;
+    elements.repair.disabled = !isLive;
     elements.diagnostics.disabled = !isLive;
 
     if (!isLive) {
       setStatus(session ? 'Showing a saved draft. Open its Yahoo draft page to resume recording.' : 'Open a Yahoo live draft to begin recording.');
     } else if (diagnostics.error) {
       setStatus(`Recorder error: ${diagnostics.error}`, 'error');
+    } else if (diagnostics.authoritativeLedgerError) {
+      setStatus(`Authoritative ledger error: ${diagnostics.authoritativeLedgerError}`, 'error');
     } else if (diagnostics.candidateCount > 0 && diagnostics.parsedCount === 0) {
       setStatus('Yahoo rows were found, but their fields could not be parsed. The page layout may have changed.', 'warning');
     } else if (picks.length === 0) {
@@ -150,6 +162,22 @@
     await refresh();
   });
 
+  elements.repair.addEventListener('click', async () => {
+    if (!window.confirm('Replace this draft’s saved picks with the complete numbered ledger currently visible in Results → Round by Round? Saved picks will remain unchanged if that ledger is incomplete.')) return;
+    setStatus('Validating the full Round-by-Round ledger…');
+    const result = await sendToActiveTab('YAHOO_DRAFT_RECORDER_REPAIR');
+    if (!result?.ok) {
+      await refresh();
+      setStatus(
+        YahooDraftLedgerHealth.formatRepairFailure(result?.error, result?.health) || 'Repair could not find a complete Round-by-Round ledger. Open Results → Round by Round and try again.',
+        'error',
+      );
+      return;
+    }
+    await refresh();
+    setStatus(`Repair complete: ${result.repairedCount} contiguous numbered picks saved and synced.`);
+  });
+
   elements.diagnostics.addEventListener('click', async () => {
     setStatus('Collecting sanitized Yahoo row diagnostics…');
     const report = await sendToActiveTab('YAHOO_DRAFT_RECORDER_DIAGNOSTICS');
@@ -172,14 +200,13 @@
 
   elements.clear.addEventListener('click', async () => {
     if (!currentSession || !window.confirm('Clear every recorded pick for this draft?')) return;
-    const sessions = await readSessions();
-    delete sessions[currentSession.sessionKey];
-    await writeSessions(sessions);
+    const sessionKey = currentSession.sessionKey;
+    await operationLock.run(sessionKey, () => draftStorage.clearSession(sessionKey));
     await refresh();
   });
 
   webext.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes[STORAGE_KEY]) refresh();
+    if (area === 'local' && YahooDraftStorage.isRelevantStorageChange(changes)) refresh();
   });
 
   getActiveTab()
