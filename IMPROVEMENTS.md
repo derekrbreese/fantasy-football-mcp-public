@@ -1,0 +1,84 @@
+# Improvement Backlog
+
+This list separates the delivered live-draft baseline from prioritized follow-up work. Safety gates should remain in place while recommendation quality evolves.
+
+## Delivered baseline
+
+- Firefox/Chrome Manifest V3 recorder with authoritative Round-by-Round backfill and last-pick capture.
+- Private loopback sync plus sanitized JSON/CSV export.
+- Complete pick, fantasy-team, order, and user-roster context.
+- League-specific state validation and rollback-resistant private persistence.
+- Deterministic value, roster, dynamics, opponent, risk/news, scenario, and critic specialists.
+- Yahoo roster-slot support, including Superflex aliases.
+- Conservative player resolution, stale-state warnings, and incomplete-ledger blocking.
+- Uncalibrated labels for heuristic probabilities and confidence.
+- Passing Python and extension test suites for the delivered paths.
+
+## P0 — correctness and evidence
+
+1. **Historical calibration suite**
+   - Replay completed drafts and measure top-pick hit rate, regret versus later availability, Brier score, and calibration error.
+   - Keep all probability outputs labeled uncalibrated until thresholds are defined and met.
+
+2. **Stable Yahoo player identity**
+   - Capture and propagate only the extracted Yahoo `player_key` identifier where available; never persist or transmit the containing player URL.
+   - Use IDs before conservative normalized-name matching; add fixtures for suffixes, same-surname players, trades, and DST aliases.
+
+3. **Auditable injury/news enrichment**
+   - Add an optional provider contract containing normalized status, source, source timestamp, and retrieval timestamp.
+   - Expire stale reports and distinguish unavailable feed, unknown player, and known healthy status.
+
+4. **Ledger repair workflow**
+   - Show exact missing/duplicate/unnumbered picks in the popup.
+   - Add a safe full-rescan/repair action and fixture-based tests for Yahoo markup changes.
+
+5. **Scoring-settings fidelity**
+   - Incorporate passing-touchdown values, reception scoring, TE premiums, keeper costs, and custom roster eligibility into value and roster scoring.
+
+## P1 — recommendation quality and latency
+
+1. **Value-over-replacement and tier scarcity**
+   - Replace rank-only value components with position-specific replacement levels and tier-drop penalties.
+
+2. **Opponent roster model**
+   - Model each intervening team's open starters, position depth, and observed drafting tendencies instead of relying only on ADP.
+
+3. **Scenario performance budget**
+   - Pre-index drafted identities and limit simulation to a preselected candidate frontier.
+   - Add a draft-clock latency benchmark and enforce p50/p95 budgets for maximum supported inputs.
+
+4. **Sensitivity reporting**
+   - Report when the primary pick changes across conservative, balanced, and aggressive weights.
+   - Make critic checks actionable rather than merely descriptive.
+
+5. **Contingency depth**
+   - Generate position-aware fallback tiers for each pick before the user's next turn, not only one alternate sentence.
+
+## P2 — operations and usability
+
+1. **Signed Firefox distribution**
+   - Package and sign the extension so it survives browser restarts without temporary installation.
+
+2. **Local session management**
+   - Add explicit list/delete/reset tools for local draft sessions with league-scoped confirmation and no caller-controlled filesystem paths.
+   - Add retention limits for old completed drafts.
+
+3. **End-to-end protocol tests**
+   - Start FastMCP on an ephemeral port, post a sanitized recorder fixture, invoke both live-draft MCP tools, and verify privacy and blocking behavior.
+
+4. **Recorder health UI**
+   - Surface last successful sync time, server version, state age, ledger completeness, and actionable recovery instructions.
+
+5. **Observability without sensitive data**
+   - Add local structured timing and error categories while excluding player URLs, credentials, cookies, and raw page content.
+
+6. **Legacy modernization**
+   - Migrate Pydantic V1 validators/configuration and modernize typing incrementally.
+   - Enable broader Ruff rules only after existing debt is reduced without unrelated formatting churn.
+
+## Acceptance principles
+
+- A quality improvement must not weaken ledger completeness, privacy, league isolation, or uncertainty labeling.
+- New probability claims require replay evidence and documented calibration metrics.
+- New external data must have attribution and freshness semantics.
+- Maximum-input recommendation latency must remain bounded and tested.

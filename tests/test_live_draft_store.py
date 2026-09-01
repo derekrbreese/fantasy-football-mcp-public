@@ -1,4 +1,5 @@
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,14 @@ def test_saves_and_loads_latest_live_draft_context(tmp_path: Path) -> None:
     assert json.loads(path.read_text())["f1:222"]["summary"]["totalPicks"] == 2
 
 
+def test_creates_private_store_directory(tmp_path: Path) -> None:
+    path = tmp_path / "private" / "live-drafts.json"
+
+    save_live_draft(draft_context(), path)
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
 def test_strips_unknown_fields_including_credentials(tmp_path: Path) -> None:
     context = draft_context()
     context["auth"] = "top-secret"
@@ -97,3 +106,54 @@ def test_rejects_invalid_or_oversized_context(tmp_path: Path) -> None:
     context["picks"] = context["picks"] * 300
     with pytest.raises(LiveDraftValidationError, match="500"):
         save_live_draft(context, tmp_path / "live-drafts.json")
+
+
+def test_ignores_stale_snapshot_that_would_roll_draft_backward(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    newest = draft_context()
+    newest["generatedAt"] = "2026-08-31T22:50:00.000Z"
+    newest["picks"].append(
+        {
+            "pickNumber": 20,
+            "player": "C. Lamb",
+            "position": "WR",
+            "nflTeam": "DAL",
+            "fantasyTeam": "Team 2",
+            "isUserPick": False,
+        }
+    )
+    stale = draft_context()
+    stale["generatedAt"] = "2026-08-31T22:55:00.000Z"
+
+    save_live_draft(newest, path)
+    with pytest.raises(LiveDraftValidationError, match="stale"):
+        save_live_draft(stale, path)
+
+    assert load_live_draft(path=path)["generatedAt"] == newest["generatedAt"]
+    assert load_live_draft(path=path)["summary"]["latestOverallPick"] == 20
+
+
+def test_load_latest_compares_session_times_as_instants(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    first = draft_context("111")
+    first["generatedAt"] = "2026-08-31T22:50:00Z"
+    later_with_offset = draft_context("222")
+    later_with_offset["generatedAt"] = "2026-08-31T18:51:00-04:00"
+
+    save_live_draft(first, path)
+    save_live_draft(later_with_offset, path)
+
+    assert load_live_draft(path=path)["draft"]["leagueId"] == "222"
+
+
+def test_compares_snapshot_times_as_instants_not_strings(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    first = draft_context()
+    first["generatedAt"] = "2026-08-31T22:50:00Z"
+    later_with_offset = draft_context()
+    later_with_offset["generatedAt"] = "2026-08-31T18:51:00-04:00"
+
+    save_live_draft(first, path)
+    saved = save_live_draft(later_with_offset, path)
+
+    assert saved["generatedAt"] == later_with_offset["generatedAt"]

@@ -380,9 +380,10 @@ async def get_draft_rankings(
                             player_data = player_array[0]
 
                             if isinstance(player_data, list):
-                                player_info = {}
                                 rank = int(key) + 1  # Use the key as rank
+                                player_info = {"rank": rank}
 
+                                api_bye_week = None
                                 for element in player_data:
                                     if isinstance(element, dict):
                                         if "name" in element:
@@ -391,24 +392,52 @@ async def get_draft_rankings(
                                             player_info["team"] = element["editorial_team_abbr"]
                                         if "display_position" in element:
                                             player_info["position"] = element["display_position"]
-                                        
-                                        # Extract bye week with fallback to static data
-                                        api_bye_week = None
+                                        if "status" in element:
+                                            status = str(element["status"]).strip()
+                                            player_info["injury_status"] = {
+                                                "Q": "Questionable",
+                                                "D": "Doubtful",
+                                                "O": "Out",
+                                                "IR": "IR",
+                                                "IR-R": "IR",
+                                                "PUP": "PUP",
+                                                "PUP-R": "PUP",
+                                                "NFI": "NFI",
+                                                "NFI-R": "NFI",
+                                                "SUSP": "Suspended",
+                                                "NA": "Not Active",
+                                                "DTD": "Day-to-Day",
+                                            }.get(status.upper(), status)
+                                            player_info["injury_source"] = "Yahoo Fantasy"
+                                        if "status_full" in element:
+                                            status_full = str(element["status_full"]).strip()
+                                            player_info["injury_note"] = status_full
+                                            if "injury_status" not in player_info:
+                                                lowered = status_full.lower()
+                                                if "injured reserve" in lowered:
+                                                    player_info["injury_status"] = "IR"
+                                                elif "questionable" in lowered:
+                                                    player_info["injury_status"] = "Questionable"
+                                                elif "doubtful" in lowered:
+                                                    player_info["injury_status"] = "Doubtful"
+                                                elif "out" in lowered:
+                                                    player_info["injury_status"] = "Out"
+                                                elif "suspend" in lowered:
+                                                    player_info["injury_status"] = "Suspended"
+                                            player_info["injury_source"] = "Yahoo Fantasy"
+
                                         if "bye_weeks" in element:
                                             bye_weeks_data = element["bye_weeks"]
-                                            if isinstance(bye_weeks_data, dict) and "week" in bye_weeks_data:
+                                            if (
+                                                isinstance(bye_weeks_data, dict)
+                                                and "week" in bye_weeks_data
+                                            ):
                                                 bye_week = bye_weeks_data.get("week")
-                                                # Validate bye week is a valid week number (1-18)
                                                 if bye_week and str(bye_week).isdigit():
                                                     bye_num = int(bye_week)
                                                     if 1 <= bye_num <= 18:
                                                         api_bye_week = bye_num
-                                        
-                                        # Use fallback utility to get bye week (tries API first, then static data)
-                                        team_abbr = element.get("editorial_team_abbr", "")
-                                        player_info["bye"] = get_bye_week_with_fallback(team_abbr, api_bye_week)
 
-                                        # Draft data if available
                                         if "draft_analysis" in element:
                                             draft = element["draft_analysis"]
                                             player_info["average_draft_position"] = draft.get(
@@ -424,10 +453,12 @@ async def get_draft_rankings(
                                                 "percent_drafted", 0
                                             )
                                         else:
-                                            # Use rank as ADP if no draft data
                                             player_info["rank"] = rank
 
                                 if player_info.get("name"):
+                                    player_info["bye"] = get_bye_week_with_fallback(
+                                        player_info.get("team", ""), api_bye_week
+                                    )
                                     players.append(player_info)
 
         # Sort by ADP if available

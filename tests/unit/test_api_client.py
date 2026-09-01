@@ -70,7 +70,12 @@ class TestYahooApiCall:
 
             assert result == {"test": "data"}
             mock_rate_limiter.acquire.assert_called_once()
-            mock_response_cache.set.assert_called_once_with("test/endpoint", {"test": "data"})
+            mock_response_cache.ttl_for_endpoint.assert_called_once_with("test/endpoint")
+            mock_response_cache.set.assert_called_once_with(
+                "test/endpoint",
+                {"test": "data"},
+                ttl=mock_response_cache.ttl_for_endpoint.return_value,
+            )
 
     @pytest.mark.asyncio
     async def test_yahoo_api_call_uses_cache(
@@ -253,12 +258,12 @@ class TestRefreshYahooToken:
     @pytest.mark.asyncio
     async def test_refresh_token_missing_credentials(self, monkeypatch):
         """Test token refresh with missing credentials."""
-        monkeypatch.delenv("YAHOO_CONSUMER_KEY", raising=False)
+        monkeypatch.delenv("YAHOO_CLIENT_ID", raising=False)
 
         result = await refresh_yahoo_token()
 
         assert result["status"] == "error"
-        assert "Missing credentials" in result["message"]
+        assert "Missing Yahoo credentials" in result["message"]
 
     @pytest.mark.asyncio
     async def test_refresh_token_api_error(self, mock_env_vars):

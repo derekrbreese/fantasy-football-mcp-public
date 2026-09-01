@@ -79,6 +79,8 @@ enhanced_mcp_*.py
 !chrome-extension/tests/**
 !tests/
 !tests/test_live_draft_store.py
+!tests/unit/test_live_draft_recommender.py
+!tests/unit/test_live_draft_recommendation_service.py
 
 # Temporary and analysis files
 temp/

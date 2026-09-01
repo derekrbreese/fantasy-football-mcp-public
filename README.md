@@ -10,6 +10,8 @@ That said, the codebase deliberately includes groundwork for a future multi-user
 
 Note that Yahoo Fantasy Sports API access now requires manual approval from Yahoo, and Yahoo currently provides read access only. Write actions such as adding/dropping players or changing lineups are therefore not part of the tool surface.
 
+Contributors and coding agents should read [AGENTS.md](AGENTS.md) for architecture, safety invariants, and validation commands. Prioritized follow-up work is tracked in [IMPROVEMENTS.md](IMPROVEMENTS.md).
+
 ## Core capabilities
 
 - Multi-league Yahoo fantasy football discovery
@@ -35,6 +37,7 @@ The main FastMCP server currently exposes:
 - `ff_build_lineup`
 - `ff_get_draft_results`
 - `ff_get_live_draft_state`
+- `ff_get_live_draft_recommendation`
 - `ff_get_waiver_wire`
 - `ff_get_draft_rankings`
 - `ff_get_draft_recommendation`
@@ -46,7 +49,7 @@ The server also contains maintenance tools used for local operation and troubles
 ## Installation
 
 ```bash
-git clone https://github.com/derekrbreese/fantasy-football-mcp-public.git
+git clone https://github.com/evanchen7/fantasy-football-mcp-public.git
 cd fantasy-football-mcp-public
 pip install -r requirements.txt
 ```
@@ -77,7 +80,9 @@ This single-user mode is the supported way to run the app.
 
 The optional [Yahoo Fantasy Draft Recorder](chrome-extension/README.md) works in Firefox and Chrome. It watches a logged-in Yahoo live draft, captures the full **Results → Round by Round** ledger, saves picks locally in the browser, and exports CSV or agent-ready JSON. It never stores Yahoo authentication data.
 
-When this FastMCP server is running locally on port 8765 (`PORT=8765 python fastmcp_server.py`), the extension also syncs sanitized draft context to a loopback-only endpoint. Agents can call `ff_get_live_draft_state` to retrieve every pick, your roster, and rosters grouped by fantasy team before advising on the next selection. Local server state is written to `~/.fantasy-football-mcp/live-drafts.json` with user-only permissions.
+When this FastMCP server is running locally on port 8765 (`HOST=127.0.0.1 PORT=8765 python fastmcp_server.py`), the extension also syncs sanitized draft context to a loopback-only endpoint. Agents can call `ff_get_live_draft_state` to retrieve every pick, your roster, and rosters grouped by fantasy team before advising on the next selection. Local server state is written to `~/.fantasy-football-mcp/live-drafts.json` with user-only permissions.
+
+Call `ff_get_live_draft_recommendation` with a Yahoo `league_key` during the draft. One in-process orchestrator filters drafted players and combines focused value, roster-construction, positional-run, opponent-survival, risk/news, deterministic simulation, and critic components. It returns a primary pick, alternatives, confidence, estimated return probability, roster impact, risks, and a contingency. The opponent and simulation probabilities are explicitly labeled as uncalibrated heuristics; optional news is used only when a ranking source includes timestamped attribution, and missing news is reported as unknown rather than healthy. Recommendations are blocked when the pick ledger is incomplete, duplicated, or unnumbered.
 
 For Firefox, load `chrome-extension/manifest.json` from **This Firefox** in `about:debugging`. See the extension README for full setup, privacy, persistence, and testing instructions.
 
@@ -86,10 +91,10 @@ For Firefox, load `chrome-extension/manifest.json` from **This Firefox** in `abo
 FastMCP HTTP server:
 
 ```bash
-python fastmcp_server.py
+HOST=127.0.0.1 python fastmcp_server.py
 ```
 
-By default the server listens on port 8000 locally. Cloud platforms can set `PORT`.
+By default the server listens on port 8000. Always bind local sessions to `127.0.0.1`; the MCP HTTP transport is not authenticated. Container and cloud platforms that provide their own access boundary can explicitly set `HOST=0.0.0.0` and `PORT`.
 
 Traditional stdio MCP entry point:
 
@@ -101,7 +106,7 @@ Docker:
 
 ```bash
 docker build -t fantasy-football-mcp .
-docker run --env-file .env -p 8080:8080 fantasy-football-mcp
+docker run --env-file .env -e HOST=0.0.0.0 -e PORT=8080 -p 8080:8080 fantasy-football-mcp
 ```
 
 Authentication files and token JSON files are explicitly excluded from the Docker build context.

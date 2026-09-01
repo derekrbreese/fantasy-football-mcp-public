@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -131,6 +132,16 @@ def sanitize_live_draft_context(value: Any) -> Dict[str, Any]:
     }
 
 
+def _timestamp(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _read_all(path: Path) -> Dict[str, Dict[str, Any]]:
     if not path.exists():
         return {}
@@ -150,8 +161,19 @@ def save_live_draft(value: Any, path: Optional[Union[str, Path]] = None) -> Dict
     destination = _store_path(path)
     with _STORE_LOCK:
         sessions = _read_all(destination)
-        sessions[context["draft"]["sessionKey"]] = context
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        session_key = context["draft"]["sessionKey"]
+        existing = sessions.get(session_key)
+        if existing:
+            existing_time = _timestamp(existing.get("generatedAt"))
+            incoming_time = _timestamp(context.get("generatedAt"))
+            existing_pick = existing.get("summary", {}).get("latestOverallPick", 0)
+            incoming_pick = context.get("summary", {}).get("latestOverallPick", 0)
+            if incoming_pick < existing_pick or (
+                existing_time and (incoming_time is None or incoming_time < existing_time)
+            ):
+                raise LiveDraftValidationError("stale live draft snapshot rejected")
+        sessions[session_key] = context
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         handle, temporary_name = tempfile.mkstemp(
             prefix=".live-drafts-", suffix=".json", dir=destination.parent
         )
@@ -182,4 +204,5 @@ def load_live_draft(
         ]
     if not sessions:
         return None
-    return max(sessions, key=lambda session: str(session.get("generatedAt") or ""))
+    minimum = datetime.min.replace(tzinfo=timezone.utc)
+    return max(sessions, key=lambda session: _timestamp(session.get("generatedAt")) or minimum)

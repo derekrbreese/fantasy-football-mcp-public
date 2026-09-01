@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 import fantasy_football_multi_league
+from src.services.live_draft_recommendation_service import get_live_draft_recommendation
 from src.services.live_draft_store import LiveDraftValidationError, load_live_draft, save_live_draft
 
 # REMOVED: enhanced_mcp_tools imports - no longer using wrapper tools
@@ -92,6 +93,10 @@ _TOOL_PROMPTS: Dict[str, str] = {
     "ff_get_live_draft_state": (
         "Read the latest live Yahoo draft state synced from the local browser extension. "
         "Returns every recorded pick, all team rosters, and the user's roster."
+    ),
+    "ff_get_live_draft_recommendation": (
+        "Get one low-latency next-pick answer from the synced Yahoo draft ledger. "
+        "Runs value, roster, dynamics, opponent, risk/news, simulation, and critic specialists."
     ),
     "ff_get_waiver_wire": (
         "List waiver-wire candidates sorted by rank, points, or trends to aid "
@@ -629,6 +634,47 @@ async def ff_get_live_draft_state(
         f"Loaded live draft {context['draft']['sessionKey']} with {len(context['picks'])} picks"
     )
     return {"status": "success", "liveDraft": context}
+
+
+@server.tool(
+    name="ff_get_live_draft_recommendation",
+    description=(
+        "Recommend the next pick from the private live Yahoo ledger and current Yahoo "
+        "rankings. Returns a primary pick, alternatives, confidence, return probability, "
+        "roster impact, risks, specialist details, and a contingency plan."
+    ),
+    meta=_tool_meta("ff_get_live_draft_recommendation"),
+)
+async def ff_get_live_draft_recommendation(
+    ctx: Context,
+    league_key: str,
+    league_id: Optional[str] = None,
+    strategy: Literal["conservative", "aggressive", "balanced"] = "balanced",
+    count: int = 5,
+    ranking_count: int = 250,
+    simulations: int = 256,
+) -> Dict[str, Any]:
+    async def call_yahoo_tool(name: str, **arguments: Any) -> Dict[str, Any]:
+        return await _call_legacy_tool(name, ctx=ctx, **arguments)
+
+    try:
+        result = await get_live_draft_recommendation(
+            call_yahoo_tool,
+            league_key=league_key,
+            league_id=league_id,
+            strategy=strategy,
+            count=count,
+            ranking_count=ranking_count,
+            simulations=simulations,
+        )
+    except LiveDraftValidationError as exc:
+        return {"status": "error", "message": str(exc)}
+    if result.get("status") == "success":
+        await ctx.info(
+            f"Evaluated live draft pick {result['state']['currentOverallPick']} "
+            f"with {len(result['recommendations'])} recommendations"
+        )
+    return result
 
 
 _ALLOWED_DRAFT_SYNC_ORIGINS = (
@@ -1842,6 +1888,7 @@ __all__ = [
     "ff_clear_cache",
     "ff_get_draft_results",
     "ff_get_live_draft_state",
+    "ff_get_live_draft_recommendation",
     "ff_get_waiver_wire",
     "ff_get_draft_rankings",
     "ff_get_draft_recommendation",
@@ -1927,6 +1974,7 @@ def get_tool_selection_guide() -> str:
                     "tools": {
                         "ff_build_lineup": "AI Optimization: Championship-level lineup recommendations with positional constraints",
                         "ff_get_draft_rankings": "Player Tiers: Value assessment and tier-based rankings",
+                        "ff_get_live_draft_recommendation": "Live Draft: Specialist next-pick recommendation from the synced browser ledger",
                         "ff_analyze_reddit_sentiment": "Market Intelligence: Public opinion and trending players",
                     },
                 },
@@ -1952,6 +2000,9 @@ def get_tool_selection_guide() -> str:
                 ],
                 "draft_preparation": [
                     "ff_get_leagues -> ff_get_league_info -> ff_get_draft_rankings -> ff_analyze_draft_state"
+                ],
+                "live_draft": [
+                    "Firefox recorder sync -> ff_get_live_draft_state -> ff_get_live_draft_recommendation"
                 ],
                 "competitive_analysis": [
                     "ff_get_league_info -> ff_get_standings -> ff_compare_teams -> ff_get_matchup"

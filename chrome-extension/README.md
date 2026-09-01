@@ -40,10 +40,10 @@ A temporary add-on is removed when Firefox restarts. Permanent installation in s
 Start the FastMCP server on its default loopback port before opening the draft:
 
 ```bash
-PORT=8765 python fastmcp_server.py
+HOST=127.0.0.1 PORT=8765 python fastmcp_server.py
 ```
 
-After each changed scan, the extension posts sanitized agent context to `http://127.0.0.1:8765/draft-sync`. An agent connected to this MCP server can call `ff_get_live_draft_state` immediately before recommending the next pick. Synced state is stored with user-only file permissions at `~/.fantasy-football-mcp/live-drafts.json`.
+After each changed scan, the extension posts sanitized agent context to `http://127.0.0.1:8765/draft-sync`. An agent connected to this MCP server can call `ff_get_live_draft_state` to inspect the ledger or `ff_get_live_draft_recommendation` for an orchestrated primary pick, alternatives, confidence, risk, and contingency. Synced state is stored with user-only file permissions at `~/.fantasy-football-mcp/live-drafts.json`.
 
 The endpoint accepts writes only from the loopback interface and validates and whitelists every field. If the server is not running, recording still works and the popup reports that agent sync is offline.
 

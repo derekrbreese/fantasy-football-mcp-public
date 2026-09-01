@@ -22,6 +22,66 @@ async def get_all_teams_info(league_key):
     raise NotImplementedError("Must import from fantasy_football_multi_league")
 
 
+def extract_yahoo_roster_positions(payload: Dict) -> list[Dict]:
+    """Extract and normalize Yahoo roster slots from a league settings response."""
+
+    positions: list[Dict] = []
+    aliases = {
+        "DEF": "DST",
+        "D/ST": "DST",
+        "W/R/T": "FLEX",
+        "Q/W/R/T": "SUPERFLEX",
+        "OP": "SUPERFLEX",
+    }
+
+    def add_position(value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        raw_position = value.get("position")
+        if not raw_position:
+            return
+        position = aliases.get(str(raw_position).upper(), str(raw_position).upper())
+        try:
+            count = max(0, int(value.get("count", 1)))
+        except (TypeError, ValueError):
+            count = 1
+        positions.append(
+            {
+                "position": position,
+                "position_type": value.get("position_type"),
+                "count": count,
+            }
+        )
+
+    def visit_roster_container(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit_roster_container(item)
+        elif isinstance(value, dict):
+            if isinstance(value.get("roster_position"), dict):
+                add_position(value["roster_position"])
+            elif "position" in value:
+                add_position(value)
+            else:
+                for key, item in value.items():
+                    if key != "count":
+                        visit_roster_container(item)
+
+    def find(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                find(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if key == "roster_positions":
+                    visit_roster_container(item)
+                else:
+                    find(item)
+
+    find(payload)
+    return positions
+
+
 async def handle_ff_get_leagues(arguments: Dict) -> Dict:
     """Get all fantasy football leagues for the authenticated user.
 
@@ -77,7 +137,8 @@ async def handle_ff_get_league_info(arguments: Dict) -> Dict:
 
     league = leagues[league_key]
     team_info = await get_user_team_info(league_key)
-    _ = await yahoo_api_call(f"league/{league_key}")
+    settings_data = await yahoo_api_call(f"league/{league_key}/settings")
+    roster_positions = extract_yahoo_roster_positions(settings_data)
 
     return {
         "league": league["name"],
@@ -86,6 +147,7 @@ async def handle_ff_get_league_info(arguments: Dict) -> Dict:
         "teams": league["num_teams"],
         "current_week": league["current_week"],
         "scoring_type": league["scoring_type"],
+        "roster_positions": roster_positions,
         "status": "active" if not league["is_finished"] else "finished",
         "your_team": {
             "name": team_info.get("team_name", "Unknown") if team_info else "Not found",

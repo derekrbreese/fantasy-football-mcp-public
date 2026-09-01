@@ -78,8 +78,94 @@ class TestAdminHandlers:
             mock_response_cache.clear.assert_called_once_with("league/*")
 
 
+class TestDraftRankings:
+    @pytest.mark.asyncio
+    async def test_rankings_include_yahoo_injury_status(self):
+        from fantasy_football_multi_league import get_draft_rankings
+
+        response = {
+            "fantasy_content": {
+                "league": [
+                    {"league_key": "461.l.61410"},
+                    {
+                        "players": {
+                            "0": {
+                                "player": [
+                                    [
+                                        {"name": {"full": "Josh Allen"}},
+                                        {"editorial_team_abbr": "BUF"},
+                                        {"display_position": "QB"},
+                                        {"status": "IR-R"},
+                                        {"status_full": "Injured Reserve"},
+                                        {
+                                            "draft_analysis": {
+                                                "average_pick": "8.2",
+                                                "percent_drafted": 100,
+                                            }
+                                        },
+                                    ]
+                                ]
+                            },
+                            "count": 1,
+                        }
+                    },
+                ]
+            }
+        }
+
+        with patch(
+            "fantasy_football_multi_league.yahoo_api_call",
+            AsyncMock(return_value=response),
+        ):
+            result = await get_draft_rankings("461.l.61410", count=1)
+
+        assert result[0]["injury_status"] == "IR"
+        assert result[0]["injury_note"] == "Injured Reserve"
+        assert result[0]["rank"] == 1
+
+
 class TestLeagueHandlers:
     """Test league-level handlers."""
+
+    def test_extracts_yahoo_roster_positions(self):
+        from src.handlers.league_handlers import extract_yahoo_roster_positions
+
+        payload = {
+            "fantasy_content": {
+                "league": [
+                    {"league_key": "461.l.61410"},
+                    {
+                        "settings": [
+                            {
+                                "roster_positions": [
+                                    {"roster_position": {"position": "QB", "count": 1}},
+                                    {
+                                        "roster_position": {
+                                            "position": "Q/W/R/T",
+                                            "position_type": "F",
+                                            "count": 1,
+                                        }
+                                    },
+                                    {
+                                        "roster_position": {
+                                            "position": "BN",
+                                            "position_type": "BN",
+                                            "count": 6,
+                                        }
+                                    },
+                                ]
+                            }
+                        ]
+                    },
+                ]
+            }
+        }
+
+        assert extract_yahoo_roster_positions(payload) == [
+            {"position": "QB", "position_type": None, "count": 1},
+            {"position": "SUPERFLEX", "position_type": "F", "count": 1},
+            {"position": "BN", "position_type": "BN", "count": 6},
+        ]
 
     @pytest.mark.asyncio
     async def test_get_leagues_error_handling(self):
