@@ -16,9 +16,10 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Persistent Firefox Draft Assistant sidebar with explicit league selection, shared fail-closed recommendation components, and no Yahoo-page injection or draft actions.
 - Loopback-only local dashboard with a configurable recommendation board, roster and draft-history views, specialist comparisons, critic checks, and data-source diagnostics.
 - Exact-session local DraftSheets/JSON profile import with bounded parsing, private atomic storage, and zero Yahoo API calls when a matching profile is available.
-- Optional bounded FantasyPros injury/news enrichment with explicit free-tier coverage, one-request-per-second pacing, a private persistent 95-call UTC-day budget, caching, rate-limit backoff, freshness, attribution, and per-player unknown-data weighting.
+- Optional bounded FantasyPros injury/news enrichment with explicit API-tier coverage, one-request-per-second pacing, a private persistent 95-call UTC-day budget, FantasyPros attribution, rate-limit backoff, freshness, and per-player unknown-data weighting. Normalized base catalog/injury/news snapshots persist in a private SQLite cache (24-hour complete catalog; five-minute partial-catalog/injury/news retry), so fresh data survives restart without another request; failed refreshes can use stale identity data only while recommendation status/headlines remain unknown.
 - Strict local recommendation UI boundary: allowlisted bounded requests, exact saved/Yahoo league resolution, authenticated-team verification, serialized Yahoo calls, post-scoring snapshot revalidation, and no-store responses.
 - Uncalibrated labels for heuristic probabilities and confidence.
+- Beginner-facing local usage documentation covering API-free live drafts, Instant Mock Draft profile reuse, Firefox/Chrome loading, state-before-recommendation diagnosis, reset versus repair, and privacy-safe troubleshooting.
 - Passing Python and extension test suites for the delivered paths.
 
 ## P0 — correctness and evidence
@@ -32,8 +33,8 @@ This list separates the delivered live-draft baseline from prioritized follow-up
    - Use IDs before conservative normalized-name matching; add fixtures for suffixes, same-surname players, trades, and DST aliases.
 
 3. **Auditable injury/news enrichment**
-   - Delivered the optional provider contract with normalized status, source/item/snapshot timestamps, bounded caches and identity lookups, a private fail-closed daily request budget, explicit limited-coverage warnings, and unknown-data semantics.
-   - Next, evaluate identity coverage and freshness behavior against completed draft snapshots before treating provider coverage as comprehensive.
+   - Delivered the optional provider contract with normalized status, source/item/snapshot timestamps, bounded persistent base snapshots and in-memory targeted identity lookups, a private fail-closed daily request budget, explicit limited-coverage warnings, and unknown-data semantics.
+   - Next, evaluate identity coverage, cache hit/refresh behavior, and freshness against completed draft snapshots before treating provider coverage as comprehensive.
 
 4. **Scoring-settings fidelity**
    - Roster-slot and team-count import is delivered for the local DraftSheets path.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import stat
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from typing import Any
 import pytest
 
 from src.services import fantasypros_request_budget as request_budget_module
+from src.services import fantasypros_snapshot_cache as snapshot_cache_module
 from src.services.fantasypros_provider import FantasyProsProvider, FantasyProsProviderError
 from src.services.fantasypros_request_budget import (
     FantasyProsDailyRequestBudget,
@@ -21,13 +23,18 @@ from src.services.fantasypros_request_budget import (
 
 
 @pytest.fixture(autouse=True)
-def isolate_persistent_request_budget(
+def isolate_persistent_fantasypros_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         request_budget_module,
         "DEFAULT_REQUEST_BUDGET_PATH",
         tmp_path / "app-private" / "fantasypros-request-budget.json",
+    )
+    monkeypatch.setattr(
+        snapshot_cache_module,
+        "DEFAULT_SNAPSHOT_CACHE_PATH",
+        tmp_path / "app-private" / "fantasypros-snapshots.sqlite3",
     )
 
 
@@ -566,6 +573,7 @@ async def test_provider_enforces_persistent_daily_budget_before_network_and_retu
         clock=lambda: now,
         daily_request_limit=3,
         daily_budget_path=budget_path,
+        snapshot_cache_path=tmp_path / "first-snapshots.sqlite3",
     )
     await first.get_player_updates(
         [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
@@ -580,6 +588,7 @@ async def test_provider_enforces_persistent_daily_budget_before_network_and_retu
         clock=lambda: now,
         daily_request_limit=3,
         daily_budget_path=budget_path,
+        snapshot_cache_path=tmp_path / "restarted-snapshots.sqlite3",
     )
     result = await restarted.get_player_updates(
         [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
@@ -1031,6 +1040,8 @@ async def test_limited_catalog_resolves_current_injury_from_exact_row_identity()
         "reportedCount": 502,
         "reportedLimit": 10,
         "publicApiLimited": True,
+        "stale": False,
+        "refreshFailed": False,
     }
     exact, wrong_team = result["players"]
     assert exact["identityResolved"] is True
@@ -1134,7 +1145,11 @@ async def test_limited_catalog_bounds_and_caches_targeted_news_identity_lookups(
     current[0] += timedelta(hours=6)
     await provider.get_player_updates(candidates, year=2026)
     new_calls = transport.calls[call_count:]
-    assert {call["url"].rsplit("/", 1)[-1] for call in new_calls} == {"injuries", "news"}
+    assert {call["url"].rsplit("/", 1)[-1] for call in new_calls} == {
+        "players",
+        "injuries",
+        "news",
+    }
 
 
 @pytest.mark.asyncio
@@ -1181,3 +1196,560 @@ async def test_targeted_news_identity_failure_is_generic_and_remains_unknown() -
     assert result["players"][0]["identityResolved"] is False
     assert result["players"][0]["news_fresh"] is False
     assert secret not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_normalized_snapshots_are_private_and_reused_across_restarts(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    now = datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+    first_transport = FakeTransport(source_payloads)
+    first = _provider(
+        api_key="unit-test-secret",
+        transport=first_transport,
+        clock=lambda: now,
+    )
+
+    first_result = await first.get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}], year=2026
+    )
+
+    cache_path = snapshot_cache_module.DEFAULT_SNAPSHOT_CACHE_PATH
+    budget_count = json.loads(
+        first._daily_request_budget.path.read_text(encoding="utf-8")
+    )["requestCount"]
+    restarted_transport = FakeTransport(source_payloads)
+    restarted = _provider(
+        api_key="different-test-secret",
+        transport=restarted_transport,
+        clock=lambda: now,
+    )
+    restarted_result = await restarted.get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}], year=2026
+    )
+
+    assert first_result["players"] == restarted_result["players"]
+    assert len(first_transport.calls) == 3
+    assert restarted_transport.calls == []
+    assert json.loads(
+        restarted._daily_request_budget.path.read_text(encoding="utf-8")
+    )["requestCount"] == budget_count
+    assert stat.S_IMODE(cache_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(cache_path.stat().st_mode) == 0o600
+    assert not cache_path.with_name(f"{cache_path.name}-wal").exists()
+    assert not cache_path.with_name(f"{cache_path.name}-journal").exists()
+
+    with sqlite3.connect(cache_path) as connection:
+        rows = connection.execute(
+            "SELECT endpoint, variant, records_json FROM snapshots ORDER BY endpoint"
+        ).fetchall()
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert journal_mode == "delete"
+    assert {(endpoint, variant) for endpoint, variant, _records in rows} == {
+        ("injuries", "weekly"),
+        ("news", "recent"),
+        ("players", "catalog"),
+    }
+    expected_fields = {
+        "players": {"id", "name", "position", "team"},
+        "injuries": {"id", "name", "position", "team", "status", "updatedAt"},
+        "news": {"id", "headline", "category", "publishedAt"},
+    }
+    for endpoint, _variant, stored_json in rows:
+        records = json.loads(stored_json)
+        assert all(set(record) == expected_fields[endpoint] for record in records)
+
+    stored_bytes = cache_path.read_bytes()
+    for forbidden in (
+        b"unit-test-secret",
+        b"different-test-secret",
+        b"must-not-escape",
+        b"raw medical commentary",
+        b"example.invalid",
+        b"include_probabilities",
+        b"order_by",
+        b"x-api-key",
+        b"https://",
+    ):
+        assert forbidden not in stored_bytes
+
+
+@pytest.mark.asyncio
+async def test_explicit_snapshot_path_does_not_chmod_existing_shared_parent(
+    tmp_path: Path,
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
+    cache_path = parent / "fantasypros-snapshots.sqlite3"
+    provider = _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: datetime(2026, 9, 1, 16, tzinfo=timezone.utc),
+        snapshot_cache_path=cache_path,
+    )
+
+    await provider.get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}], year=2026
+    )
+
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(cache_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_default_snapshot_cache_tightens_existing_app_directory(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    parent = snapshot_cache_module.DEFAULT_SNAPSHOT_CACHE_PATH.parent
+    parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
+
+    await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: datetime(2026, 9, 1, 16, tzinfo=timezone.utc),
+    ).get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}], year=2026
+    )
+
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_snapshot_symlink_is_not_followed_and_live_result_survives(
+    tmp_path: Path,
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    target = parent / "unrelated.txt"
+    sentinel = b"unrelated data must remain unchanged"
+    target.write_bytes(sentinel)
+    cache_path = parent / "snapshots.sqlite3"
+    cache_path.symlink_to(target)
+    transport = FakeTransport(source_payloads)
+
+    result = await _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: datetime(2026, 9, 1, 16, tzinfo=timezone.utc),
+        snapshot_cache_path=cache_path,
+    ).get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}], year=2026
+    )
+
+    assert result["status"] == "success"
+    assert len(transport.calls) == 3
+    assert cache_path.is_symlink()
+    assert target.read_bytes() == sentinel
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_state", ["corrupt", "wrong-schema"])
+async def test_unusable_snapshot_database_is_a_miss_without_losing_live_data(
+    tmp_path: Path,
+    source_payloads: dict[str, dict[str, Any]],
+    cache_state: str,
+) -> None:
+    cache_path = tmp_path / cache_state / "snapshots.sqlite3"
+    cache_path.parent.mkdir()
+    if cache_state == "corrupt":
+        cache_path.write_bytes(b"not a sqlite database")
+    else:
+        with sqlite3.connect(cache_path) as connection:
+            connection.execute("PRAGMA user_version = 99")
+    transport = FakeTransport(source_payloads)
+
+    result = await _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: datetime(2026, 9, 1, 16, tzinfo=timezone.utc),
+        snapshot_cache_path=cache_path,
+    ).get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}], year=2026
+    )
+
+    assert result["status"] == "success"
+    assert result["players"][0]["injury_status"] == "questionable"
+    assert len(result["players"][0]["recentNews"]) == 1
+    assert len(transport.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_persistent_snapshots_preserve_separate_resource_ttls(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
+    first = _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: current[0],
+    )
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    await first.get_player_updates(identity, year=2026)
+
+    current[0] += timedelta(minutes=6)
+    restarted_transport = FakeTransport(source_payloads)
+    restarted = _provider(
+        api_key="secret",
+        transport=restarted_transport,
+        clock=lambda: current[0],
+    )
+    result = await restarted.get_player_updates(identity, year=2026)
+
+    assert result["status"] == "success"
+    assert [call["url"].rsplit("/", 1)[-1] for call in restarted_transport.calls] == [
+        "injuries",
+        "news",
+    ]
+    assert result["coverage"]["playerCatalog"]["fetchedAt"] == (
+        "2026-09-01T16:00:00Z"
+    )
+    assert result["coverage"]["injuries"]["fetchedAt"] == "2026-09-01T16:06:00Z"
+    assert result["coverage"]["news"]["fetchedAt"] == "2026-09-01T16:06:00Z"
+
+
+@pytest.mark.asyncio
+async def test_stale_last_known_good_snapshots_survive_refresh_failures(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    current[0] += timedelta(minutes=6)
+    failure = RuntimeError("response details must not escape")
+    transport = FakeTransport(
+        {
+            "players": source_payloads["players"],
+            "injuries": failure,
+            "news": failure,
+        }
+    )
+    result = await _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    assert result["status"] == "degraded"
+    assert [call["url"].rsplit("/", 1)[-1] for call in transport.calls] == [
+        "injuries",
+        "news",
+    ]
+    assert result["players"][0]["identityResolved"] is True
+    assert result["players"][0]["injury_status"] == "unknown"
+    assert result["players"][0]["injury_source"] is None
+    assert result["players"][0]["injury_fresh"] is False
+    assert result["players"][0]["news_source"] is None
+    assert result["players"][0]["news_fresh"] is False
+    assert result["players"][0]["recentNews"] == []
+    assert result["coverage"]["playerCatalog"]["stale"] is False
+    for resource in ("injuries", "news"):
+        assert result["coverage"][resource]["stale"] is True
+        assert result["coverage"][resource]["refreshFailed"] is True
+    assert any("injuries refresh failed" in warning for warning in result["warnings"])
+    assert any("news refresh failed" in warning for warning in result["warnings"])
+    assert all("stale snapshot" in warning for warning in result["warnings"])
+    assert "response details" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_snapshots_older_than_retention_ceiling_are_not_used_as_evidence(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    current[0] += timedelta(days=8)
+    failure = RuntimeError("provider unavailable")
+    transport = FakeTransport(
+        {"players": failure, "injuries": failure, "news": failure}
+    )
+    result = await _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    assert len(transport.calls) == 3
+    assert result["status"] == "degraded"
+    assert result["players"][0]["identityResolved"] is False
+    assert result["players"][0]["injury_status"] == "unknown"
+    assert result["players"][0]["recentNews"] == []
+    for resource in ("playerCatalog", "injuries", "news"):
+        assert result["coverage"][resource]["stale"] is False
+        assert result["coverage"][resource]["refreshFailed"] is True
+        assert result["coverage"][resource]["fetchedAt"] is None
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_uses_stale_snapshots_and_stops_queued_refreshes(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    current[0] += timedelta(minutes=6)
+    rate_limit = FantasyProsProviderError("HTTP 429", status_code=429)
+    transport = FakeTransport(
+        {
+            "players": source_payloads["players"],
+            "injuries": rate_limit,
+            "news": source_payloads["news"],
+        }
+    )
+    result = await _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["url"].endswith("/injuries")
+    for resource in ("injuries", "news"):
+        assert result["coverage"][resource]["stale"] is True
+        assert result["coverage"][resource]["refreshFailed"] is True
+    assert sum("rate-limited" in warning for warning in result["warnings"]) == 2
+    assert all("stale snapshot" in warning for warning in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_partial_player_catalog_uses_short_refresh_ttl(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
+    source_payloads["players"].update(
+        {"count": 502, "limit": 10, "public_api_limited": True}
+    )
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    current[0] += timedelta(minutes=6)
+    transport = FakeTransport(source_payloads)
+    await _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    assert {call["url"].rsplit("/", 1)[-1] for call in transport.calls} == {
+        "players",
+        "injuries",
+        "news",
+    }
+
+
+@pytest.mark.asyncio
+async def test_complete_public_limited_catalog_uses_long_refresh_ttl(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
+    source_payloads["players"].update(
+        {
+            "count": 500,
+            "public_api_limited": True,
+            "players": [
+                {
+                    "player_id": player_id,
+                    "player_name": f"Player {player_id}",
+                    "position_id": "RB",
+                    "team_id": "SF",
+                }
+                for player_id in range(1, 501)
+            ],
+        }
+    )
+    identity = [{"name": "Player 1", "position": "RB", "team": "SF"}]
+    first_result = await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    current[0] += timedelta(minutes=6)
+    restarted_transport = FakeTransport(source_payloads)
+    restarted_result = await _provider(
+        api_key="secret",
+        transport=restarted_transport,
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    assert [call["url"].rsplit("/", 1)[-1] for call in restarted_transport.calls] == [
+        "injuries",
+        "news",
+    ]
+    assert first_result["coverage"]["playerCatalog"] == {
+        "fetchedAt": "2026-09-01T16:00:00Z",
+        "returned": 500,
+        "reportedCount": 500,
+        "reportedLimit": None,
+        "publicApiLimited": True,
+        "stale": False,
+        "refreshFailed": False,
+    }
+    assert restarted_result["coverage"]["playerCatalog"] == (
+        first_result["coverage"]["playerCatalog"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_daily_budget_exhaustion_uses_stale_snapshots_without_network(
+    tmp_path: Path,
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
+    budget_path = tmp_path / "app-private" / "budget.json"
+    cache_path = tmp_path / "app-private" / "snapshots.sqlite3"
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: current[0],
+        daily_request_limit=3,
+        daily_budget_path=budget_path,
+        snapshot_cache_path=cache_path,
+    ).get_player_updates(identity, year=2026)
+
+    current[0] += timedelta(minutes=6)
+    transport = FakeTransport(source_payloads)
+    result = await _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: current[0],
+        daily_request_limit=3,
+        daily_budget_path=budget_path,
+        snapshot_cache_path=cache_path,
+    ).get_player_updates(identity, year=2026)
+
+    assert transport.calls == []
+    assert result["status"] == "degraded"
+    assert result["warnings"] == [
+        "FantasyPros daily request budget is exhausted; using stale snapshots where "
+        "available and missing data remains unknown until the next UTC day"
+    ]
+    assert result["players"][0]["identityResolved"] is True
+    assert result["players"][0]["injury_status"] == "unknown"
+    assert result["players"][0]["news_fresh"] is False
+    assert result["players"][0]["recentNews"] == []
+    assert result["coverage"]["playerCatalog"]["stale"] is False
+    for resource in ("injuries", "news"):
+        assert result["coverage"][resource]["stale"] is True
+        assert result["coverage"][resource]["refreshFailed"] is True
+    assert json.loads(budget_path.read_text(encoding="utf-8"))["requestCount"] == 3
+
+
+@pytest.mark.asyncio
+async def test_snapshot_keys_isolate_injury_year_and_week(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    now = datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: now,
+    ).get_player_updates(identity, year=2025, week=17)
+
+    transport = FakeTransport(source_payloads)
+    await _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: now,
+    ).get_player_updates(identity, year=2026, week=1)
+
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["url"].endswith("/injuries")
+    assert transport.calls[0]["params"]["year"] == 2026
+    assert transport.calls[0]["params"]["week"] == 1
+    with sqlite3.connect(snapshot_cache_module.DEFAULT_SNAPSHOT_CACHE_PATH) as connection:
+        injury_scopes = connection.execute(
+            "SELECT season, week FROM snapshots WHERE endpoint = 'injuries' ORDER BY season, week"
+        ).fetchall()
+    assert injury_scopes == [(2025, 17), (2026, 1)]
+
+
+@pytest.mark.asyncio
+async def test_targeted_player_lookups_remain_memory_only_and_stale_news_cannot_trigger_them(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
+    payloads: dict[str, dict[str, Any] | Exception] = {
+        "players": {"sport": "NFL", "count": 0, "players": []},
+        "injuries": {"sport": "NFL", "count": 0, "injuries": []},
+        "news": {
+            "sport": "NFL",
+            "count": 1,
+            "items": [
+                {
+                    "player_id": 101,
+                    "title": "A bounded update",
+                    "created": "2026-09-01 15:00:00",
+                    "categories": ["News"],
+                }
+            ],
+        },
+        "players:101": {
+            "sport": "NFL",
+            "players": [
+                {
+                    "player_id": 101,
+                    "player_name": "Jordan Alpha",
+                    "position_id": "RB",
+                    "team_id": "SF",
+                }
+            ],
+        },
+    }
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    first_transport = FakeTransport(payloads)
+    await _provider(
+        api_key="secret",
+        transport=first_transport,
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+    assert len(first_transport.calls) == 4
+    with sqlite3.connect(snapshot_cache_module.DEFAULT_SNAPSHOT_CACHE_PATH) as connection:
+        player_variants = connection.execute(
+            "SELECT variant FROM snapshots WHERE endpoint = 'players'"
+        ).fetchall()
+    assert player_variants == [("catalog",)]
+
+    current[0] += timedelta(minutes=6)
+    payloads["news"] = RuntimeError("refresh unavailable")
+    restarted_transport = FakeTransport(payloads)
+    result = await _provider(
+        api_key="secret",
+        transport=restarted_transport,
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026)
+
+    assert [call["url"].rsplit("/", 1)[-1] for call in restarted_transport.calls] == [
+        "injuries",
+        "news",
+    ]
+    assert result["coverage"]["news"]["stale"] is True
+    assert result["coverage"]["targetedPlayerLookups"]["attempted"] == 0
+    assert result["players"][0]["identityResolved"] is False
+    assert result["players"][0]["recentNews"] == []

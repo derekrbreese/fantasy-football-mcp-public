@@ -1,125 +1,186 @@
 # Yahoo Fantasy Draft Recorder
 
-A Firefox- and Chrome-compatible Manifest V3 WebExtension that watches a Yahoo Fantasy Football live draft, records completed picks in local extension storage, syncs agent-ready context to the local MCP server, exports the draft as CSV or JSON, and presents live recommendations without changing the Yahoo page or drafting players.
+A Firefox- and Chrome-compatible Manifest V3 extension that records completed Yahoo Fantasy Football picks in the current browser profile, syncs sanitized context to the private local MCP server, exports CSV/JSON, and presents local recommendations. It does not change the Yahoo page or select a player for you.
 
-## What it records
+For the complete server, `.env`, Yahoo API, and FantasyPros setup, start with the [main usage guide](../README.md).
 
-When Yahoo exposes the data in the draft row, each pick includes:
+## Before loading the extension
 
-- Overall pick
+Install the project dependencies and start the loopback server from the repository root:
+
+```bash
+HOST=127.0.0.1 PORT=8765 uv run python fastmcp_server.py
+```
+
+Leave it running throughout the draft. Always use `127.0.0.1` for desktop use; the MCP transport has no local authentication boundary. Restart this process whenever `.env` credentials or API keys change.
+
+The recorder still saves picks and can export Agent JSON when the server is offline, but recommendations and server-side reset/repair synchronization need this process.
+
+## Install in Firefox
+
+Firefox 142 or newer is required.
+
+1. Open `about:debugging`.
+2. Select **This Firefox**.
+3. Select **Load Temporary Add-on…**.
+4. Choose this directory's `manifest.json`.
+5. Open or reload the exact Yahoo draft tab.
+
+Use **Reload** in `about:debugging` after extension code changes, then reload the Yahoo tab. A temporary add-on disappears when Firefox restarts. Permanent installation in standard Firefox requires a Mozilla-signed package.
+
+## Install in Chrome
+
+Chrome 121 or newer is required.
+
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Select **Load unpacked**.
+4. Choose the `chrome-extension` directory.
+5. Open or reload the exact Yahoo draft tab.
+
+Use **Reload** on the extension card after code changes, then reload the Yahoo tab.
+
+## Draft-day workflow
+
+Follow this order for each live draft or Yahoo mock:
+
+1. Start the local server.
+2. Load/reload the extension and the exact active draft tab.
+3. In Yahoo, open **Results → Round by Round**.
+4. Open the recorder popup and select **Rescan page**.
+5. Check that the popup shows the expected league and pick count, no ledger defects, and **agent sync connected**.
+6. Select **Full dashboard** from this popup so it opens with the exact selected league.
+7. Import a local rankings profile or explicitly reuse one already saved for another mock.
+8. Open Firefox's **Draft Assistant** sidebar or remain in the dashboard, then refresh recommendations.
+9. When diagnosing any recommendation, inspect live draft state before requesting a next pick.
+
+The smaller Yahoo last-pick banner continues supplying new observations while other draft panels are visible. Return to **Results → Round by Round** and rescan when anything looks incomplete; its numbered table is the authoritative ledger.
+
+## What is recorded
+
+When Yahoo exposes each field, a pick contains:
+
+- Overall pick number
 - Round and pick within the round
-- Player
+- Player name
 - NFL position and team
-- Fantasy team/manager
+- Fantasy team/manager label
+- Whether Yahoo labeled it **Your Team**
 - Local recording timestamp
 
-The extension scans the existing draft log when it loads and then watches DOM changes for new picks. Ordinary non-ledger observations are merged using the overall pick number. A coherent Yahoo **Results → Round by Round** table instead replaces the stored numbered ledger exactly, preserving missing and duplicate pick numbers so server recommendations remain blocked. Only conservatively unmatched unnumbered live observations remain alongside it; initialed names require matching position and NFL team. Later non-ledger scans preserve that authoritative numbered state while appending genuinely new pick numbers. Open Round by Round once to backfill every completed pick. The smaller `Last:` banner continues capturing new picks while other draft tabs are visible.
+The extension records only sanitized draft context. It does not record Yahoo credentials, cookies, chat, arbitrary page text, or the draft's page location.
 
-Rows labeled **Your Team** are marked as your picks and are highlighted in the popup.
+## Popup, sidebar, and dashboard
 
-## Install temporarily in Firefox
+### Recorder popup
 
-This does not require Chrome's **Load unpacked** feature:
+The popup is the operational control surface:
 
-1. Open `about:debugging` in Firefox.
-2. Select **This Firefox**.
-3. Click **Load Temporary Add-on…**.
-4. Select `chrome-extension/manifest.json` from this repository.
-5. Open or reload a Yahoo live draft under `https://football.fantasysports.yahoo.com/draftclient/...`.
-6. Open **Results → Round by Round** once, then click the extension icon and select **Rescan page**.
-7. Use the popup to review, export, repair, or reset the exact active mock draft.
+- **Rescan page** asks the active Yahoo tab for current picks and forces loopback sync.
+- **Full rescan & repair** safely replaces a defective saved ledger from the complete visible Round-by-Round table.
+- **Save diagnostics** downloads privacy-minimal structural counters for Yahoo layout troubleshooting.
+- **Export CSV** downloads the picks for spreadsheet use.
+- **Agent JSON** downloads recommendation-ready state for a manual agent handoff.
+- **Reset mock draft** clears only the exact active mock/session while preserving its imported profile.
+- **Open Draft Assistant** opens Firefox's persistent recommendation sidebar.
+- **Full dashboard** opens the wider local web UI; Chrome users use this instead of the Firefox sidebar.
 
-## Draft Assistant sidebar and dashboard
+The popup displays picks and recorder health, not recommendations, and it cannot make a draft selection.
 
-Firefox exposes a persistent **Fantasy Draft Assistant** sidebar. Open the recorder popup and select **Open Draft Assistant**, or use Firefox's sidebar menu. The recorder popup remains the place for scan, repair, export, and exact-session mock-reset controls; the sidebar is a read-only recommendation surface that stays open beside Yahoo. Chrome users can select **Full dashboard** in the popup instead.
+### Firefox Draft Assistant
 
-The sidebar selects a league only from the active Yahoo draft tab or an explicit league choice. It never silently falls back to the newest saved league. After the initial request, a recorded-state update for that exact selected league aborts any older in-flight request, waits for a 350 ms debounce, reloads the saved snapshot, and automatically requests fresh recommendations only when its timestamp advanced. Multiple storage events for one pick collapse into one request, and changes to another league do not trigger it. **Refresh recommendations** remains available at any time. Live sidebar requests keep the bounded 256-simulation setting. Each card shows roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, an explicitly uncalibrated confidence, and explicitly uncalibrated heuristic/simulation probabilities. The panel also surfaces exact ledger blockers and prominently degrades stale state, inferred team counts, unresolved drafted identities, unavailable roster settings, and unknown injury/news data. It never injects UI into Yahoo and never selects or drafts a player.
+The sidebar shows up to five recommendations beside Yahoo. It selects a league only from the active draft tab or an explicit saved-league choice; it never silently chooses the newest saved session. After the initial request, a newer pick for that exact league cancels stale work, debounces duplicate events, and refreshes automatically. Another league's storage updates do not affect it.
 
-For a wider board, open `http://127.0.0.1:8765/draft-dashboard` while the local server is running. The sidebar's dashboard link puts the explicitly selected league ID in a URL fragment, which browsers do not send in the HTTP request. The sidebar and dashboard share the same local client, response view-model, and safe text-only renderer; the dashboard may show up to twenty candidates without changing the recommendation contract.
+Cards show roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, and explicitly uncalibrated confidence and return/simulation probabilities. Stale state, inferred team counts, unresolved player identities, unavailable roster settings, and unknown injury/news data are visibly degraded.
 
-While Yahoo Fantasy API approval is pending, use the dashboard's **Local draft
-profile** form. It accepts DraftSheets 2026 `.xlsx`, an ECR CSV, or strict
-`schemaVersion: 1` JSON and binds the normalized top 500 rankings plus roster slots to
-the explicitly selected recorder session. For XLSX imports, the browser sends only raw
-bytes (maximum 2 MB) and allowlisted team/roster headers to the loopback server—never
-the filename—and the server discards the workbook after parsing its ECR/Scoring cells.
-The imported profile supplies rankings and league settings with no Yahoo API call while
-the extension continues supplying every live pick. Re-import it for the actual live
-session if earlier testing used a Yahoo mock draft.
+### Full dashboard
 
-Each separate Yahoo mock has a new draft identity. To reuse the same board without
-uploading it again, open the new mock's **Full dashboard**, choose the prior entry under
-**Reuse a saved profile**, and select **Use for this mock & refresh**. No source is
-chosen automatically. Each choice shows its validated sport plus source date, falling
-back to its import date. The loopback server resolves the target sport and rejects a
-mismatched source; bounded list/bind timeouts keep a stalled local request from leaving
-the dashboard busy indefinitely. A successful bind copies only the sanitized rankings,
-roster settings, and source provenance onto the explicitly selected current identity;
-it never copies, merges, or replaces either mock's recorded picks. The dashboard then
-retries the recommendation immediately. **Reset mock draft** is for restarting the same
-Yahoo mock identity and continues preserving that identity's already-bound profile.
+Open it from the popup or visit `http://127.0.0.1:8765/draft-dashboard` while the server is running. Opening it from the popup carries the exact league ID in a browser fragment, which is not sent in the initial dashboard GET.
 
-If `FANTASY_PROS_API` is configured on the local server, recommendation cards also show
-allowlisted FantasyPros injury/news attribution and recent headlines. Provider calls
-remain server-side; the extension never receives the key. Requests are serialized to
-the public one-per-second limit, cached, bounded, and backed off after rate limiting.
-Every outbound call also consumes one of this app's 95 persistent UTC-day
-reservations, a safety margin under the public 100-call daily ceiling that survives
-server restarts. Other applications using the same key still consume the provider's
-account-wide quota, so this local counter cannot guarantee remaining provider
-capacity. The private counter stores only schema/date/count metadata with user-only
-permissions. Missing, unresolved, stale, rate-limited, budget-exhausted,
-budget-unavailable, or API-tier-limited evidence is shown as unknown/limited rather
-than healthy.
+The dashboard can show up to twenty candidates, roster construction, recent draft history, specialist comparisons, critic checks, simulations, and source/quality diagnostics. It and the sidebar share the same safe text-only renderer and never inject controls into Yahoo.
 
-## Mock-draft reset and ledger repair
+## Import a local rankings profile
 
-These controls have different purposes:
+Importing a profile is the recommended live-draft path when Yahoo has not approved Fantasy API access or when an Instant Mock Draft cannot be resolved as a normal league.
 
-1. Use **Reset mock draft** when starting a test over. Keep the local server running,
-   open the exact Yahoo mock-draft tab, close older tabs for the same mock/session, and
-   confirm Reset in the popup. Reset is disabled for a merely saved/latest draft.
-2. The popup first reconciles any durable repair, records a durable reset intent, and
-   asks the loopback server to reset only the active sport/league/team/session at the
-   exact last-synced timestamp. A changed draft returns an error without deleting it;
-   rescan and confirm Reset again.
-3. After server acceptance, browser picks, the pending repair journal, and legacy data
-   for only that session are cleared behind a server-timestamped tombstone. The separate
-   imported DraftSheets profile is preserved. Interrupted reset cleanup resumes when
-   the popup is reopened, while all scans and sync remain blocked behind its journal.
-4. The popup waits until a fresh browser timestamp is strictly later than the server
-   reset, then rescans the current Yahoo page. If the page cannot be rescanned, wait a
-   moment and use **Rescan page**. A new/empty mock begins clean; an in-progress page
-   correctly rebuilds from the picks Yahoo currently shows.
-5. Use **Full rescan & repair** instead when you want to keep the current draft but fix
-   gaps, duplicates, unnumbered observations, or a phantom high pick. Open the complete
-   **Results → Round by Round** table before confirming repair.
+1. Open and scan the target draft first.
+2. Open **Full dashboard** from its popup.
+3. Confirm the league ID, team count, and roster slots.
+4. Choose one supported local file:
+   - DraftSheets 2026 `.xlsx`, up to 2 MB
+   - ECR `.csv` with Rank/ECR, Player Name, and Position; Team, ADP, and Bye are optional
+   - Strict `schemaVersion: 1` `.json`
+5. Select **Import profile**, then refresh recommendations.
 
-If the popup reports a ledger problem, it lists the exact missing pick numbers, duplicate pick numbers, and sanitized details/count for unnumbered observations. Missing and duplicate numbers come from the coherent raw authoritative table and remain present in the saved and server-bound pick list; saved-session observations supply the unnumbered details. Conflicting or malformed Yahoo tables show an explicit recovery error instead of appearing healthy, and leaving the authoritative table clears its raw scan status without erasing saved defects. An automatic scan never replaces a saved ledger with a shorter visible prefix, even when Yahoo’s current-pick text makes that prefix look current; it retains and does not sync the saved state and directs the user to explicit repair. While the complete current **Results → Round by Round** ledger is visible, select **Full rescan & repair** and confirm the replacement. The recorder stages a replacement only when every nonempty result row has the expected three-cell Yahoo shape and parses safely, responsive table copies agree, the numbered result is contiguous and unique, and—when Yahoo exposes the current pick—the ledger ends immediately before it. A repair that would lower the saved maximum additionally requires that live current-pick evidence, so it is unavailable while Yahoo is paused or otherwise hides the current pick. The recorder then sends the staged context to the local server with an explicit repair marker and saves it in browser storage only after the server accepts it. Server rejection or unavailability leaves the exact saved browser session unchanged. Durable per-league repair and reset journals survive reloads and sibling tabs; if server acceptance or browser persistence is interrupted, the recorder blocks stale work and reconciles that journal before any further scan or ordinary sync. Same-league scans, repairs, and resets are serialized across Yahoo tabs and extension UI by a packaged background lock broker, avoiding Firefox's page/content-script Promise boundary. One-second private heartbeats keep queued/held work active, and an opaque four-second `storage.session` fence delays a replacement broker after an unexpected background restart. A lost or timed-out lease aborts protected loopback requests and is checked around browser mutations before the callback unwinds; durable journals reconcile an uncertain repair/reset outcome. The broker receives only the allowlisted session key needed to name a lock. Independent per-league storage keys prevent another league from being overwritten. Reset uses the server's reset time for its exact-league tombstone and removes that league's pending repair state; any pre-reset scan or repair written afterward remains hidden/rejected, while a genuinely later rescan can begin again. Legacy aggregate cleanup uses the same broker so concurrent league resets preserve unrelated drafts. Legacy aggregate sessions remain readable and migrate safely on their next update. Recommendations remain blocked until the authoritative ledger passes those checks.
+The server keeps only the top 500 sanitized rows, roster settings, and safe provenance for that exact sport/league/team/session identity. Raw workbook bytes are parsed in memory and discarded. Filenames, formulas, notes, URLs, and arbitrary cells are not stored.
 
-After changing the code, use **Reload** for the add-on in `about:debugging`, then reload the Yahoo draft tab.
+Google Drive is optional storage only, not a runtime integration. Download a local `.xlsx` from Drive or export the ECR tab from Google Sheets as CSV, then import that file through the dashboard.
 
-A temporary add-on is removed when Firefox restarts. Permanent installation in standard Firefox requires a Mozilla-signed package, either through an addons.mozilla.org listing or an unlisted AMO signing submission.
+With an exact local profile, recommendations use the imported rankings and settings and make zero Yahoo API calls. The extension remains the source for every drafted player.
+
+## Instant Mock Drafts and profile reuse
+
+Yahoo Instant Mock Drafts use the normal scan/sync flow. Scan first and bind a local profile before requesting advice. If the dashboard says the Yahoo league identity could not be resolved, use the local-profile path; refreshing OAuth is not a fix for a mock that Yahoo's Fantasy API does not list as a league.
+
+Each newly created mock has a new identity. To reuse rankings without uploading them again:
+
+1. Open and scan the new mock.
+2. Open **Full dashboard** from the new mock's popup.
+3. Under **Reuse a saved profile**, explicitly choose the prior source.
+4. Select **Use for this mock & refresh**.
+
+No source is chosen automatically. The server validates the sport and copies only sanitized rankings, roster settings, and provenance. It never copies or merges either mock's picks.
+
+## Reset versus ledger repair
+
+Use these controls for different outcomes.
+
+### Reset mock draft
+
+Use Reset when starting the same exact mock over:
+
+1. Keep the server running and close older tabs for that same mock/session.
+2. Open the exact active mock tab and rescan it.
+3. Select **Reset mock draft** and confirm the destructive action.
+4. Wait for the popup to rescan after the server's reset timestamp.
+
+The reset clears only that exact browser/server draft session and preserves its separate imported profile. If the server reports that the draft changed, no deletion occurs; rescan and confirm Reset again. Reset is disabled when the popup can show only a saved/latest draft instead of the exact active identity.
+
+### Full rescan & repair
+
+Use Repair when keeping the current draft but fixing missing, duplicate, unnumbered, or phantom high picks:
+
+1. In Yahoo, show the complete current **Results → Round by Round** table.
+2. Open the popup and select **Full rescan & repair**.
+3. Confirm that you intend to replace the saved picks from that authoritative table.
+
+Repair proceeds only when every nonempty row has the expected safe shape, responsive copies agree, numbered picks are contiguous and unique, and the ledger is current. Lowering a saved maximum additionally requires Yahoo's current-pick evidence. The server must accept the staged replacement before the browser writes it; failure leaves the existing exact session unchanged.
+
+Ordinary automatic scans never replace a saved authoritative ledger with a shorter visible prefix. Recommendations stay blocked until ledger defects are repaired.
+
+## FantasyPros injury/news evidence
+
+When `FANTASY_PROS_API` is set on the server, recommendation cards can show FantasyPros-attributed status and recent headlines. The extension never receives the key.
+
+The first FantasyPros-enabled recommendation creates and populates the private SQLite cache automatically; there is no separate prefetch or migration step. A complete normalized catalog snapshot lasts 24 hours; a provider-limited partial catalog and injury/news snapshots are retried after five minutes. Fresh snapshots survive server restarts. If an expired snapshot cannot refresh, last-known-good identity data may be retained, but recommendation risk remains unknown and stale headlines are not shown as recent news.
+
+See [FantasyPros injury/news cache](../README.md#fantasypros-injurynews-cache) for request limits, terms/attribution, cache contents, and privacy behavior.
 
 ## Agent handoff
 
-### Automatic local MCP sync
+### Automatic MCP sync
 
-Start the FastMCP server on its default loopback port before opening the draft:
+After a changed scan, the extension posts sanitized context to the loopback-only `/draft-sync` route. An MCP client should:
 
-```bash
-HOST=127.0.0.1 PORT=8765 python fastmcp_server.py
-```
+1. Call `ff_get_live_draft_state` with the exact `league_id`.
+2. Check ledger, state-age, and identity warnings.
+3. Call `ff_get_live_draft_recommendation` with the same `league_id` only when the state is ready.
 
-After each changed scan, the extension posts sanitized agent context to `http://127.0.0.1:8765/draft-sync`. An agent connected to this MCP server can call `ff_get_live_draft_state` to inspect the ledger or `ff_get_live_draft_recommendation` for an orchestrated primary pick, alternatives, confidence, risk, and contingency. Synced state is stored with user-only file permissions at `~/.fantasy-football-mcp/live-drafts.json`.
+The sidebar/dashboard sends only an allowlisted league ID and bounded strategy/count/ranking/simulation settings to the local recommendation route. The server independently loads the exact saved session and profile, then rechecks both after scoring. If a pick or profile changed mid-request, it discards the candidates and asks for a refresh.
 
-The sidebar posts only `schemaVersion`, the explicitly selected `leagueId`, and bounded strategy/count/ranking/simulation settings to `http://127.0.0.1:8765/draft-recommendation`. It does not send the pick ledger again, a Yahoo URL, credentials, cookies, auth parameters, arbitrary page fields, team IDs, or session keys. The server resolves the saved league-scoped state and exact local profile (or Yahoo fallback) independently, then rechecks both after scoring; if another pick synced or the profile changed during the request, every candidate is discarded and the UI asks for a refresh. Both recommendation surfaces use `Cache-Control: no-store` responses from the loopback-only endpoint.
+### Manual export
 
-The endpoint accepts writes only from the loopback interface and validates and whitelists every field. If the server is not running, recording still works and the popup reports that agent sync is offline.
-
-### Manual handoff
-
-Click **Agent JSON** to download a recommendation-ready file containing:
+Select **Agent JSON** to download:
 
 - The complete ordered pick ledger
 - Your roster
@@ -129,27 +190,55 @@ Click **Agent JSON** to download a recommendation-ready file containing:
 
 CSV remains available for spreadsheet use.
 
-## Privacy
+## Troubleshooting
 
-- Pick history stays in the current browser profile and, when local sync is available, in the user-owned MCP state file on the same computer.
-- No draft data is sent to Yahoo beyond normal page use, to the extension developer, or to any third party.
-- The extension does not store or sync the draft URL, Yahoo cookies, the `auth` query parameter, or Yahoo credentials.
-- Host access is limited to Yahoo's `/draftclient/` pages and loopback draft sync/reset/recommendation/dashboard routes.
+### Agent sync is offline
 
-## Yahoo layout changes
+- Confirm the server is running at `127.0.0.1:8765`.
+- Reload the extension and exact Yahoo tab.
+- Open **Results → Round by Round** and select **Rescan page**.
+- If an `.env` key just changed, restart the server before rescanning.
 
-Yahoo can change its draft page without notice. Detection favors semantic attributes (`data-pick-number`, player/team labels, ARIA labels) and falls back to common draft-row text formats. **Save diagnostics** exports only structural counters and allowlisted field-presence counts; it excludes raw page text, CSS classes, test IDs, ARIA text, URLs, query strings, chat, and manager text. If the popup says rows were found but could not be parsed, compare those counters with a locally inspected completed-pick row so `dom-scanner.js` can be updated without sharing raw page content.
+### Firefox says `Permission denied to access property "then"`
+
+The current extension avoids Firefox's content-script Promise boundary by serializing same-draft work through its background broker; no additional website permission is needed. Reload the temporary add-on in `about:debugging`, close stale tabs for that mock, reload the exact active tab, show **Results → Round by Round**, and rescan. If the error persists on the current checkout, use **Save diagnostics** before reporting it.
+
+### Yahoo league identity could not be resolved
+
+- Open and rescan the exact active tab rather than choosing a latest saved draft.
+- Open the dashboard from that popup so its league ID is selected.
+- For an Instant Mock Draft or unavailable Yahoo API, import or explicitly bind a saved local profile, then refresh. This path should make zero Yahoo calls.
+- For a normal league using Yahoo fallback, first verify `ff_get_leagues` returns the matching league and authenticated team.
+
+### Popup reports ledger defects
+
+It lists the exact missing/duplicate numbers and sanitized unnumbered details. Show the complete Round-by-Round table and use **Full rescan & repair**. Conflicting or malformed Yahoo table copies produce a recovery error instead of being treated as healthy.
+
+### Yahoo rows were found but not parsed
+
+Yahoo may have changed its layout. Select **Save diagnostics**. The report contains structural counters and allowlisted field-presence counts only; it excludes raw page text, CSS classes, test IDs, ARIA text, page locations, chat, and manager text.
+
+## Correctness and privacy guarantees
+
+- Numbered **Results → Round by Round** data is authoritative; gaps, duplicates, and unnumbered picks block recommendations.
+- Per-league browser keys and server validation prevent one league from overwriting another.
+- Durable repair/reset journals reconcile interrupted work before stale scanning or sync can resume.
+- A packaged background lock broker serializes same-league scans, repairs, and resets across tabs; a lost lease aborts protected work and leaves the journal recoverable.
+- Loopback endpoints allowlist fields, validate the exact session, cap payloads, restrict origins, and return recommendation responses with `Cache-Control: no-store`.
+- Server-side draft/profile/cache files use user-only permissions.
+- The extension stores no Yahoo credentials, cookies, OAuth parameters, full page locations, or arbitrary browser fields.
+- Recommendations never draft a player or inject controls into Yahoo.
 
 ## Store preparation
 
-`manifest.json` includes a stable Firefox add-on ID, Firefox 142 minimum version, Chrome 121 minimum version, Firefox's required `none` data-collection declaration, and the same packaged lock-broker script as Firefox background scripts and a Chrome service worker. `CHROMEWEBSTORE.md` tracks the single purpose, listing copy, permission justifications, data-use disclosures, remote-code declaration, and Chrome submission checklist. Keep these synchronized when behavior or permissions change.
+`manifest.json` declares a stable Firefox add-on ID, Firefox 142 and Chrome 121 minimum versions, no Firefox data collection, the `storage` permission, narrowly scoped Yahoo draft-page access, and loopback access. [CHROMEWEBSTORE.md](CHROMEWEBSTORE.md) tracks listing copy, permission justifications, disclosures, and the Chrome submission checklist.
 
 ## Tests
 
-No package installation is required; the tests use Node's built-in test runner.
+No package installation is required for extension tests; they use Node's built-in test runner:
 
 ```bash
 npm --prefix chrome-extension test
 ```
 
-The tests cover URL sanitization, fixture-based Round-by-Round parsing and unexpected cell shapes, privacy-minimal diagnostics, authoritative duplicate/gap persistence into agent context, raw/saved ledger-health merging, exact ledger issue reporting, guarded and durable full repair/reset, cross-league storage interleaving, background-broker same-league serialization and disconnect recovery, reload reconciliation, duplicate merging, local session updates, loopback sync/reset/recommendation requests, explicit league selection, bounded recommendation view-models, inert text-only rendering, DOM snapshotting, Firefox/Chrome API compatibility, and CSV/JSON export safety.
+Tests cover authoritative parsing, duplicate/gap persistence, privacy-minimal diagnostics, guarded repair/reset, cross-league storage, background-broker serialization/recovery, loopback sync and recommendation requests, explicit league selection, profile import/reuse, inert text rendering, Firefox/Chrome compatibility, and export safety.

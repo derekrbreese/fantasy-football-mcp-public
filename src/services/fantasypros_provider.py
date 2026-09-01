@@ -31,6 +31,12 @@ from src.services.fantasypros_request_budget import (
     FantasyProsRequestBudgetExhausted,
     FantasyProsRequestBudgetUnavailable,
 )
+from src.services.fantasypros_snapshot_cache import (
+    FantasyProsSnapshot,
+    FantasyProsSnapshotCache,
+    FantasyProsSnapshotCacheUnavailable,
+    FantasyProsSnapshotKey,
+)
 
 _BASE_URL = "https://api.fantasypros.com/public/v2/json/nfl"
 _PROVIDER = "FantasyPros"
@@ -74,6 +80,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # 30-second deadline. Two targeted identity lookups keep a cold, worst-case
 # request bounded after the catalog, injury, and news snapshots.
 _MAX_TARGETED_PLAYER_LOOKUPS = 2
+_MAX_STALE_SNAPSHOT_AGE_SECONDS = 604_800.0
 
 
 class FantasyProsProviderError(RuntimeError):
@@ -207,6 +214,8 @@ class _LoadResult:
     public_api_limited: bool = False
     daily_budget_exhausted: bool = False
     daily_budget_unavailable: bool = False
+    stale: bool = False
+    refresh_failed: bool = False
 
 
 def _utc(value: datetime) -> datetime:
@@ -333,6 +342,7 @@ class FantasyProsProvider:
         rate_limit_backoff_seconds: float = 900.0,
         daily_request_limit: int = DEFAULT_DAILY_REQUEST_LIMIT,
         daily_budget_path: str | Path | None = None,
+        snapshot_cache_path: str | Path | None = None,
         monotonic: Callable[[], float] | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
@@ -370,6 +380,8 @@ class FantasyProsProvider:
             path=daily_budget_path,
             daily_limit=daily_request_limit,
         )
+        self._snapshot_cache = FantasyProsSnapshotCache(path=snapshot_cache_path)
+        self._snapshot_cache_available = True
         self._cache: OrderedDict[
             tuple[str, tuple[tuple[str, str | int], ...]], _CacheEntry
         ] = OrderedDict()
@@ -456,6 +468,8 @@ class FantasyProsProvider:
             }
             unresolved_news_ids: list[int] = []
             for item in sorted(news, key=lambda value: value.published_at, reverse=True):
+                if news_result.stale:
+                    break
                 if not _fresh(item.published_at, now, self._news_max_age_seconds):
                     continue
                 if (
@@ -492,6 +506,8 @@ class FantasyProsProvider:
             ]
             if len(matches) == 1:
                 targeted_players.append(matches[0])
+                if load_result.refresh_failed:
+                    targeted_failed = True
             elif (
                 load_result.daily_budget_exhausted
                 or load_result.daily_budget_unavailable
@@ -525,6 +541,8 @@ class FantasyProsProvider:
                 news_by_id,
                 now,
                 injury_snapshot_at=injury_result.fetched_at,
+                injury_snapshot_stale=injury_result.stale,
+                news_snapshot_stale=news_result.stale,
             )
             for identity, player in zip(identities, resolved, strict=True)
         ]
@@ -575,9 +593,19 @@ class FantasyProsProvider:
         except asyncio.CancelledError:
             raise
         except FantasyProsRequestBudgetExhausted:
-            return _LoadResult((), failed=True, daily_budget_exhausted=True)
+            return _LoadResult(
+                (),
+                failed=True,
+                daily_budget_exhausted=True,
+                refresh_failed=True,
+            )
         except FantasyProsRequestBudgetUnavailable:
-            return _LoadResult((), failed=True, daily_budget_unavailable=True)
+            return _LoadResult(
+                (),
+                failed=True,
+                daily_budget_unavailable=True,
+                refresh_failed=True,
+            )
         except FantasyProsProviderError as error:
             rate_limited = error.status_code == 429
             self._remember_failure(
@@ -589,10 +617,15 @@ class FantasyProsProvider:
                 ),
                 rate_limited=rate_limited,
             )
-            return _LoadResult((), failed=True, rate_limited=rate_limited)
+            return _LoadResult(
+                (),
+                failed=True,
+                rate_limited=rate_limited,
+                refresh_failed=True,
+            )
         except Exception:
             self._remember_failure((endpoint, tuple(sorted(params.items()))))
-            return _LoadResult((), failed=True)
+            return _LoadResult((), failed=True, refresh_failed=True)
 
     def _remember_failure(
         self,
@@ -684,70 +717,335 @@ class FantasyProsProvider:
         cache_key = (endpoint, tuple(sorted(params.items())))
         now = self._now()
         cached = self._cache.get(cache_key)
+        try:
+            snapshot_key = self._snapshot_key(endpoint, params, record_limit)
+        except ValueError:
+            snapshot_key = None
+        if cached is None and snapshot_key is not None:
+            cached = self._load_persistent_snapshot(snapshot_key)
+            if cached is not None:
+                self._remember_cache_entry(cache_key, cached)
+
+        stale: _CacheEntry | None = None
         if cached is not None:
             cache_age = (now - cached.fetched_at).total_seconds()
-            if 0.0 <= cache_age < ttl_seconds:
+            effective_ttl = self._effective_ttl(endpoint, params, cached, ttl_seconds)
+            if 0.0 <= cache_age < effective_ttl:
                 self._cache.move_to_end(cache_key)
-                return _LoadResult(
-                    cached.records,
-                    truncated=cached.truncated,
-                    fetched_at=cached.fetched_at,
-                    returned_count=cached.returned_count,
-                    reported_count=cached.reported_count,
-                    reported_limit=cached.reported_limit,
-                    public_api_limited=cached.public_api_limited,
-                )
-            self._cache.pop(cache_key, None)
+                return self._load_result(cached)
+            if 0.0 <= cache_age <= _MAX_STALE_SNAPSHOT_AGE_SECONDS:
+                stale = cached
+            else:
+                self._cache.pop(cache_key, None)
 
         failed_backoff = self._failure_backoff.get(cache_key)
         if failed_backoff is not None:
             failed_until, rate_limited = failed_backoff
             if failed_until > self._monotonic():
                 self._failure_backoff.move_to_end(cache_key)
-                return _LoadResult((), failed=True, rate_limited=rate_limited)
+                return self._failed_load_result(stale, rate_limited=rate_limited)
             self._failure_backoff.pop(cache_key, None)
 
-        payload = await self._paced_get_json(
-            f"{_BASE_URL}/{endpoint}",
-            headers={"x-api-key": self._api_key},
-            params=params,
-        )
-        raw_records = payload.get(array_key)
-        if not isinstance(raw_records, list):
-            raise FantasyProsProviderError("FantasyPros returned an invalid response shape")
-        if payload.get("sport") not in (None, "NFL"):
-            raise FantasyProsProviderError("FantasyPros returned an invalid sport")
-        truncated = len(raw_records) > record_limit
-        normalized: list[_Record] = []
-        for raw in raw_records[:record_limit]:
-            if not isinstance(raw, Mapping):
-                continue
-            item = normalizer(raw)
-            if item is not None:
-                normalized.append(item)
-        entry = _CacheEntry(
-            tuple(normalized),
-            now,
-            truncated,
-            len(raw_records),
-            _nonnegative_int(payload.get("count")),
-            _positive_int(payload.get("limit")),
-            payload.get("public_api_limited") is True,
-        )
-        self._cache[cache_key] = entry
+        try:
+            payload = await self._paced_get_json(
+                f"{_BASE_URL}/{endpoint}",
+                headers={"x-api-key": self._api_key},
+                params=params,
+            )
+            raw_records = payload.get(array_key)
+            if not isinstance(raw_records, list):
+                raise FantasyProsProviderError("FantasyPros returned an invalid response shape")
+            if payload.get("sport") not in (None, "NFL"):
+                raise FantasyProsProviderError("FantasyPros returned an invalid sport")
+            truncated = len(raw_records) > record_limit
+            normalized: list[_Record] = []
+            for raw in raw_records[:record_limit]:
+                if not isinstance(raw, Mapping):
+                    continue
+                item = normalizer(raw)
+                if item is not None:
+                    normalized.append(item)
+            entry = _CacheEntry(
+                tuple(normalized),
+                now,
+                truncated,
+                len(raw_records),
+                _nonnegative_int(payload.get("count")),
+                _positive_int(payload.get("limit")),
+                payload.get("public_api_limited") is True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except FantasyProsRequestBudgetExhausted:
+            return self._failed_load_result(stale, daily_budget_exhausted=True)
+        except FantasyProsRequestBudgetUnavailable:
+            return self._failed_load_result(stale, daily_budget_unavailable=True)
+        except FantasyProsProviderError as error:
+            rate_limited = error.status_code == 429
+            self._remember_failure(
+                cache_key,
+                seconds=(
+                    self._rate_limit_backoff_seconds
+                    if rate_limited
+                    else self._failure_backoff_seconds
+                ),
+                rate_limited=rate_limited,
+            )
+            return self._failed_load_result(stale, rate_limited=rate_limited)
+        except Exception:
+            self._remember_failure(cache_key)
+            return self._failed_load_result(stale)
+
+        self._remember_cache_entry(cache_key, entry)
         self._failure_backoff.pop(cache_key, None)
+        if snapshot_key is not None:
+            self._save_persistent_snapshot(snapshot_key, entry)
+        return self._load_result(entry)
+
+    @staticmethod
+    def _effective_ttl(
+        endpoint: str,
+        params: Mapping[str, str | int],
+        entry: _CacheEntry,
+        ttl_seconds: float,
+    ) -> float:
+        is_partial_catalog = (
+            endpoint == "players"
+            and params == {"ecr": "included"}
+            and entry.reported_count is not None
+            and entry.reported_count > entry.returned_count
+        )
+        return min(ttl_seconds, 300.0) if is_partial_catalog else ttl_seconds
+
+    def _remember_cache_entry(
+        self,
+        cache_key: tuple[str, tuple[tuple[str, str | int], ...]],
+        entry: _CacheEntry,
+    ) -> None:
+        self._cache[cache_key] = entry
         self._cache.move_to_end(cache_key)
         while len(self._cache) > self._max_cache_entries:
             self._cache.popitem(last=False)
+
+    @staticmethod
+    def _load_result(entry: _CacheEntry) -> _LoadResult:
         return _LoadResult(
             entry.records,
-            truncated=truncated,
+            truncated=entry.truncated,
             fetched_at=entry.fetched_at,
             returned_count=entry.returned_count,
             reported_count=entry.reported_count,
             reported_limit=entry.reported_limit,
             public_api_limited=entry.public_api_limited,
         )
+
+    @staticmethod
+    def _failed_load_result(
+        stale: _CacheEntry | None,
+        *,
+        rate_limited: bool = False,
+        daily_budget_exhausted: bool = False,
+        daily_budget_unavailable: bool = False,
+    ) -> _LoadResult:
+        if stale is None:
+            return _LoadResult(
+                (),
+                failed=True,
+                rate_limited=rate_limited,
+                daily_budget_exhausted=daily_budget_exhausted,
+                daily_budget_unavailable=daily_budget_unavailable,
+                refresh_failed=True,
+            )
+        return _LoadResult(
+            stale.records,
+            truncated=stale.truncated,
+            failed=True,
+            rate_limited=rate_limited,
+            fetched_at=stale.fetched_at,
+            returned_count=stale.returned_count,
+            reported_count=stale.reported_count,
+            reported_limit=stale.reported_limit,
+            public_api_limited=stale.public_api_limited,
+            daily_budget_exhausted=daily_budget_exhausted,
+            daily_budget_unavailable=daily_budget_unavailable,
+            stale=True,
+            refresh_failed=True,
+        )
+
+    @staticmethod
+    def _snapshot_key(
+        endpoint: str,
+        params: Mapping[str, str | int],
+        record_limit: int,
+    ) -> FantasyProsSnapshotKey | None:
+        if endpoint == "players" and params == {"ecr": "included"}:
+            return FantasyProsSnapshotKey("players", "catalog", record_limit=record_limit)
+        if endpoint == "injuries" and set(params) == {
+            "year",
+            "week",
+            "include_probabilities",
+        }:
+            if params.get("include_probabilities") != "true":
+                return None
+            year = params.get("year")
+            week = params.get("week")
+            if type(year) is not int or type(week) is not int:
+                return None
+            return FantasyProsSnapshotKey(
+                "injuries",
+                "weekly",
+                season=year,
+                week=week,
+                record_limit=record_limit,
+            )
+        if endpoint == "news" and set(params) == {"limit", "order_by"}:
+            if params.get("order_by") != "updated":
+                return None
+            request_limit = params.get("limit")
+            if type(request_limit) is not int:
+                return None
+            return FantasyProsSnapshotKey(
+                "news",
+                "recent",
+                request_limit=request_limit,
+                record_limit=record_limit,
+            )
+        return None
+
+    def _load_persistent_snapshot(
+        self,
+        key: FantasyProsSnapshotKey,
+    ) -> _CacheEntry | None:
+        if not self._snapshot_cache_available:
+            return None
+        try:
+            snapshot = self._snapshot_cache.load(key)
+        except FantasyProsSnapshotCacheUnavailable:
+            self._snapshot_cache_available = False
+            return None
+        if snapshot is None:
+            return None
+        try:
+            records = self._records_from_snapshot(key.endpoint, snapshot.records)
+        except (TypeError, ValueError):
+            self._snapshot_cache_available = False
+            return None
+        return _CacheEntry(
+            records,
+            snapshot.fetched_at,
+            snapshot.truncated,
+            snapshot.returned_count,
+            snapshot.reported_count,
+            snapshot.reported_limit,
+            snapshot.public_api_limited,
+        )
+
+    def _save_persistent_snapshot(
+        self,
+        key: FantasyProsSnapshotKey,
+        entry: _CacheEntry,
+    ) -> None:
+        if not self._snapshot_cache_available:
+            return
+        snapshot = FantasyProsSnapshot(
+            records=self._records_for_snapshot(key.endpoint, entry.records),
+            fetched_at=entry.fetched_at,
+            truncated=entry.truncated,
+            returned_count=entry.returned_count,
+            reported_count=entry.reported_count,
+            reported_limit=entry.reported_limit,
+            public_api_limited=entry.public_api_limited,
+        )
+        try:
+            self._snapshot_cache.save(key, snapshot)
+        except FantasyProsSnapshotCacheUnavailable:
+            self._snapshot_cache_available = False
+
+    @staticmethod
+    def _records_for_snapshot(
+        endpoint: str,
+        records: Sequence[Any],
+    ) -> tuple[dict[str, Any], ...]:
+        if endpoint == "players":
+            return tuple(
+                {
+                    "id": record.fantasypros_id,
+                    "name": record.name,
+                    "position": record.position,
+                    "team": record.team,
+                }
+                for record in records
+                if isinstance(record, _CatalogPlayer)
+            )
+        if endpoint == "injuries":
+            return tuple(
+                {
+                    "id": record.fantasypros_id,
+                    "name": record.name,
+                    "position": record.position,
+                    "team": record.team,
+                    "status": record.status,
+                    "updatedAt": _iso(record.updated_at),
+                }
+                for record in records
+                if isinstance(record, _Injury)
+            )
+        if endpoint == "news":
+            return tuple(
+                {
+                    "id": record.fantasypros_id,
+                    "headline": record.headline,
+                    "category": record.category,
+                    "publishedAt": _iso(record.published_at),
+                }
+                for record in records
+                if isinstance(record, _News)
+            )
+        return ()
+
+    @staticmethod
+    def _records_from_snapshot(
+        endpoint: str,
+        records: Sequence[Mapping[str, Any]],
+    ) -> tuple[Any, ...]:
+        if endpoint == "players":
+            return tuple(
+                _CatalogPlayer(
+                    int(record["id"]),
+                    str(record["name"]),
+                    str(record["position"]),
+                    str(record["team"]),
+                )
+                for record in records
+            )
+        if endpoint == "injuries":
+            return tuple(
+                _Injury(
+                    int(record["id"]),
+                    str(record["name"]),
+                    str(record["position"]),
+                    str(record["team"]),
+                    str(record["status"]),
+                    _parse_provider_time(record["updatedAt"]),
+                )
+                for record in records
+            )
+        if endpoint == "news":
+            result: list[_News] = []
+            for record in records:
+                published_at = _parse_provider_time(record["publishedAt"])
+                if published_at is None:
+                    raise ValueError("invalid cached timestamp")
+                result.append(
+                    _News(
+                        int(record["id"]),
+                        str(record["headline"]),
+                        str(record["category"]),
+                        published_at,
+                    )
+                )
+            return tuple(result)
+        raise ValueError("invalid cached endpoint")
 
     @staticmethod
     def _catalog_player(raw: Mapping[str, Any]) -> _CatalogPlayer | None:
@@ -875,6 +1173,8 @@ class FantasyProsProvider:
         now: datetime,
         *,
         injury_snapshot_at: datetime | None,
+        injury_snapshot_stale: bool,
+        news_snapshot_stale: bool,
     ) -> dict[str, Any]:
         if player is None:
             return self._unknown_player(identity, now)
@@ -893,8 +1193,10 @@ class FantasyProsProvider:
             result["injury_updated_at"] = _iso(injury.updated_at)
             result["injury_snapshot_at"] = _iso(injury_snapshot_at)
             known_status = injury.status != "unknown"
-            is_fresh = known_status and _fresh(
-                injury_snapshot_at, now, self._injury_max_age_seconds
+            is_fresh = (
+                known_status
+                and not injury_snapshot_stale
+                and _fresh(injury_snapshot_at, now, self._injury_max_age_seconds)
             )
             result["injury_fresh"] = is_fresh
             if is_fresh:
@@ -904,11 +1206,13 @@ class FantasyProsProvider:
         player_news = list(news.get(player.fantasypros_id, ()))
         if player_news:
             result["news_updated_at"] = _iso(player_news[0].published_at)
-        fresh_news = [
-            item
-            for item in player_news
-            if _fresh(item.published_at, now, self._news_max_age_seconds)
-        ][: self._recent_news_limit]
+        fresh_news = []
+        if not news_snapshot_stale:
+            fresh_news = [
+                item
+                for item in player_news
+                if _fresh(item.published_at, now, self._news_max_age_seconds)
+            ][: self._recent_news_limit]
         if fresh_news:
             result["news_source"] = _PROVIDER
             result["news_fresh"] = True
@@ -968,11 +1272,23 @@ class FantasyProsProvider:
             if result.daily_budget_exhausted or result.daily_budget_unavailable:
                 continue
             if result.rate_limited:
-                warnings.append(
-                    f"FantasyPros {label} is rate-limited; missing data remains unknown"
-                )
+                if result.stale:
+                    warnings.append(
+                        f"FantasyPros {label} refresh is rate-limited; using a stale "
+                        "snapshot with unknown freshness"
+                    )
+                else:
+                    warnings.append(
+                        f"FantasyPros {label} is rate-limited; missing data remains unknown"
+                    )
             elif result.failed:
-                warnings.append(f"FantasyPros {label} is temporarily unavailable")
+                if result.stale:
+                    warnings.append(
+                        f"FantasyPros {label} refresh failed; using a stale snapshot "
+                        "with unknown freshness"
+                    )
+                else:
+                    warnings.append(f"FantasyPros {label} is temporarily unavailable")
             elif result.truncated:
                 warnings.append(f"FantasyPros {label} exceeded the bounded record limit")
             elif result.public_api_limited or (
@@ -985,11 +1301,21 @@ class FantasyProsProvider:
     @staticmethod
     def _daily_budget_warning(results: Sequence[_LoadResult]) -> str | None:
         if any(result.daily_budget_exhausted for result in results):
+            if any(result.daily_budget_exhausted and result.stale for result in results):
+                return (
+                    "FantasyPros daily request budget is exhausted; using stale snapshots "
+                    "where available and missing data remains unknown until the next UTC day"
+                )
             return (
                 "FantasyPros daily request budget is exhausted; missing data remains "
                 "unknown until the next UTC day"
             )
         if any(result.daily_budget_unavailable for result in results):
+            if any(result.daily_budget_unavailable and result.stale for result in results):
+                return (
+                    "FantasyPros daily request budget is unavailable; using stale snapshots "
+                    "where available and missing data remains unknown"
+                )
             return "FantasyPros daily request budget is unavailable; missing data remains unknown"
         return None
 
@@ -1001,6 +1327,8 @@ class FantasyProsProvider:
             "reportedCount": result.reported_count,
             "reportedLimit": result.reported_limit,
             "publicApiLimited": result.public_api_limited,
+            "stale": result.stale,
+            "refreshFailed": result.refresh_failed,
         }
 
 
