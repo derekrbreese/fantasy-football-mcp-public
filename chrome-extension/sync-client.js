@@ -87,6 +87,10 @@
     if (!fetchImpl) throw new Error('Fetch is unavailable');
 
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const externalSignal = options.signal;
+    const abortFromExternal = () => controller?.abort(externalSignal?.reason);
+    if (externalSignal?.aborted) abortFromExternal();
+    else externalSignal?.addEventListener?.('abort', abortFromExternal, { once: true });
     const timeout = globalScope.setTimeout?.(() => controller?.abort(), options.timeoutMs || 2000);
     try {
       const response = await fetchImpl(options.endpoint || DEFAULT_ENDPOINT, {
@@ -96,13 +100,14 @@
           'X-Yahoo-Draft-Recorder': '1',
         },
         body: JSON.stringify(context),
-        signal: controller?.signal,
+        signal: controller?.signal || externalSignal,
       });
       if (!response.ok) {
         throw new Error(`MCP draft sync returned HTTP ${response.status || 'error'}`);
       }
       return await response.json();
     } finally {
+      externalSignal?.removeEventListener?.('abort', abortFromExternal);
       if (timeout !== undefined) globalScope.clearTimeout?.(timeout);
     }
   }
@@ -113,6 +118,10 @@
     const request = resetSnapshot(session);
     const endpoint = safeResetEndpoint(options.endpoint);
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const externalSignal = options.signal;
+    const abortFromExternal = () => controller?.abort(externalSignal?.reason);
+    if (externalSignal?.aborted) abortFromExternal();
+    else externalSignal?.addEventListener?.('abort', abortFromExternal, { once: true });
     const timeout = globalScope.setTimeout?.(() => controller?.abort(), options.timeoutMs || 3000);
     try {
       const response = await fetchImpl(endpoint, {
@@ -124,7 +133,7 @@
         body: JSON.stringify(request),
         cache: 'no-store',
         credentials: 'omit',
-        signal: controller?.signal,
+        signal: controller?.signal || externalSignal,
       });
       let result;
       try {
@@ -154,6 +163,7 @@
         profilePreserved: true,
       };
     } finally {
+      externalSignal?.removeEventListener?.('abort', abortFromExternal);
       if (timeout !== undefined) globalScope.clearTimeout?.(timeout);
     }
   }

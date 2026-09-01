@@ -5,6 +5,11 @@
   const MAX_XLSX_BYTES = 2_000_000;
   const PROFILE_ENDPOINT = '/draft-profile';
   const XLSX_ENDPOINT = '/draft-profile-xlsx';
+  const PROFILES_ENDPOINT = '/draft-profiles';
+  const PROFILE_BIND_ENDPOINT = '/draft-profile-bind';
+  const DEFAULT_PROFILE_REQUEST_TIMEOUT_MS = 5000;
+  const MIN_PROFILE_REQUEST_TIMEOUT_MS = 250;
+  const MAX_PROFILE_REQUEST_TIMEOUT_MS = 15000;
   const XLSX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const POSITION_ORDER = ['QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'DST', 'BN', 'IR'];
   const PLAYER_POSITIONS = new Set(['QB', 'RB', 'WR', 'TE', 'K', 'DST']);
@@ -16,6 +21,14 @@
       throw new Error('Choose a valid Yahoo league ID before importing a profile.');
     }
     return leagueId;
+  }
+
+  function safeSport(value) {
+    const sport = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (!/^[a-z0-9_-]{1,16}$/.test(sport)) {
+      throw new Error('Saved profile sport is missing or invalid.');
+    }
+    return sport;
   }
 
   function finiteNumber(value, label) {
@@ -304,7 +317,16 @@
     return text ? text.slice(0, 240) : '';
   }
 
-  async function parseResponse(response, leagueId, operation) {
+  function isProfileReuseRecommendationError(value) {
+    const message = typeof value === 'string' ? value.toLowerCase() : '';
+    return message.includes('yahoo league identity could not be resolved') ||
+      (
+        message.includes('yahoo league discovery is unavailable') &&
+        message.includes('bind a saved local profile')
+      );
+  }
+
+  async function responseObject(response, operation) {
     let result;
     try {
       result = await response.json();
@@ -318,6 +340,11 @@
     if (!result || typeof result !== 'object' || Array.isArray(result)) {
       throw new Error(`${operation} returned an invalid JSON response.`);
     }
+    return result;
+  }
+
+  async function parseResponse(response, leagueId, operation) {
+    const result = await responseObject(response, operation);
     if (String(result.leagueId || '') !== leagueId) {
       throw new Error(`${operation} response did not match the selected Yahoo league.`);
     }
@@ -325,6 +352,143 @@
       throw new Error(`${operation} did not confirm success.`);
     }
     return result;
+  }
+
+  function safeProfileSummary(value, index) {
+    try {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('summary must be an object');
+      }
+      const importedAt = optionalIsoDate(value.importedAt, 'Import timestamp');
+      if (!importedAt) throw new Error('import timestamp is required');
+      const format = FORMATS.has(value.format) ? value.format : null;
+      if (!format) throw new Error('format is unsupported');
+      const result = {
+        sport: safeSport(value.sport),
+        leagueId: safeLeagueId(value.leagueId),
+        importedAt,
+        format,
+        rankingCount: safeInteger(
+          value.rankingCount,
+          'Ranking count',
+          1,
+          MAX_PROFILE_RANKINGS,
+        ),
+      };
+      const asOf = optionalIsoDate(value.asOf, 'Source date');
+      if (asOf) result.asOf = asOf.slice(0, 10);
+      return result;
+    } catch (_error) {
+      throw new Error(`Saved profile summary ${index + 1} is invalid.`);
+    }
+  }
+
+  function profileFormatLabel(format) {
+    if (format === 'draftsheets-2026') return 'DraftSheets';
+    if (format === 'json') return 'JSON';
+    return 'CSV';
+  }
+
+  function profileSportLabel(value) {
+    const sport = safeSport(value);
+    if (sport === 'f1') return 'Yahoo Football';
+    if (sport === 'nfl') return 'NFL';
+    return 'Other Yahoo fantasy sport';
+  }
+
+  function profileChoiceLabel(value) {
+    const profile = safeProfileSummary(value, 0);
+    const usesSourceDate = Boolean(profile.asOf);
+    const date = new Date(profile.asOf || profile.importedAt);
+    const dateLabel = date.toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+    });
+    return `${profileSportLabel(profile.sport)} · League ${profile.leagueId} · ` +
+      `${profileFormatLabel(profile.format)} · ${usesSourceDate ? 'source' : 'imported'} ` +
+      `${dateLabel} · ${profile.rankingCount} rankings`;
+  }
+
+  function profileRequestTimeoutMs(value) {
+    let number;
+    if (typeof value === 'number') number = value;
+    else if (typeof value === 'string' && /^\d+$/.test(value.trim())) number = Number(value);
+    else number = DEFAULT_PROFILE_REQUEST_TIMEOUT_MS;
+    if (!Number.isFinite(number)) number = DEFAULT_PROFILE_REQUEST_TIMEOUT_MS;
+    return Math.max(
+      MIN_PROFILE_REQUEST_TIMEOUT_MS,
+      Math.min(MAX_PROFILE_REQUEST_TIMEOUT_MS, Math.trunc(number)),
+    );
+  }
+
+  async function withProfileRequestTimeout(options, operation, task) {
+    const AbortControllerImpl = options.AbortControllerImpl || globalScope.AbortController;
+    const controller = AbortControllerImpl ? new AbortControllerImpl() : null;
+    const setTimeoutImpl = options.setTimeoutImpl || globalScope.setTimeout?.bind(globalScope);
+    const clearTimeoutImpl = options.clearTimeoutImpl || globalScope.clearTimeout?.bind(globalScope);
+    const timeout = controller && setTimeoutImpl
+      ? setTimeoutImpl(() => controller.abort(), profileRequestTimeoutMs(options.timeoutMs))
+      : undefined;
+    try {
+      return await task(controller?.signal);
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new Error(`${operation} timed out. Confirm the loopback server is running, then retry.`);
+      }
+      throw error;
+    } finally {
+      if (timeout !== undefined) clearTimeoutImpl?.(timeout);
+    }
+  }
+
+  async function listDraftProfiles(options = {}) {
+    const endpoint = options.endpoint || PROFILES_ENDPOINT;
+    if (endpoint !== PROFILES_ENDPOINT) throw new Error('Saved profiles endpoint must be same-origin.');
+    const fetchImpl = options.fetchImpl || globalScope.fetch?.bind(globalScope);
+    if (!fetchImpl) throw new Error('Fetch is unavailable.');
+    return withProfileRequestTimeout(options, 'Saved profile list', async (signal) => {
+      const response = await fetchImpl(endpoint, {
+        method: 'GET',
+        headers: { 'X-Fantasy-Draft-UI': '1' },
+        cache: 'no-store',
+        credentials: 'omit',
+        signal,
+      });
+      const result = await responseObject(response, 'Saved profile list');
+      if (result.status !== 'success' || !Array.isArray(result.profiles)) {
+        throw new Error('Saved profile list did not confirm success.');
+      }
+      return result.profiles.map(safeProfileSummary);
+    });
+  }
+
+  async function bindDraftProfile(sourceLeagueIdValue, leagueIdValue, options = {}) {
+    const endpoint = options.endpoint || PROFILE_BIND_ENDPOINT;
+    if (endpoint !== PROFILE_BIND_ENDPOINT) throw new Error('Draft profile bind endpoint must be same-origin.');
+    const sourceLeagueId = safeLeagueId(sourceLeagueIdValue);
+    const leagueId = safeLeagueId(leagueIdValue);
+    if (sourceLeagueId === leagueId) {
+      throw new Error('Choose a saved profile from a different draft.');
+    }
+    const fetchImpl = options.fetchImpl || globalScope.fetch?.bind(globalScope);
+    if (!fetchImpl) throw new Error('Fetch is unavailable.');
+    return withProfileRequestTimeout(options, 'Draft profile reuse', async (signal) => {
+      const response = await fetchImpl(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Fantasy-Draft-UI': '1',
+        },
+        body: JSON.stringify({ schemaVersion: 1, sourceLeagueId, leagueId }),
+        cache: 'no-store',
+        credentials: 'omit',
+        signal,
+      });
+      const result = await parseResponse(response, leagueId, 'Draft profile reuse');
+      if (String(result.sourceLeagueId || '') !== sourceLeagueId) {
+        throw new Error('Draft profile reuse response did not match the chosen source profile.');
+      }
+      return result;
+    });
   }
 
   async function saveDraftProfile(profile, options = {}) {
@@ -403,10 +567,15 @@
   const api = {
     MAX_PROFILE_RANKINGS,
     MAX_XLSX_BYTES,
+    bindDraftProfile,
     buildDraftProfileRequest,
     describeProfileFreshness,
+    isProfileReuseRecommendationError,
+    listDraftProfiles,
     parseDraftProfileFile,
     parseRosterPositions,
+    profileChoiceLabel,
+    profileSportLabel,
     saveDraftProfile,
     saveDraftProfileXlsx,
   };

@@ -12,11 +12,11 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Yahoo roster-slot support, including Superflex aliases.
 - Conservative player resolution, stale-state warnings, and incomplete-ledger blocking.
 - Popup ledger diagnostics with exact missing, duplicate, and sanitized unnumbered-pick details, plus guarded authoritative full repair.
-- Per-league browser storage and durable, cross-tab repair reconciliation without aggregate session-map races.
+- Per-league browser storage, durable repair/reset reconciliation, and a cross-browser extension-background lock broker with bounded heartbeats, expiring session fences, and cooperative lease cancellation instead of Firefox content-script Web Locks.
 - Persistent Firefox Draft Assistant sidebar with explicit league selection, shared fail-closed recommendation components, and no Yahoo-page injection or draft actions.
 - Loopback-only local dashboard with a configurable recommendation board, roster and draft-history views, specialist comparisons, critic checks, and data-source diagnostics.
 - Exact-session local DraftSheets/JSON profile import with bounded parsing, private atomic storage, and zero Yahoo API calls when a matching profile is available.
-- Optional bounded FantasyPros injury/news enrichment with explicit free-tier coverage, freshness, attribution, and per-player unknown-data weighting.
+- Optional bounded FantasyPros injury/news enrichment with explicit free-tier coverage, one-request-per-second pacing, a private persistent 95-call UTC-day budget, caching, rate-limit backoff, freshness, attribution, and per-player unknown-data weighting.
 - Strict local recommendation UI boundary: allowlisted bounded requests, exact saved/Yahoo league resolution, authenticated-team verification, serialized Yahoo calls, post-scoring snapshot revalidation, and no-store responses.
 - Uncalibrated labels for heuristic probabilities and confidence.
 - Passing Python and extension test suites for the delivered paths.
@@ -32,7 +32,7 @@ This list separates the delivered live-draft baseline from prioritized follow-up
    - Use IDs before conservative normalized-name matching; add fixtures for suffixes, same-surname players, trades, and DST aliases.
 
 3. **Auditable injury/news enrichment**
-   - Delivered the optional provider contract with normalized status, source/item/snapshot timestamps, bounded caches and identity lookups, explicit limited-coverage warnings, and unknown-data semantics.
+   - Delivered the optional provider contract with normalized status, source/item/snapshot timestamps, bounded caches and identity lookups, a private fail-closed daily request budget, explicit limited-coverage warnings, and unknown-data semantics.
    - Next, evaluate identity coverage and freshness behavior against completed draft snapshots before treating provider coverage as comprehensive.
 
 4. **Scoring-settings fidelity**
@@ -65,6 +65,7 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 
 2. **Local session management**
    - The extension popup now provides an explicitly confirmed, exact-active-session mock reset with durable browser/server tombstones and profile preservation.
+   - The loopback dashboard now lists privacy-minimal saved profile summaries with validated sport and source/import dates, explicitly rebinds a chosen ranking/settings profile to a new mock identity without copying picks or silently choosing a source, rejects cross-sport reuse server-side, and bounds list/bind waits.
    - Add explicit list/delete/reset MCP tools for other saved local draft sessions with league-scoped confirmation and no caller-controlled filesystem paths.
    - Add retention limits for old completed drafts.
 

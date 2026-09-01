@@ -75,6 +75,21 @@
           </div>
           <p class="hint">Bind rankings and league settings to the league ID above. Drafted players still come from the live Firefox recorder.</p>
         </div>
+        <form id="draft-profile-reuse-form" class="profile-reuse-form">
+          <div>
+            <h3>Reuse a saved profile</h3>
+            <p id="profile-reuse-help">Choose the source yourself. This copies rankings and league settings only; the selected mock keeps its own recorded picks.</p>
+          </div>
+          <label>
+            <span>Saved source draft</span>
+            <select id="profile-source-league" name="sourceLeagueId" aria-describedby="profile-reuse-help" required disabled>
+              <option value="">Loading saved profiles…</option>
+            </select>
+          </label>
+          <button id="reuse-profile-button" type="submit" disabled>Use for this mock &amp; refresh</button>
+        </form>
+
+        <h3 class="profile-subtitle">Or import a new profile</h3>
         <form id="draft-profile-form" class="profile-form">
           <label class="profile-file-field">
             <span>Draft profile</span>

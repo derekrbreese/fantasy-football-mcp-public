@@ -7,11 +7,19 @@
   const profileClient = globalThis.YahooDraftProfileClient;
   const form = document.getElementById('recommendation-form');
   const profileForm = document.getElementById('draft-profile-form');
+  const profileReuseForm = document.getElementById('draft-profile-reuse-form');
+  const profileSourceLeague = document.getElementById('profile-source-league');
   const leagueInput = document.getElementById('league-id');
   const requestStatus = document.getElementById('request-status');
   const recommendationView = document.getElementById('recommendation-view');
   const formControls = [...form.elements];
   const profileControls = [...profileForm.elements];
+  const profileReuseControls = [...profileReuseForm.elements];
+  let savedProfiles = [];
+  let savedProfilesLoaded = false;
+  let savedProfilesLoadFailed = false;
+  let savedProfileLoadGeneration = 0;
+  let profileControlsBusy = false;
 
   function clear(node) {
     node.replaceChildren();
@@ -62,9 +70,14 @@
   }
 
   function setProfileControlsDisabled(disabled) {
+    profileControlsBusy = disabled;
     profileControls.forEach((control) => {
       control.disabled = disabled;
     });
+    profileReuseControls.forEach((control) => {
+      control.disabled = disabled;
+    });
+    if (!disabled) updateProfileReuseControls();
   }
 
   function setStatus(message, kind) {
@@ -110,6 +123,123 @@
     return Number.isInteger(value) && value > 0 && value <= profileClient.MAX_PROFILE_RANKINGS
       ? value
       : fallback;
+  }
+
+  function validLeagueId(value) {
+    return /^\d{1,32}$/.test(String(value || '').trim());
+  }
+
+  function profileFormatLabel(format) {
+    if (format === 'draftsheets-2026') return 'DraftSheets';
+    if (format === 'json') return 'JSON';
+    return 'CSV';
+  }
+
+  function profileForSelectedLeague() {
+    const leagueId = leagueInput.value.trim();
+    return savedProfiles.find((profile) => profile.leagueId === leagueId) || null;
+  }
+
+  function updateProfileReuseControls() {
+    const leagueId = leagueInput.value.trim();
+    const sourceLeagueId = profileSourceLeague.value;
+    const validSource = savedProfiles.some((profile) => (
+      profile.leagueId === sourceLeagueId && profile.leagueId !== leagueId
+    ));
+    profileSourceLeague.disabled = profileControlsBusy ||
+      !savedProfilesLoaded ||
+      !validLeagueId(leagueId) ||
+      Boolean(profileForSelectedLeague());
+    document.getElementById('reuse-profile-button').disabled = profileControlsBusy ||
+      Boolean(profileForSelectedLeague()) ||
+      !validSource;
+  }
+
+  function renderSavedProfileChoices() {
+    const previousValue = profileSourceLeague.value;
+    const leagueId = leagueInput.value.trim();
+    const choices = savedProfiles.filter((profile) => profile.leagueId !== leagueId);
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    if (savedProfilesLoaded) {
+      placeholder.textContent = choices.length
+        ? 'Choose a saved source profile'
+        : 'No other saved profiles found';
+    } else {
+      placeholder.textContent = savedProfilesLoadFailed
+        ? 'Saved profiles unavailable'
+        : 'Loading saved profiles…';
+    }
+    profileSourceLeague.replaceChildren(placeholder);
+    choices.forEach((profile) => {
+      const option = document.createElement('option');
+      option.value = profile.leagueId;
+      option.textContent = profileClient.profileChoiceLabel(profile);
+      profileSourceLeague.appendChild(option);
+    });
+    profileSourceLeague.value = choices.some((profile) => profile.leagueId === previousValue)
+      ? previousValue
+      : '';
+    updateProfileReuseControls();
+  }
+
+  function showSelectedProfileStatus() {
+    const leagueId = leagueInput.value.trim();
+    const selectedProfile = profileForSelectedLeague();
+    if (selectedProfile) {
+      setProfileStatus(
+        `${profileFormatLabel(selectedProfile.format)} profile ready`,
+        `${selectedProfile.rankingCount} ranked players bound to league ${leagueId}.`,
+        profileClient.describeProfileFreshness(selectedProfile.asOf),
+      );
+    } else if (savedProfiles.length && validLeagueId(leagueId)) {
+      setProfileStatus(
+        'This draft has no local profile',
+        'Choose a saved source profile above, then use it explicitly for this mock.',
+        { kind: 'unknown', label: 'No profile selected for this draft' },
+      );
+    } else if (savedProfiles.length) {
+      setProfileStatus(
+        'Saved profiles available',
+        'Select the active league before choosing a saved source profile.',
+        { kind: 'unknown', label: 'No profile selected for this draft' },
+      );
+    } else {
+      setProfileStatus(
+        'No local profile imported',
+        'Import one below, or open a draft that already has an exact saved profile.',
+        { kind: 'unknown', label: 'Source date unknown' },
+      );
+    }
+  }
+
+  async function loadSavedProfiles() {
+    const loadGeneration = ++savedProfileLoadGeneration;
+    savedProfilesLoaded = false;
+    savedProfilesLoadFailed = false;
+    renderSavedProfileChoices();
+    try {
+      const profiles = await profileClient.listDraftProfiles();
+      if (loadGeneration !== savedProfileLoadGeneration) return false;
+      savedProfiles = profiles;
+      savedProfilesLoaded = true;
+      savedProfilesLoadFailed = false;
+      renderSavedProfileChoices();
+      showSelectedProfileStatus();
+      return true;
+    } catch (error) {
+      if (loadGeneration !== savedProfileLoadGeneration) return false;
+      savedProfiles = [];
+      savedProfilesLoaded = false;
+      savedProfilesLoadFailed = true;
+      renderSavedProfileChoices();
+      setProfileStatus(
+        'Saved profile list unavailable',
+        String(error?.message || 'Saved profiles could not be loaded.').slice(0, 240),
+        { kind: 'error', label: 'No profile was selected or changed' },
+      );
+      return false;
+    }
   }
 
   function prefillLeagueFromFragment() {
@@ -292,6 +422,106 @@
     renderer.renderRecommendationView(recommendationView, model);
   }
 
+  function recommendationErrorMessage(error, leagueId) {
+    if (error?.name === 'AbortError') {
+      return 'Recommendation timed out. Confirm the loopback server and selected ranking source, then retry.';
+    }
+    const message = String(error?.message || 'Recommendation unavailable.');
+    const hasReusableProfile = savedProfiles.some((profile) => profile.leagueId !== leagueId);
+    if (hasReusableProfile && profileClient.isProfileReuseRecommendationError(message)) {
+      return `${message}. This mock has no matching local profile; choose a saved source profile above and select Use for this mock.`;
+    }
+    return message;
+  }
+
+  async function refreshAnalysis(leagueId) {
+    resetAnalysisPanels();
+    setControlsDisabled(true);
+    setProfileControlsDisabled(true);
+    setStatus('Refreshing live context and running bounded specialist scoring…', 'loading');
+    try {
+      const data = await client.fetchDraftRecommendationsForLeagueId(leagueId, {
+        endpoint: '/draft-recommendation',
+        strategy: document.getElementById('strategy').value,
+        count: document.getElementById('count').value,
+        rankingCount: document.getElementById('ranking-count').value,
+        simulations: document.getElementById('simulations').value,
+        timeoutMs: 30000,
+      });
+      if (leagueInput.value.trim() !== leagueId) {
+        setStatus('League selection changed; the prior response was discarded.', 'warning');
+        return;
+      }
+      const model = render(data, leagueId);
+      setStatus(...requestStatusForModel(model, leagueId));
+    } catch (error) {
+      const message = recommendationErrorMessage(error, leagueId);
+      resetAnalysisPanels();
+      renderClientError(message, leagueId);
+      setStatus(message, 'error');
+    } finally {
+      setControlsDisabled(false);
+      setProfileControlsDisabled(false);
+    }
+  }
+
+  profileReuseForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!profileReuseForm.reportValidity() || !form.reportValidity()) return;
+    const sourceLeagueId = profileSourceLeague.value;
+    const leagueId = leagueInput.value.trim();
+    const sourceProfile = savedProfiles.find((profile) => (
+      profile.leagueId === sourceLeagueId && profile.leagueId !== leagueId
+    ));
+    if (!sourceProfile) {
+      setProfileStatus(
+        'Profile reuse needs a source',
+        'Choose one saved profile explicitly before using it for this mock.',
+        { kind: 'error', label: 'No profile was selected or changed' },
+      );
+      return;
+    }
+
+    let shouldRefresh = false;
+    setControlsDisabled(true);
+    setProfileControlsDisabled(true);
+    setProfileStatus(
+      'Reusing saved profile…',
+      `Copying rankings and league settings from league ${sourceLeagueId} to league ${leagueId}. Recorded picks will not be copied.`,
+      { kind: 'loading', label: 'Binding exact mock identity' },
+    );
+    try {
+      const result = await profileClient.bindDraftProfile(sourceLeagueId, leagueId);
+      if (leagueInput.value.trim() !== leagueId) {
+        throw new Error('League selection changed during profile reuse; no recommendation was requested.');
+      }
+      await loadSavedProfiles();
+      const rankingCount = safeResponseCount(result.rankingCount, sourceProfile.rankingCount);
+      setProfileStatus(
+        'Saved profile ready for this mock',
+        `${rankingCount} ranked players and league settings copied from league ${sourceLeagueId} to league ${leagueId}. Recorded picks stayed with league ${leagueId}.`,
+        profileClient.describeProfileFreshness(result.asOf || sourceProfile.asOf),
+      );
+      shouldRefresh = true;
+    } catch (error) {
+      const message = String(
+        error?.message || 'The saved profile could not be used for this mock.',
+      ).slice(0, 240);
+      const crossSport = /different sport/i.test(message);
+      setProfileStatus(
+        crossSport ? 'Saved profile sport does not match this mock' : 'Profile reuse failed',
+        crossSport
+          ? `${profileClient.profileSportLabel(sourceProfile.sport)} source rejected: its sport does not match the server-resolved target draft. Choose a source labeled for the same sport.`
+          : message,
+        { kind: 'error', label: 'No profile change was confirmed' },
+      );
+    } finally {
+      setControlsDisabled(false);
+      setProfileControlsDisabled(false);
+    }
+    if (shouldRefresh) await refreshAnalysis(leagueId);
+  });
+
   profileForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!profileForm.reportValidity() || !form.reportValidity()) return;
@@ -353,6 +583,7 @@
       ];
       if (truncatedCount) detailParts.push(`top 500 retained; ${truncatedCount} lower ranks omitted`);
       const freshness = profileClient.describeProfileFreshness(result.asOf || asOf);
+      await loadSavedProfiles();
       setProfileStatus(profileSourceTitle(format), detailParts.join(' · '), freshness);
       fileInput.value = '';
     } catch (error) {
@@ -371,37 +602,15 @@
     event.preventDefault();
     if (!form.reportValidity()) return;
     const leagueId = leagueInput.value.trim();
-    resetAnalysisPanels();
-    setControlsDisabled(true);
-    setProfileControlsDisabled(true);
-    setStatus('Refreshing live context and running bounded specialist scoring…', 'loading');
-    try {
-      const data = await client.fetchDraftRecommendationsForLeagueId(leagueId, {
-        endpoint: '/draft-recommendation',
-        strategy: document.getElementById('strategy').value,
-        count: document.getElementById('count').value,
-        rankingCount: document.getElementById('ranking-count').value,
-        simulations: document.getElementById('simulations').value,
-        timeoutMs: 30000,
-      });
-      if (leagueInput.value.trim() !== leagueId) {
-        setStatus('League selection changed; the prior response was discarded.', 'warning');
-        return;
-      }
-      const model = render(data, leagueId);
-      setStatus(...requestStatusForModel(model, leagueId));
-    } catch (error) {
-      const message = error?.name === 'AbortError'
-        ? 'Recommendation timed out. Confirm the loopback server and selected ranking source, then retry.'
-        : String(error?.message || 'Recommendation unavailable.');
-      resetAnalysisPanels();
-      renderClientError(message, leagueId);
-      setStatus(message, 'error');
-    } finally {
-      setControlsDisabled(false);
-      setProfileControlsDisabled(false);
-    }
+    await refreshAnalysis(leagueId);
   });
+
+  profileSourceLeague.addEventListener('change', updateProfileReuseControls);
+  leagueInput.addEventListener('input', () => {
+    renderSavedProfileChoices();
+    if (savedProfilesLoaded) showSelectedProfileStatus();
+  });
+  prefillLeagueFromFragment();
 
   if (!client || !viewModels || !renderer) {
     setStatus('Shared recommendation UI modules are unavailable.', 'error');
@@ -415,6 +624,7 @@
       { kind: 'error', label: 'Source date unknown' },
     );
     setProfileControlsDisabled(true);
+  } else {
+    void loadSavedProfiles();
   }
-  prefillLeagueFromFragment();
 }());

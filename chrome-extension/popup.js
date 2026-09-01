@@ -3,9 +3,8 @@
 
   const extensionApi = YahooDraftWebExtension.createWebExtensionApi(globalThis);
   const webext = extensionApi.native;
-  const lockManager = globalThis.navigator?.locks;
-  const draftStorage = YahooDraftStorage.createDraftStorage(extensionApi, { lockManager });
-  const operationLock = YahooDraftStorage.createSessionOperationLock(lockManager);
+  const operationLock = YahooDraftStorage.createSessionOperationLock(webext.runtime);
+  const draftStorage = YahooDraftStorage.createDraftStorage(extensionApi, { operationLock });
   const elements = {
     indicator: document.querySelector('#recording-indicator'),
     draftName: document.querySelector('#draft-name'),
@@ -54,6 +53,13 @@
   function setStatus(message, kind = '') {
     elements.status.textContent = message;
     elements.status.className = `status ${kind}`.trim();
+  }
+
+  async function leaseAwait(lease, operation) {
+    lease?.throwIfLost?.();
+    const result = await operation();
+    lease?.throwIfLost?.();
+    return result;
   }
 
   function appendCell(row, text, className = '') {
@@ -149,13 +155,16 @@
     return Object.values(sessions).sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')))[0];
   }
 
-  function repairCoordinatorFor(sessionKey) {
+  function repairCoordinatorFor(sessionKey, lease) {
     return YahooDraftSessionStore.createDurableRepairCoordinator({
-      readPending: () => draftStorage.getPendingRepair(sessionKey),
-      writePending: (record) => draftStorage.setPendingRepair(sessionKey, record),
-      clearPending: () => draftStorage.clearPendingRepair(sessionKey),
+      readPending: () => leaseAwait(lease, () => draftStorage.getPendingRepair(sessionKey)),
+      writePending: (record) => leaseAwait(
+        lease,
+        () => draftStorage.setPendingRepair(sessionKey, record),
+      ),
+      clearPending: () => leaseAwait(lease, () => draftStorage.clearPendingRepair(sessionKey)),
       isSessionReset: async (session) => {
-        const resetAt = await draftStorage.getResetAt(sessionKey);
+        const resetAt = await leaseAwait(lease, () => draftStorage.getResetAt(sessionKey));
         const sessionTime = Date.parse(session?.updatedAt);
         const resetTime = Date.parse(resetAt);
         return Number.isFinite(sessionTime) && Number.isFinite(resetTime) && sessionTime <= resetTime;
@@ -168,21 +177,36 @@
           timestamp,
           { repair: true },
         );
-        await YahooDraftSyncClient.syncDraftContext(context);
+        await leaseAwait(
+          lease,
+          () => YahooDraftSyncClient.syncDraftContext(context, { signal: lease?.signal }),
+        );
       },
-      persistSession: (session) => draftStorage.setSession(sessionKey, session),
+      persistSession: (session) => leaseAwait(
+        lease,
+        () => draftStorage.setSession(sessionKey, session),
+      ),
     });
   }
 
-  function resetCoordinatorFor(sessionKey) {
+  function resetCoordinatorFor(sessionKey, lease) {
     return YahooDraftSessionStore.createDurableResetCoordinator({
-      readPending: () => draftStorage.getPendingReset(sessionKey),
-      writePending: (record) => draftStorage.setPendingReset(sessionKey, record),
-      clearPending: () => draftStorage.clearPendingReset(sessionKey),
-      resetServer: (session) => YahooDraftSyncClient.resetDraftSession(session),
+      readPending: () => leaseAwait(lease, () => draftStorage.getPendingReset(sessionKey)),
+      writePending: (record) => leaseAwait(
+        lease,
+        () => draftStorage.setPendingReset(sessionKey, record),
+      ),
+      clearPending: () => leaseAwait(lease, () => draftStorage.clearPendingReset(sessionKey)),
+      resetServer: (session) => leaseAwait(
+        lease,
+        () => YahooDraftSyncClient.resetDraftSession(session, { signal: lease?.signal }),
+      ),
       finalizeReset: (exactSessionKey, resetAt) => {
         if (exactSessionKey !== sessionKey) throw new Error('Reset acknowledgement changed leagues.');
-        return draftStorage.finalizeReset(sessionKey, resetAt);
+        return leaseAwait(
+          lease,
+          () => draftStorage.finalizeReset(sessionKey, resetAt, lease),
+        );
       },
     });
   }
@@ -199,7 +223,7 @@
     }
     if (!resetReconciliationInProgress) {
       resetReconciliationInProgress = operationLock
-        .run(sessionKey, () => resetCoordinatorFor(sessionKey).reconcile())
+        .run(sessionKey, (lease) => resetCoordinatorFor(sessionKey, lease).reconcile())
         .finally(() => { resetReconciliationInProgress = null; });
     }
     return resetReconciliationInProgress;
@@ -327,19 +351,25 @@
     setStatus('Resetting this exact mock-draft session…');
     let result;
     try {
-      result = await operationLock.run(sessionKey, async () => {
-        const repairResult = await repairCoordinatorFor(sessionKey).reconcile();
+      result = await operationLock.run(sessionKey, async (lease) => {
+        const repairResult = await leaseAwait(
+          lease,
+          () => repairCoordinatorFor(sessionKey, lease).reconcile(),
+        );
         if (!repairResult.ok) return repairResult;
 
-        const coordinator = resetCoordinatorFor(sessionKey);
-        if (!await coordinator.hasPending()) {
-          const exactSession = await draftStorage.getSession(sessionKey);
+        const coordinator = resetCoordinatorFor(sessionKey, lease);
+        if (!await leaseAwait(lease, () => coordinator.hasPending())) {
+          const exactSession = await leaseAwait(
+            lease,
+            () => draftStorage.getSession(sessionKey),
+          );
           if (!YahooDraftSessionStore.sameDraftIdentity(exactSession, activeDiagnostics)) {
             return { ok: false, error: 'The active draft changed before reset. Rescan and try again.' };
           }
-          await coordinator.begin(exactSession);
+          await leaseAwait(lease, () => coordinator.begin(exactSession));
         }
-        return coordinator.reconcile();
+        return leaseAwait(lease, () => coordinator.reconcile());
       });
     } catch (error) {
       result = { ok: false, error: String(error?.message || error) };

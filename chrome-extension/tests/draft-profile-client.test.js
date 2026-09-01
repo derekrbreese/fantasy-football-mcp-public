@@ -5,10 +5,15 @@ const path = require('node:path');
 
 const {
   MAX_PROFILE_RANKINGS,
+  bindDraftProfile,
   buildDraftProfileRequest,
   describeProfileFreshness,
+  isProfileReuseRecommendationError,
+  listDraftProfiles,
   parseDraftProfileFile,
   parseRosterPositions,
+  profileChoiceLabel,
+  profileSportLabel,
   saveDraftProfile,
   saveDraftProfileXlsx,
 } = require('../../src/dashboard/draft-profile-client.js');
@@ -296,6 +301,253 @@ test('posts only canonical JSON to the same-origin draft-profile route', async (
   assert.deepEqual(result, { status: 'success', leagueId: '498589', rankingCount: 1 });
 });
 
+test('lists only safe saved-profile summaries without choosing one', async () => {
+  let captured;
+  const profiles = await listDraftProfiles({
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'success',
+          profiles: [{
+            sport: 'f1',
+            leagueId: '498589',
+            importedAt: '2026-09-01T12:34:56Z',
+            asOf: '2026-08-31',
+            format: 'draftsheets-2026',
+            rankingCount: 500,
+            teamId: '6',
+            rankings: [{ name: 'must not reach the dashboard' }],
+          }],
+          privatePath: '/Users/private/draft-profiles.json',
+        }),
+      };
+    },
+  });
+
+  assert.equal(captured.url, '/draft-profiles');
+  assert.equal(captured.options.method, 'GET');
+  assert.equal(captured.options.cache, 'no-store');
+  assert.equal(captured.options.credentials, 'omit');
+  assert.equal(captured.options.headers['X-Fantasy-Draft-UI'], '1');
+  assert.deepEqual(profiles, [{
+    sport: 'f1',
+    leagueId: '498589',
+    importedAt: '2026-09-01T12:34:56.000Z',
+    asOf: '2026-08-31',
+    format: 'draftsheets-2026',
+    rankingCount: 500,
+  }]);
+  assert.equal(JSON.stringify(profiles).includes('private'), false);
+  assert.equal(JSON.stringify(profiles).includes('rankings'), false);
+});
+
+test('labels reusable profiles with validated sport and source or import date', () => {
+  assert.equal(profileChoiceLabel({
+    sport: 'f1',
+    leagueId: '777777',
+    importedAt: '2026-09-01T12:34:56Z',
+    asOf: '2026-08-31',
+    format: 'draftsheets-2026',
+    rankingCount: 500,
+  }), 'Yahoo Football · League 777777 · DraftSheets · source Aug 31, 2026 · 500 rankings');
+  assert.equal(profileChoiceLabel({
+    sport: 'nfl',
+    leagueId: '498589',
+    importedAt: '2026-09-01T12:34:56Z',
+    format: 'json',
+    rankingCount: 250,
+  }), 'NFL · League 498589 · JSON · imported Sep 1, 2026 · 250 rankings');
+  assert.equal(profileSportLabel('f1'), 'Yahoo Football');
+  assert.equal(profileSportLabel('nfl'), 'NFL');
+  assert.equal(profileSportLabel('other_slug'), 'Other Yahoo fantasy sport');
+});
+
+test('explicitly binds only rankings/settings from a chosen source profile', async () => {
+  let captured;
+  const result = await bindDraftProfile('498589', '777777', {
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'success',
+          leagueId: '777777',
+          sourceLeagueId: '498589',
+          rankingCount: 500,
+          format: 'draftsheets-2026',
+        }),
+      };
+    },
+  });
+
+  assert.equal(captured.url, '/draft-profile-bind');
+  assert.equal(captured.options.method, 'POST');
+  assert.equal(captured.options.cache, 'no-store');
+  assert.equal(captured.options.credentials, 'omit');
+  assert.equal(captured.options.headers['Content-Type'], 'application/json');
+  assert.equal(captured.options.headers['X-Fantasy-Draft-UI'], '1');
+  assert.deepEqual(JSON.parse(captured.options.body), {
+    schemaVersion: 1,
+    sourceLeagueId: '498589',
+    leagueId: '777777',
+  });
+  assert.equal(captured.options.body.includes('picks'), false);
+  assert.equal(captured.options.body.includes('teamId'), false);
+  assert.deepEqual(result, {
+    status: 'success',
+    leagueId: '777777',
+    sourceLeagueId: '498589',
+    rankingCount: 500,
+    format: 'draftsheets-2026',
+  });
+});
+
+test('saved-profile reuse rejects unsafe endpoints, invalid summaries, and changed identities', async () => {
+  await assert.rejects(
+    listDraftProfiles({
+      endpoint: 'https://example.test/draft-profiles',
+      fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+    }),
+    /same-origin/,
+  );
+  await assert.rejects(
+    listDraftProfiles({
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({
+          status: 'success',
+          profiles: [{
+            sport: 'f1', leagueId: '498589', importedAt: 'not-a-date', format: 'csv', rankingCount: 1,
+          }],
+        }),
+      }),
+    }),
+    /saved profile summary/i,
+  );
+  await assert.rejects(
+    listDraftProfiles({
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({
+          status: 'success',
+          profiles: [{
+            sport: 'https://private.example',
+            leagueId: '498589',
+            importedAt: '2026-09-01T12:34:56Z',
+            format: 'csv',
+            rankingCount: 1,
+          }],
+        }),
+      }),
+    }),
+    /saved profile summary/i,
+  );
+  await assert.rejects(
+    bindDraftProfile('498589', '498589', {
+      fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+    }),
+    /different draft/i,
+  );
+  await assert.rejects(
+    bindDraftProfile('498589', '777777', {
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({
+          status: 'success', leagueId: '777777', sourceLeagueId: '999', rankingCount: 1,
+        }),
+      }),
+    }),
+    /source profile/i,
+  );
+  await assert.rejects(
+    bindDraftProfile('498589', '777777', {
+      fetchImpl: async () => ({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          status: 'error', message: 'selected local profile belongs to a different sport',
+        }),
+      }),
+    }),
+    /different sport/i,
+  );
+});
+
+test('bounds and clears saved-profile list and bind timeouts', async () => {
+  class FakeAbortSignal {
+    constructor() {
+      this.aborted = false;
+      this.listeners = [];
+    }
+
+    addEventListener(type, listener) {
+      if (type === 'abort') this.listeners.push(listener);
+    }
+  }
+
+  class FakeAbortController {
+    constructor() {
+      this.signal = new FakeAbortSignal();
+    }
+
+    abort() {
+      this.signal.aborted = true;
+      this.signal.listeners.forEach((listener) => listener());
+    }
+  }
+
+  async function expectTimeout(operation) {
+    let timerCallback;
+    let timerDelay;
+    let clearedTimer;
+    const request = operation({
+      timeoutMs: 1,
+      AbortControllerImpl: FakeAbortController,
+      setTimeoutImpl: (callback, delay) => {
+        timerCallback = callback;
+        timerDelay = delay;
+        return 17;
+      },
+      clearTimeoutImpl: (timer) => { clearedTimer = timer; },
+      fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        });
+      }),
+    });
+    assert.equal(timerDelay, 250);
+    timerCallback();
+    await assert.rejects(request, /timed out/i);
+    assert.equal(clearedTimer, 17);
+  }
+
+  await expectTimeout((options) => listDraftProfiles(options));
+  await expectTimeout((options) => bindDraftProfile('498589', '777777', options));
+});
+
+test('recognizes both Yahoo fallback failures that explicit profile reuse can recover', () => {
+  assert.equal(
+    isProfileReuseRecommendationError(
+      'Recommendation server returned HTTP 400: Yahoo league identity could not be resolved for the synced draft',
+    ),
+    true,
+  );
+  assert.equal(
+    isProfileReuseRecommendationError(
+      'Recommendation server returned HTTP 400: Yahoo league discovery is unavailable. Configure Yahoo credentials or explicitly bind a saved local profile to this draft.',
+    ),
+    true,
+  );
+  assert.equal(
+    isProfileReuseRecommendationError('Recommendation server returned HTTP 400: ledger has a gap'),
+    false,
+  );
+});
+
 test('rejects unsafe endpoints and cross-league responses', async () => {
   const profile = {
     leagueId: '498589',
@@ -364,9 +616,26 @@ test('dashboard exposes a local import form while retaining recommendation contr
   assert.match(html, /id="draft-profile-file"/);
   assert.match(html, /accept="\.xlsx,\.csv,\.json/);
   assert.match(html, /id="profile-source-status"/);
+  assert.match(html, /id="draft-profile-reuse-form"/);
+  assert.match(html, /id="profile-source-league"/);
+  assert.match(html, /Use for this mock/);
+  assert.match(html, /rankings and league settings only/i);
   assert.match(html, /DraftSheets \.xlsx/);
   assert.match(html, /id="recommendation-form"/);
   assert.match(html, /draft-profile-client\.js/);
+  assert.match(appSource, /listDraftProfiles\(/);
+  assert.match(appSource, /bindDraftProfile\(/);
+  assert.match(appSource, /profileChoiceLabel\(profile\)/);
+  assert.match(appSource, /profileSportLabel\(sourceProfile\.sport\)/);
+  assert.doesNotMatch(appSource, /sourceProfile\.sport\.toUpperCase\(\)/);
+  assert.match(appSource, /different sport/i);
+  assert.match(appSource, /await refreshAnalysis\(leagueId\)/);
+  assert.match(appSource, /profileSourceLeague\.value\s*=\s*choices\.some/);
+  assert.doesNotMatch(appSource, /profileSourceLeague\.value\s*=\s*(?:choices|savedProfiles)\[0\]/);
+  assert.ok(
+    appSource.indexOf('if (shouldRefresh) await refreshAnalysis(leagueId)') >
+      appSource.indexOf('await profileClient.bindDraftProfile(sourceLeagueId, leagueId)'),
+  );
   assert.match(appSource, /\.textContent\s*=/);
   assert.doesNotMatch(appSource, /profile-source-status[^\n]*innerHTML/);
 });

@@ -18,6 +18,7 @@ import threading
 import unicodedata
 import zipfile
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -118,6 +119,14 @@ _MACRO_PACKAGE_MARKERS = (
 
 class LocalDraftProfileValidationError(ValueError):
     """Raised when imported local draft-profile data is unsafe or invalid."""
+
+
+class LocalDraftProfileNotFoundError(LocalDraftProfileValidationError):
+    """Raised when an explicitly selected reusable profile is unavailable."""
+
+
+class LocalDraftProfileConflictError(LocalDraftProfileValidationError):
+    """Raised when an explicit profile bind would cross or replace an identity."""
 
 
 def _profile_store_path(path: str | Path | None = None) -> Path:
@@ -437,6 +446,23 @@ def _prepare_store_directory(destination: Path, *, tighten_existing: bool) -> No
         parent.chmod(0o700)
 
 
+def _write_all(sessions: Mapping[str, Any], destination: Path) -> None:
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=".draft-profiles-", suffix=".json", dir=destination.parent
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as temporary:
+            json.dump(sessions, temporary, indent=2, sort_keys=True, allow_nan=False)
+            temporary.write("\n")
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, destination)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
 def save_local_draft_profile(value: Any, path: str | Path | None = None) -> dict[str, Any]:
     """Atomically store one exact-identity local draft profile."""
 
@@ -461,20 +487,7 @@ def save_local_draft_profile(value: Any, path: str | Path | None = None) -> dict
                     "local draft profile import must be newer than the saved profile"
                 )
         sessions[session_key] = profile
-        handle, temporary_name = tempfile.mkstemp(
-            prefix=".draft-profiles-", suffix=".json", dir=destination.parent
-        )
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as temporary:
-                json.dump(sessions, temporary, indent=2, sort_keys=True, allow_nan=False)
-                temporary.write("\n")
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.chmod(temporary_name, 0o600)
-            os.replace(temporary_name, destination)
-        finally:
-            if os.path.exists(temporary_name):
-                os.unlink(temporary_name)
+        _write_all(sessions, destination)
     return profile
 
 
@@ -495,6 +508,105 @@ def load_local_draft_profile(
     if profile is None or profile["draft"] != identity:
         return None
     return profile
+
+
+def list_local_draft_profile_summaries(
+    path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """List privacy-minimal metadata for explicit local profile selection."""
+
+    custom_path = path is not None or bool(os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH"))
+    destination = _profile_store_path(path)
+    with _STORE_LOCK:
+        if not custom_path and destination.parent.is_symlink():
+            raise LocalDraftProfileValidationError(
+                "default local draft profile directory cannot be a symbolic link"
+            )
+        profiles = list(_read_all(destination).values())
+    summaries: list[dict[str, Any]] = []
+    for profile in profiles:
+        provenance = profile["provenance"]
+        summary: dict[str, Any] = {
+            "sport": profile["draft"]["sport"],
+            "leagueId": profile["draft"]["leagueId"],
+            "importedAt": profile["importedAt"],
+            "format": provenance["format"],
+            "rankingCount": len(profile["rankings"]),
+        }
+        if "asOf" in provenance:
+            summary["asOf"] = provenance["asOf"]
+        summaries.append(summary)
+    return sorted(
+        summaries,
+        key=lambda summary: (
+            summary["importedAt"],
+            summary["sport"],
+            summary["leagueId"],
+        ),
+        reverse=True,
+    )
+
+
+def _reusable_profile_content(profile: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        field: profile[field]
+        for field in ("season", "rankings", "leagueSettings", "provenance")
+    }
+
+
+def bind_local_draft_profile(
+    source_league_id: str,
+    target_draft_identity: Mapping[str, Any],
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Explicitly copy sanitized profile data onto one exact target draft identity."""
+
+    target = _sanitize_draft_identity(target_draft_identity)
+    source_id = _safe_string(source_league_id, "sourceLeagueId", 64)
+    if not _IDENTIFIER.fullmatch(source_id):
+        raise LocalDraftProfileValidationError("sourceLeagueId has an invalid format")
+    custom_path = path is not None or bool(os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH"))
+    destination = _profile_store_path(path)
+    with _STORE_LOCK:
+        if not custom_path and destination.parent.is_symlink():
+            raise LocalDraftProfileValidationError(
+                "default local draft profile directory cannot be a symbolic link"
+            )
+        _prepare_store_directory(destination, tighten_existing=not custom_path)
+        profiles = _read_all(destination)
+        source_key = f"{target['sport']}:{source_id}"
+        source = profiles.get(source_key)
+        if source is None:
+            source_sports = {
+                profile["draft"]["sport"]
+                for profile in profiles.values()
+                if profile["draft"]["leagueId"] == source_id
+            }
+            if source_sports:
+                raise LocalDraftProfileConflictError(
+                    "selected local profile belongs to a different sport"
+                )
+            raise LocalDraftProfileNotFoundError("selected local draft profile was not found")
+
+        existing = profiles.get(target["sessionKey"])
+        if existing is not None:
+            if existing["draft"] != target:
+                raise LocalDraftProfileConflictError(
+                    "target local profile identity does not match the synced draft"
+                )
+            if _reusable_profile_content(existing) == _reusable_profile_content(source):
+                destination.chmod(0o600)
+                return existing
+            raise LocalDraftProfileConflictError(
+                "selected draft already has a different local profile"
+            )
+
+        bound = deepcopy(source)
+        bound["draft"] = target
+        bound = sanitize_local_draft_profile(bound)
+        profiles[target["sessionKey"]] = bound
+        _write_all(profiles, destination)
+    return bound
 
 
 def _header_key(value: Any) -> str:

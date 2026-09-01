@@ -14,14 +14,23 @@ import html
 import json
 import os
 import re
+import time
 import unicodedata
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 import aiohttp
+
+from src.services.fantasypros_request_budget import (
+    DEFAULT_DAILY_REQUEST_LIMIT,
+    FantasyProsDailyRequestBudget,
+    FantasyProsRequestBudgetExhausted,
+    FantasyProsRequestBudgetUnavailable,
+)
 
 _BASE_URL = "https://api.fantasypros.com/public/v2/json/nfl"
 _PROVIDER = "FantasyPros"
@@ -61,11 +70,18 @@ _SHORT_STATUS_ALIASES = {
 }
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"\s+")
-_MAX_TARGETED_PLAYER_LOOKUPS = 10
+# The public API permits one request per second and recommendation clients use a
+# 30-second deadline. Two targeted identity lookups keep a cold, worst-case
+# request bounded after the catalog, injury, and news snapshots.
+_MAX_TARGETED_PLAYER_LOOKUPS = 2
 
 
 class FantasyProsProviderError(RuntimeError):
     """A sanitized provider failure that never includes credentials or response bodies."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class JsonHttpTransport(Protocol):
@@ -109,7 +125,8 @@ class AiohttpJsonTransport:
                 ) as response:
                     if response.status != 200:
                         raise FantasyProsProviderError(
-                            f"FantasyPros returned HTTP status {response.status}"
+                            f"FantasyPros returned HTTP status {response.status}",
+                            status_code=response.status,
                         )
                     content_length = response.content_length
                     if content_length is not None and content_length > max_body_bytes:
@@ -182,11 +199,14 @@ class _LoadResult:
     records: tuple[Any, ...]
     truncated: bool = False
     failed: bool = False
+    rate_limited: bool = False
     fetched_at: datetime | None = None
     returned_count: int = 0
     reported_count: int | None = None
     reported_limit: int | None = None
     public_api_limited: bool = False
+    daily_budget_exhausted: bool = False
+    daily_budget_unavailable: bool = False
 
 
 def _utc(value: datetime) -> datetime:
@@ -308,6 +328,13 @@ class FantasyProsProvider:
         news_limit: int = 100,
         recent_news_limit: int = 3,
         max_cache_entries: int = 256,
+        request_interval_seconds: float = 1.05,
+        failure_backoff_seconds: float = 60.0,
+        rate_limit_backoff_seconds: float = 900.0,
+        daily_request_limit: int = DEFAULT_DAILY_REQUEST_LIMIT,
+        daily_budget_path: str | Path | None = None,
+        monotonic: Callable[[], float] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         configured_key = api_key if api_key is not None else os.environ.get(_ENV_NAME)
         self._api_key = configured_key.strip() if isinstance(configured_key, str) else ""
@@ -327,10 +354,34 @@ class FantasyProsProvider:
         self._news_limit = max(1, min(int(news_limit), 100))
         self._recent_news_limit = max(1, min(int(recent_news_limit), 5))
         self._max_cache_entries = max(16, min(int(max_cache_entries), 1_024))
+        self._request_interval_seconds = max(
+            0.0, min(float(request_interval_seconds), 5.0)
+        )
+        self._failure_backoff_seconds = max(
+            1.0, min(float(failure_backoff_seconds), 3_600.0)
+        )
+        self._rate_limit_backoff_seconds = max(
+            self._failure_backoff_seconds,
+            min(float(rate_limit_backoff_seconds), 86_400.0),
+        )
+        self._monotonic = monotonic or time.monotonic
+        self._sleep = sleep or asyncio.sleep
+        self._daily_request_budget = FantasyProsDailyRequestBudget(
+            path=daily_budget_path,
+            daily_limit=daily_request_limit,
+        )
         self._cache: OrderedDict[
             tuple[str, tuple[tuple[str, str | int], ...]], _CacheEntry
         ] = OrderedDict()
+        self._failure_backoff: OrderedDict[
+            tuple[str, tuple[tuple[str, str | int], ...]], tuple[float, bool]
+        ] = OrderedDict()
         self._request_lock = asyncio.Lock()
+        self._request_gate = asyncio.Lock()
+        self._next_request_at = 0.0
+        self._daily_budget_exhausted_until: datetime | None = None
+        self._daily_budget_unavailable_until = 0.0
+        self._provider_rate_limited_until = 0.0
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(configured={bool(self._api_key)})"
@@ -441,10 +492,18 @@ class FantasyProsProvider:
             ]
             if len(matches) == 1:
                 targeted_players.append(matches[0])
+            elif (
+                load_result.daily_budget_exhausted
+                or load_result.daily_budget_unavailable
+            ):
+                continue
             elif load_result.failed:
                 targeted_failed = True
             else:
                 targeted_incomplete = True
+        targeted_budget_warning = self._daily_budget_warning(targeted_results)
+        if targeted_budget_warning is not None and targeted_budget_warning not in warnings:
+            warnings.append(targeted_budget_warning)
         if targeted_capped:
             warnings.append(
                 "FantasyPros recent-news identity coverage exceeded the bounded lookup limit"
@@ -515,8 +574,103 @@ class FantasyProsProvider:
             )
         except asyncio.CancelledError:
             raise
+        except FantasyProsRequestBudgetExhausted:
+            return _LoadResult((), failed=True, daily_budget_exhausted=True)
+        except FantasyProsRequestBudgetUnavailable:
+            return _LoadResult((), failed=True, daily_budget_unavailable=True)
+        except FantasyProsProviderError as error:
+            rate_limited = error.status_code == 429
+            self._remember_failure(
+                (endpoint, tuple(sorted(params.items()))),
+                seconds=(
+                    self._rate_limit_backoff_seconds
+                    if rate_limited
+                    else self._failure_backoff_seconds
+                ),
+                rate_limited=rate_limited,
+            )
+            return _LoadResult((), failed=True, rate_limited=rate_limited)
         except Exception:
+            self._remember_failure((endpoint, tuple(sorted(params.items()))))
             return _LoadResult((), failed=True)
+
+    def _remember_failure(
+        self,
+        cache_key: tuple[str, tuple[tuple[str, str | int], ...]],
+        *,
+        seconds: float | None = None,
+        rate_limited: bool = False,
+    ) -> None:
+        self._failure_backoff[cache_key] = (
+            self._monotonic()
+            + (self._failure_backoff_seconds if seconds is None else seconds),
+            rate_limited,
+        )
+        self._failure_backoff.move_to_end(cache_key)
+        while len(self._failure_backoff) > self._max_cache_entries:
+            self._failure_backoff.popitem(last=False)
+
+    async def _paced_get_json(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, str | int],
+    ) -> Mapping[str, Any]:
+        async with self._request_gate:
+            if self._monotonic() < self._provider_rate_limited_until:
+                raise FantasyProsProviderError(
+                    "FantasyPros is rate-limited",
+                    status_code=429,
+                )
+            self._reserve_daily_request()
+            delay = self._next_request_at - self._monotonic()
+            if delay > 0.0:
+                await self._sleep(delay)
+            started_at = self._monotonic()
+            self._next_request_at = started_at + self._request_interval_seconds
+            try:
+                return await self._transport.get_json(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout_seconds=self._timeout_seconds,
+                    max_body_bytes=self._max_body_bytes,
+                )
+            except FantasyProsProviderError as error:
+                if error.status_code == 429:
+                    observed_at = self._monotonic()
+                    if observed_at >= self._provider_rate_limited_until:
+                        self._provider_rate_limited_until = (
+                            observed_at + self._rate_limit_backoff_seconds
+                        )
+                raise
+
+    def _reserve_daily_request(self) -> None:
+        now = self._now()
+        exhausted_until = self._daily_budget_exhausted_until
+        if exhausted_until is not None:
+            if now < exhausted_until:
+                raise FantasyProsRequestBudgetExhausted(exhausted_until)
+            self._daily_budget_exhausted_until = None
+
+        monotonic_now = self._monotonic()
+        if monotonic_now < self._daily_budget_unavailable_until:
+            raise FantasyProsRequestBudgetUnavailable
+
+        try:
+            self._daily_request_budget.reserve(now)
+        except FantasyProsRequestBudgetExhausted as error:
+            self._daily_budget_exhausted_until = error.retry_at
+            raise
+        except FantasyProsRequestBudgetUnavailable:
+            if monotonic_now >= self._daily_budget_unavailable_until:
+                self._daily_budget_unavailable_until = (
+                    monotonic_now + self._failure_backoff_seconds
+                )
+            raise
+        else:
+            self._daily_budget_unavailable_until = 0.0
 
     async def _load(
         self,
@@ -545,12 +699,18 @@ class FantasyProsProvider:
                 )
             self._cache.pop(cache_key, None)
 
-        payload = await self._transport.get_json(
+        failed_backoff = self._failure_backoff.get(cache_key)
+        if failed_backoff is not None:
+            failed_until, rate_limited = failed_backoff
+            if failed_until > self._monotonic():
+                self._failure_backoff.move_to_end(cache_key)
+                return _LoadResult((), failed=True, rate_limited=rate_limited)
+            self._failure_backoff.pop(cache_key, None)
+
+        payload = await self._paced_get_json(
             f"{_BASE_URL}/{endpoint}",
             headers={"x-api-key": self._api_key},
             params=params,
-            timeout_seconds=self._timeout_seconds,
-            max_body_bytes=self._max_body_bytes,
         )
         raw_records = payload.get(array_key)
         if not isinstance(raw_records, list):
@@ -575,6 +735,7 @@ class FantasyProsProvider:
             payload.get("public_api_limited") is True,
         )
         self._cache[cache_key] = entry
+        self._failure_backoff.pop(cache_key, None)
         self._cache.move_to_end(cache_key)
         while len(self._cache) > self._max_cache_entries:
             self._cache.popitem(last=False)
@@ -792,13 +953,25 @@ class FantasyProsProvider:
         injuries: _LoadResult,
         news: _LoadResult,
     ) -> list[str]:
-        warnings: list[str] = []
-        for label, result in (
+        results = (
             ("player catalog", catalog),
             ("injuries", injuries),
             ("news", news),
-        ):
-            if result.failed:
+        )
+        warnings: list[str] = []
+        budget_warning = FantasyProsProvider._daily_budget_warning(
+            tuple(result for _label, result in results)
+        )
+        if budget_warning is not None:
+            warnings.append(budget_warning)
+        for label, result in results:
+            if result.daily_budget_exhausted or result.daily_budget_unavailable:
+                continue
+            if result.rate_limited:
+                warnings.append(
+                    f"FantasyPros {label} is rate-limited; missing data remains unknown"
+                )
+            elif result.failed:
                 warnings.append(f"FantasyPros {label} is temporarily unavailable")
             elif result.truncated:
                 warnings.append(f"FantasyPros {label} exceeded the bounded record limit")
@@ -808,6 +981,17 @@ class FantasyProsProvider:
             ):
                 warnings.append(f"FantasyPros {label} coverage is limited by the public API")
         return warnings
+
+    @staticmethod
+    def _daily_budget_warning(results: Sequence[_LoadResult]) -> str | None:
+        if any(result.daily_budget_exhausted for result in results):
+            return (
+                "FantasyPros daily request budget is exhausted; missing data remains "
+                "unknown until the next UTC day"
+            )
+        if any(result.daily_budget_unavailable for result in results):
+            return "FantasyPros daily request budget is unavailable; missing data remains unknown"
+        return None
 
     @staticmethod
     def _coverage(result: _LoadResult) -> dict[str, Any]:

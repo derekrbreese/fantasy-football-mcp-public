@@ -3,9 +3,8 @@
 
   const extensionApi = YahooDraftWebExtension.createWebExtensionApi(globalThis);
   const webext = extensionApi.native;
-  const lockManager = globalThis.navigator?.locks;
-  const draftStorage = YahooDraftStorage.createDraftStorage(extensionApi, { lockManager });
-  const operationLock = YahooDraftStorage.createSessionOperationLock(lockManager);
+  const operationLock = YahooDraftStorage.createSessionOperationLock(webext.runtime);
+  const draftStorage = YahooDraftStorage.createDraftStorage(extensionApi, { operationLock });
   const metadata = YahooDraftParser.parseDraftUrl(window.location.href);
   if (!metadata) return;
 
@@ -32,16 +31,30 @@
     syncError: null,
   };
 
-  async function blockForPendingReset() {
-    if (!await draftStorage.getPendingReset(metadata.sessionKey)) return null;
+  async function leaseAwait(lease, operation) {
+    lease?.throwIfLost?.();
+    const result = await operation();
+    lease?.throwIfLost?.();
+    return result;
+  }
+
+  async function blockForPendingReset(lease) {
+    const pending = await leaseAwait(
+      lease,
+      () => draftStorage.getPendingReset(metadata.sessionKey),
+    );
+    if (!pending) return null;
     const error = 'A confirmed mock-draft reset is pending reconciliation; scans, repairs, and sync are blocked.';
     diagnostics.syncStatus = 'reset-pending';
     diagnostics.syncError = error;
     return { ...diagnostics, ok: false, error };
   }
 
-  async function blockForPreResetTab() {
-    const resetAt = await draftStorage.getResetAt(metadata.sessionKey);
+  async function blockForPreResetTab(lease) {
+    const resetAt = await leaseAwait(
+      lease,
+      () => draftStorage.getResetAt(metadata.sessionKey),
+    );
     if (!YahooDraftStorage.isTabBlockedByReset(contentLoadedAt, resetAt, allowedResetAt)) return null;
     const error = 'This Yahoo tab was open before the mock-draft reset. Reload it, or explicitly rescan it from the recorder popup, before recording resumes.';
     diagnostics.syncStatus = 'reset-reload-required';
@@ -49,42 +62,57 @@
     return { ...diagnostics, ok: false, error };
   }
 
-  async function persistSuccessfulOrdinarySync(session, snapshotTimestamp) {
-    const resetBlock = await blockForPendingReset();
+  async function persistSuccessfulOrdinarySync(session, snapshotTimestamp, lease) {
+    const resetBlock = await blockForPendingReset(lease);
     if (resetBlock) return;
-    const resetAt = await draftStorage.getResetAt(metadata.sessionKey);
+    const resetAt = await leaseAwait(
+      lease,
+      () => draftStorage.getResetAt(metadata.sessionKey),
+    );
     if (resetAt && Date.parse(snapshotTimestamp) <= Date.parse(resetAt)) return;
-    const current = await draftStorage.getSession(metadata.sessionKey);
+    const current = await leaseAwait(
+      lease,
+      () => draftStorage.getSession(metadata.sessionKey),
+    );
     if (current && !YahooDraftSessionStore.sameDraftIdentity(current, metadata)) return;
     const currentTime = Date.parse(current?.updatedAt);
     const snapshotTime = Date.parse(session.updatedAt);
     if (Number.isFinite(currentTime) && Number.isFinite(snapshotTime) && currentTime > snapshotTime) return;
-    await draftStorage.setSession(metadata.sessionKey, {
-      ...session,
-      lastSyncedAt: snapshotTimestamp,
-    });
+    await leaseAwait(
+      lease,
+      () => draftStorage.setSession(metadata.sessionKey, {
+        ...session,
+        lastSyncedAt: snapshotTimestamp,
+      }),
+    );
   }
 
-  async function isSessionReset(session) {
-    const resetAt = await draftStorage.getResetAt(metadata.sessionKey);
+  async function isSessionReset(session, lease) {
+    const resetAt = await leaseAwait(
+      lease,
+      () => draftStorage.getResetAt(metadata.sessionKey),
+    );
     const sessionTime = Date.parse(session?.updatedAt);
     const resetTime = Date.parse(resetAt);
     return Number.isFinite(sessionTime) && Number.isFinite(resetTime) && sessionTime <= resetTime;
   }
 
-  async function syncSession(session, options = {}) {
+  async function syncSession(session, options = {}, lease) {
     const isRepair = options.repair === true;
-    const resetBlock = await blockForPendingReset();
+    const resetBlock = await blockForPendingReset(lease);
     if (resetBlock) {
       if (options.requireSuccess) throw new Error(resetBlock.error);
       return null;
     }
-    const oldTabBlock = await blockForPreResetTab();
+    const oldTabBlock = await blockForPreResetTab(lease);
     if (oldTabBlock) {
       if (options.requireSuccess) throw new Error(oldTabBlock.error);
       return null;
     }
-    if (!isRepair && await draftStorage.getPendingRepair(metadata.sessionKey)) {
+    if (!isRepair && await leaseAwait(
+      lease,
+      () => draftStorage.getPendingRepair(metadata.sessionKey),
+    )) {
       diagnostics.syncStatus = 'repair-pending-local-save';
       diagnostics.syncError = 'A durable repair is pending reconciliation; ordinary sync is blocked.';
       return null;
@@ -106,12 +134,18 @@
         snapshotTimestamp,
         { repair: isRepair },
       );
-      const response = await YahooDraftSyncClient.syncDraftContext(context);
-      if (!isRepair) await persistSuccessfulOrdinarySync(session, snapshotTimestamp);
+      const response = await leaseAwait(
+        lease,
+        () => YahooDraftSyncClient.syncDraftContext(context, { signal: lease?.signal }),
+      );
+      if (!isRepair) {
+        await persistSuccessfulOrdinarySync(session, snapshotTimestamp, lease);
+      }
       diagnostics.syncStatus = 'connected';
       diagnostics.lastSyncAt = new Date().toISOString();
       return response;
     } catch (error) {
+      lease?.throwIfLost?.();
       diagnostics.syncStatus = 'unavailable';
       diagnostics.syncError = error?.name === 'AbortError' ? 'Connection timed out' : String(error?.message || error);
       if (options.requireSuccess) throw error;
@@ -119,24 +153,40 @@
     }
   }
 
-  const repairCoordinator = YahooDraftSessionStore.createDurableRepairCoordinator({
-    readPending: () => draftStorage.getPendingRepair(metadata.sessionKey),
-    writePending: (record) => draftStorage.setPendingRepair(metadata.sessionKey, record),
-    clearPending: () => draftStorage.clearPendingRepair(metadata.sessionKey),
-    isSessionReset,
-    syncRepair: async (session) => {
-      lastSyncedSignature = undefined;
-      await syncSession(session, { repair: true, requireSuccess: true });
-    },
-    persistSession: (session) => draftStorage.setSession(metadata.sessionKey, session),
-  });
+  function repairCoordinatorForLease(lease) {
+    return YahooDraftSessionStore.createDurableRepairCoordinator({
+      readPending: () => leaseAwait(
+        lease,
+        () => draftStorage.getPendingRepair(metadata.sessionKey),
+      ),
+      writePending: (record) => leaseAwait(
+        lease,
+        () => draftStorage.setPendingRepair(metadata.sessionKey, record),
+      ),
+      clearPending: () => leaseAwait(
+        lease,
+        () => draftStorage.clearPendingRepair(metadata.sessionKey),
+      ),
+      isSessionReset: (session) => isSessionReset(session, lease),
+      syncRepair: async (session) => {
+        lastSyncedSignature = undefined;
+        await syncSession(session, { repair: true, requireSuccess: true }, lease);
+      },
+      persistSession: (session) => leaseAwait(
+        lease,
+        () => draftStorage.setSession(metadata.sessionKey, session),
+      ),
+    });
+  }
 
-  async function performScan() {
-    const resetBlock = await blockForPendingReset();
+  async function performScan(lease) {
+    lease?.throwIfLost?.();
+    const resetBlock = await blockForPendingReset(lease);
     if (resetBlock) return resetBlock;
-    const oldTabBlock = await blockForPreResetTab();
+    const oldTabBlock = await blockForPreResetTab(lease);
     if (oldTabBlock) return oldTabBlock;
-    const reconciliation = await repairCoordinator.reconcile();
+    const repairCoordinator = repairCoordinatorForLease(lease);
+    const reconciliation = await leaseAwait(lease, () => repairCoordinator.reconcile());
     if (!reconciliation.ok) {
       diagnostics.syncStatus = 'repair-pending-local-save';
       diagnostics.syncError = reconciliation.error;
@@ -176,7 +226,11 @@
     diagnostics.candidateCount = snapshots.length + ledgerSnapshots.length + (liveSnapshot ? 1 : 0);
     diagnostics.parsedCount = picks.length;
 
-    const existing = await draftStorage.getSession(metadata.sessionKey);
+    lease?.throwIfLost?.();
+    const existing = await leaseAwait(
+      lease,
+      () => draftStorage.getSession(metadata.sessionKey),
+    );
     let updated;
     if (authoritativeEvaluation.authoritativePicks) {
       const automaticUpdate = YahooDraftSessionStore.prepareAutomaticAuthoritativeUpdate(
@@ -200,22 +254,28 @@
     }
     diagnostics.recordedCount = updated.picks.length;
 
-    const resetBeforeWrite = await blockForPendingReset();
+    const resetBeforeWrite = await blockForPendingReset(lease);
     if (resetBeforeWrite) return resetBeforeWrite;
     if (JSON.stringify(existing?.picks || []) !== JSON.stringify(updated.picks)) {
-      await draftStorage.setSession(metadata.sessionKey, updated);
+      await leaseAwait(
+        lease,
+        () => draftStorage.setSession(metadata.sessionKey, updated),
+      );
     }
 
-    await syncSession(updated);
+    await syncSession(updated, {}, lease);
+    lease?.throwIfLost?.();
     return { ...diagnostics };
   }
 
-  async function performRepair() {
-    const resetBlock = await blockForPendingReset();
+  async function performRepair(lease) {
+    lease?.throwIfLost?.();
+    const resetBlock = await blockForPendingReset(lease);
     if (resetBlock) return resetBlock;
-    const oldTabBlock = await blockForPreResetTab();
+    const oldTabBlock = await blockForPreResetTab(lease);
     if (oldTabBlock) return oldTabBlock;
-    const reconciliation = await repairCoordinator.reconcile();
+    const repairCoordinator = repairCoordinatorForLease(lease);
+    const reconciliation = await leaseAwait(lease, () => repairCoordinator.reconcile());
     if (!reconciliation.ok) return reconciliation;
     const now = new Date().toISOString();
     const ledgerScan = YahooDraftDomScanner.scanAuthoritativeRoundByRoundTables(document);
@@ -235,7 +295,11 @@
     );
     if (!currentPickValidation.ok) return { ...currentPickValidation, health };
 
-    const existing = await draftStorage.getSession(metadata.sessionKey);
+    lease?.throwIfLost?.();
+    const existing = await leaseAwait(
+      lease,
+      () => draftStorage.getSession(metadata.sessionKey),
+    );
     const staged = YahooDraftSessionStore.prepareDraftRepair(
       existing,
       metadata,
@@ -245,10 +309,13 @@
     );
     if (!staged.ok) return staged;
 
-    const resetBeforeIntent = await blockForPendingReset();
+    const resetBeforeIntent = await blockForPendingReset(lease);
     if (resetBeforeIntent) return resetBeforeIntent;
     try {
-      await repairCoordinator.begin(metadata.sessionKey, staged.session);
+      await leaseAwait(
+        lease,
+        () => repairCoordinator.begin(metadata.sessionKey, staged.session),
+      );
     } catch (error) {
       return {
         ok: false,
@@ -257,7 +324,7 @@
         error: `Repair could not be staged safely in browser storage: ${String(error?.message || error)}`,
       };
     }
-    const repairResult = await repairCoordinator.reconcile();
+    const repairResult = await leaseAwait(lease, () => repairCoordinator.reconcile());
     if (repairResult.discardedByReset) {
       return {
         ok: false,
@@ -279,6 +346,7 @@
       staged.health,
     );
     diagnostics.authoritativeLedgerError = null;
+    lease?.throwIfLost?.();
     return {
       ok: true,
       repairedCount: staged.session.picks.length,
@@ -367,7 +435,7 @@
     if (message?.type === 'YAHOO_DRAFT_RECORDER_REPAIR') {
       repairNow().then(sendResponse).catch((error) => sendResponse({
         ok: false,
-        error: `Repair failed without changing saved picks: ${String(error?.message || error)}`,
+        error: `Repair was interrupted; its durable journal will block and reconcile before further scanning or sync: ${String(error?.message || error)}`,
       }));
       return true;
     }

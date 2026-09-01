@@ -85,11 +85,121 @@
     return { begin, cancel, finish, requestStillMatchesSelection };
   }
 
+  function storageChangeAffectsSession(changes, sessionKey) {
+    if (
+      !changes ||
+      typeof changes !== 'object' ||
+      typeof sessionKey !== 'string' ||
+      !/^[a-z0-9_-]{1,16}:\d{1,32}$/i.test(sessionKey)
+    ) return false;
+    const encoded = encodeURIComponent(sessionKey);
+    const perSessionKeys = [
+      'yahooDraftRecorderSession:',
+      'yahooDraftRecorderSessionDeleted:',
+      'yahooDraftRecorderPendingRepair:',
+      'yahooDraftRecorderPendingReset:',
+    ];
+    if (perSessionKeys.some((prefix) => `${prefix}${encoded}` in changes)) return true;
+    const legacy = changes.yahooDraftRecorderSessions;
+    const oldSessions = legacy?.oldValue;
+    const newSessions = legacy?.newValue;
+    const hadSession = Boolean(
+      oldSessions &&
+      typeof oldSessions === 'object' &&
+      Object.prototype.hasOwnProperty.call(oldSessions, sessionKey),
+    );
+    const hasSession = Boolean(
+      newSessions &&
+      typeof newSessions === 'object' &&
+      Object.prototype.hasOwnProperty.call(newSessions, sessionKey),
+    );
+    if (hadSession !== hasSession) return true;
+    if (!hadSession) return false;
+    return sessionSnapshot(oldSessions[sessionKey]) !== sessionSnapshot(newSessions[sessionKey]);
+  }
+
+  function sessionSnapshot(session) {
+    const updatedAt = typeof session?.updatedAt === 'string' ? session.updatedAt : '';
+    if (
+      !validSession(session) ||
+      !updatedAt ||
+      updatedAt.length > 64 ||
+      !Number.isFinite(Date.parse(updatedAt))
+    ) return null;
+    return `${session.sessionKey}\u0000${updatedAt}`;
+  }
+
+  function createRecommendationAutoRefreshScheduler(options = {}) {
+    const requestedDelay = Number.isInteger(options.delayMs) ? options.delayMs : 350;
+    const delayMs = Math.max(100, Math.min(requestedDelay, 1_000));
+    const setTimeoutImpl = options.setTimeoutImpl || globalScope.setTimeout?.bind(globalScope);
+    const clearTimeoutImpl = options.clearTimeoutImpl || globalScope.clearTimeout?.bind(globalScope);
+    let timer = null;
+    let generation = 0;
+    let lastRequestedSnapshot = null;
+
+    function cancelScheduled() {
+      generation += 1;
+      if (timer !== null && clearTimeoutImpl) clearTimeoutImpl(timer);
+      timer = null;
+    }
+
+    function markRequested(session) {
+      const snapshot = sessionSnapshot(session);
+      if (snapshot) lastRequestedSnapshot = snapshot;
+      return Boolean(snapshot);
+    }
+
+    function schedule(sessionKey) {
+      if (
+        typeof sessionKey !== 'string' ||
+        !/^[a-z0-9_-]{1,16}:\d{1,32}$/i.test(sessionKey)
+      ) return false;
+      cancelScheduled();
+      options.cancelInFlight?.();
+      if (!setTimeoutImpl) {
+        options.onError?.(new Error('Automatic refresh scheduling is unavailable.'));
+        return false;
+      }
+      const scheduledGeneration = generation;
+      timer = setTimeoutImpl(async () => {
+        timer = null;
+        if (
+          scheduledGeneration !== generation ||
+          options.selectedSessionKey?.() !== sessionKey
+        ) return;
+        try {
+          const loaded = await options.reloadSessions?.();
+          if (
+            loaded === false ||
+            scheduledGeneration !== generation ||
+            options.selectedSessionKey?.() !== sessionKey
+          ) return;
+          const session = options.sessionForKey?.(sessionKey);
+          const snapshot = sessionSnapshot(session);
+          if (!snapshot || snapshot === lastRequestedSnapshot) {
+            options.onUnchanged?.(session);
+            return;
+          }
+          lastRequestedSnapshot = snapshot;
+          await options.refresh?.();
+        } catch (error) {
+          options.onError?.(error);
+        }
+      }, delayMs);
+      return true;
+    }
+
+    return { cancelScheduled, markRequested, schedule };
+  }
+
   const api = {
+    createRecommendationAutoRefreshScheduler,
     createRecommendationRequestGuard,
     leagueChoices,
     recommendationStillMatchesSelection,
     resolveExplicitSelection,
+    storageChangeAffectsSession,
     validSession,
   };
   globalScope.YahooDraftRecommendationSidebarState = api;

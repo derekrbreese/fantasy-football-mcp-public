@@ -107,6 +107,17 @@ def structured_profile_payload() -> dict:
     }
 
 
+def profile_summary(league_id: str = "498589") -> dict:
+    return {
+        "sport": "nfl",
+        "leagueId": league_id,
+        "importedAt": "2026-09-01T16:00:00Z",
+        "asOf": "2026-09-01",
+        "format": "csv",
+        "rankingCount": 2,
+    }
+
+
 def reset_payload() -> dict:
     state = live_state_for_profile()
     return {
@@ -409,6 +420,301 @@ async def test_structured_profile_route_binds_live_identity_and_saves_allowlist(
         }
     ]
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_profile_summary_route_returns_only_safe_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "list_local_draft_profile_summaries",
+        lambda: [profile_summary()],
+    )
+
+    response = await fastmcp_server.list_draft_profiles(
+        request_for(
+            "GET",
+            "/draft-profiles",
+            body=b"",
+            content_type=None,
+            origin=None,
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response) == {
+        "status": "success",
+        "profiles": [profile_summary()],
+    }
+    assert b"rankings" not in response.body
+    assert b"teamId" not in response.body
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_profile_bind_route_clones_profile_onto_exact_live_identity(
+    monkeypatch,
+) -> None:
+    source_profile = {
+        "schemaVersion": 1,
+        "source": "local-draft-profile",
+        "season": 2026,
+        "importedAt": "2026-09-01T16:00:00Z",
+        "draft": live_state_for_profile()["draft"],
+        "rankings": structured_profile_payload()["rankings"],
+        "leagueSettings": structured_profile_payload()["leagueSettings"],
+        "provenance": {
+            "kind": "user-import",
+            "format": "csv",
+            "asOf": "2026-09-01",
+        },
+    }
+    target_state = live_state_for_profile()
+    target_state["draft"] = {
+        "sport": "nfl",
+        "leagueId": "777777",
+        "teamId": "9",
+        "sessionKey": "nfl:777777",
+    }
+    bound = {**source_profile, "draft": target_state["draft"]}
+    calls = []
+    monkeypatch.setattr(
+        fastmcp_server,
+        "load_live_draft",
+        lambda **arguments: target_state,
+    )
+    monkeypatch.setattr(
+        fastmcp_server,
+        "bind_local_draft_profile",
+        lambda source_league_id, target_identity: calls.append(
+            (source_league_id, target_identity)
+        )
+        or bound,
+    )
+    monkeypatch.setattr(
+        fastmcp_server,
+        "load_local_draft_profile",
+        lambda identity: bound if identity == target_state["draft"] else None,
+    )
+
+    response = await fastmcp_server.bind_draft_profile(
+        request_for(
+            "POST",
+            "/draft-profile-bind",
+            payload={
+                "schemaVersion": 1,
+                "sourceLeagueId": "498589",
+                "leagueId": "777777",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response) == {
+        "status": "success",
+        "leagueId": "777777",
+        "sourceLeagueId": "498589",
+        "rankingCount": 2,
+        "asOf": "2026-09-01",
+        "format": "csv",
+    }
+    assert calls == [("498589", target_state["draft"])]
+    assert b"Player One" not in response.body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status", "message"),
+    [
+        (
+            fastmcp_server.LocalDraftProfileNotFoundError(
+                "selected local draft profile was not found"
+            ),
+            404,
+            "not found",
+        ),
+        (
+            fastmcp_server.LocalDraftProfileConflictError(
+                "selected local profile belongs to a different sport"
+            ),
+            409,
+            "different sport",
+        ),
+    ],
+)
+async def test_profile_bind_route_maps_actionable_source_errors(
+    monkeypatch, error, status, message
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "load_live_draft",
+        lambda **arguments: live_state_for_profile(),
+    )
+    monkeypatch.setattr(
+        fastmcp_server,
+        "bind_local_draft_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    response = await fastmcp_server.bind_draft_profile(
+        request_for(
+            "POST",
+            "/draft-profile-bind",
+            payload={
+                "schemaVersion": 1,
+                "sourceLeagueId": "111111",
+                "leagueId": "498589",
+            },
+        )
+    )
+
+    assert response.status_code == status
+    assert message in response_json(response)["message"]
+
+
+@pytest.mark.asyncio
+async def test_profile_bind_route_requires_synced_target(monkeypatch) -> None:
+    monkeypatch.setattr(fastmcp_server, "load_live_draft", lambda **arguments: None)
+    monkeypatch.setattr(
+        fastmcp_server,
+        "bind_local_draft_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not bind")),
+    )
+
+    response = await fastmcp_server.bind_draft_profile(
+        request_for(
+            "POST",
+            "/draft-profile-bind",
+            payload={
+                "schemaVersion": 1,
+                "sourceLeagueId": "111111",
+                "leagueId": "498589",
+            },
+        )
+    )
+
+    assert response.status_code == 404
+    assert "synced live draft" in response_json(response)["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"origin": None, "host": "hostile.example"}, "Origin required"),
+        ({"origin": "https://evil.example"}, "Origin not allowed"),
+        ({"client": "192.168.1.20"}, "Loopback access required"),
+        ({"ui_header": None}, "UI header required"),
+    ],
+)
+async def test_profile_summary_route_rejects_unsafe_requests(
+    monkeypatch, changes, message
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "list_local_draft_profile_summaries",
+        lambda: (_ for _ in ()).throw(AssertionError("must not list")),
+    )
+
+    response = await fastmcp_server.list_draft_profiles(
+        request_for(
+            "GET",
+            "/draft-profiles",
+            body=b"",
+            content_type=None,
+            **changes,
+        )
+    )
+
+    assert response.status_code == 403
+    assert message in response_json(response)["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changes", "status", "message"),
+    [
+        ({"origin": None}, 403, "Origin required"),
+        ({"origin": "https://evil.example"}, 403, "Origin not allowed"),
+        ({"client": "192.168.1.20"}, 403, "Loopback access required"),
+        ({"ui_header": None}, 403, "UI header required"),
+        ({"content_type": "text/plain"}, 415, "application/json"),
+        ({"content_length": "4097"}, 413, "Payload too large"),
+    ],
+)
+async def test_profile_bind_route_rejects_unsafe_requests(
+    monkeypatch, changes, status, message
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "bind_local_draft_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not bind")),
+        raising=False,
+    )
+    response = await fastmcp_server.bind_draft_profile(
+        request_for(
+            "POST",
+            "/draft-profile-bind",
+            payload={
+                "schemaVersion": 1,
+                "sourceLeagueId": "498589",
+                "leagueId": "777777",
+            },
+            **changes,
+        )
+    )
+
+    assert response.status_code == status
+    assert message in response_json(response)["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"schemaVersion": 1, "sourceLeagueId": "498589"}, "fields"),
+        (
+            {
+                "schemaVersion": 1,
+                "sourceLeagueId": "498589",
+                "leagueId": "777777",
+                "reuseAutomatically": True,
+            },
+            "fields",
+        ),
+        (
+            {
+                "schemaVersion": True,
+                "sourceLeagueId": "498589",
+                "leagueId": "777777",
+            },
+            "schemaVersion 1",
+        ),
+        (
+            {
+                "schemaVersion": 1,
+                "sourceLeagueId": "../498589",
+                "leagueId": "777777",
+            },
+            "sourceLeagueId",
+        ),
+    ],
+)
+async def test_profile_bind_route_requires_exact_allowlisted_identity(
+    monkeypatch, payload, message
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "bind_local_draft_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not bind")),
+        raising=False,
+    )
+
+    response = await fastmcp_server.bind_draft_profile(
+        request_for("POST", "/draft-profile-bind", payload=payload)
+    )
+
+    assert response.status_code == 400
+    assert message in response_json(response)["message"]
 
 
 @pytest.mark.asyncio

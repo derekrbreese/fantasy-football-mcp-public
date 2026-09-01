@@ -92,6 +92,20 @@ button:hover { filter: brightness(1.06); }
 button:disabled { cursor: wait; opacity: 0.58; }
 
 .profile-panel { margin-top: 14px; }
+.profile-reuse-form {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.4fr) minmax(230px, 0.9fr) auto;
+  gap: 14px;
+  align-items: end;
+  margin-bottom: 18px;
+  padding: 16px;
+  border: 1px solid #42604f;
+  border-radius: 12px;
+  background: rgba(92, 225, 161, 0.06);
+}
+.profile-reuse-form h3 { margin: 0 0 5px; font-size: 1rem; }
+.profile-reuse-form p { margin: 0; color: var(--muted); font-size: 0.78rem; line-height: 1.45; }
+.profile-subtitle { margin: 0 0 12px; color: var(--muted); font-size: 0.82rem; letter-spacing: 0.06em; text-transform: uppercase; }
 .profile-form {
   display: grid;
   grid-template-columns: minmax(260px, 1.6fr) minmax(170px, 0.7fr) minmax(120px, 0.5fr) auto;
@@ -233,6 +247,8 @@ footer strong { color: var(--amber); }
 @media (max-width: 1050px) {
   #recommendation-form { grid-template-columns: repeat(3, 1fr); }
   .wide-field { grid-column: span 2; }
+  .profile-reuse-form { grid-template-columns: 1fr 1fr; }
+  .profile-reuse-form > div { grid-column: 1 / -1; }
   .profile-form { grid-template-columns: repeat(3, 1fr); }
   .profile-file-field { grid-column: span 2; }
   .roster-slot-grid { grid-template-columns: repeat(5, 1fr); }
@@ -244,7 +260,7 @@ footer strong { color: var(--amber); }
 @media (max-width: 680px) {
   .site-header, main, footer { width: min(100% - 24px, 1440px); }
   .site-header { display: grid; padding-top: 28px; }
-  #recommendation-form, .profile-form, .summary-grid, .quality-panel { grid-template-columns: 1fr 1fr; }
+  #recommendation-form, .profile-reuse-form, .profile-form, .summary-grid, .quality-panel { grid-template-columns: 1fr 1fr; }
   .wide-field { grid-column: 1 / -1; }
   .profile-file-field, .roster-fieldset { grid-column: 1 / -1; }
   .roster-slot-grid { grid-template-columns: repeat(3, 1fr); }
@@ -254,8 +270,9 @@ footer strong { color: var(--amber); }
 }
 
 @media (max-width: 440px) {
-  #recommendation-form, .profile-form, .summary-grid, .quality-panel { grid-template-columns: 1fr; }
+  #recommendation-form, .profile-reuse-form, .profile-form, .summary-grid, .quality-panel { grid-template-columns: 1fr; }
   .wide-field, .diagnostic-details { grid-column: auto; }
+  .profile-reuse-form > div { grid-column: auto; }
   .profile-file-field, .roster-fieldset { grid-column: auto; }
   .roster-slot-grid { grid-template-columns: repeat(2, 1fr); }
   .diagnostic-details, .draft-context-grid { grid-template-columns: 1fr; }

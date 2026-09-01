@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 
 const {
   createDraftStorage,
-  createSessionOperationLock,
   isTabBlockedByReset,
 } = require('../draft-storage.js');
 
@@ -32,22 +31,28 @@ function fakeExtensionStorage(initial = {}) {
   };
 }
 
-function queuedLockManager() {
+function queuedOperationLock() {
   const tails = new Map();
+  function request(name, operation) {
+    const preceding = tails.get(name) || Promise.resolve();
+    const current = preceding.then(operation);
+    tails.set(name, current.catch(() => undefined));
+    return current;
+  }
   return {
-    request(name, operation) {
-      const preceding = tails.get(name) || Promise.resolve();
-      const current = preceding.then(operation);
-      tails.set(name, current.catch(() => undefined));
-      return current;
-    },
+    run(sessionKey, operation) { return request(`session:${sessionKey}`, operation); },
+    runGlobal(operation) { return request('legacy-storage', operation); },
   };
+}
+
+function createTestDraftStorage(api, operationLock = queuedOperationLock()) {
+  return createDraftStorage(api, { operationLock });
 }
 
 test('concurrent league writes use independent keys and cannot clobber each other', async () => {
   const api = fakeExtensionStorage();
-  const firstTab = createDraftStorage(api);
-  const secondTab = createDraftStorage(api);
+  const firstTab = createTestDraftStorage(api);
+  const secondTab = createTestDraftStorage(api);
   const leagueA = { sessionKey: 'f1:league-a', picks: [{ pickNumber: 1 }] };
   const leagueB = { sessionKey: 'f1:league-b', picks: [{ pickNumber: 7 }] };
 
@@ -63,7 +68,7 @@ test('concurrent league writes use independent keys and cannot clobber each othe
 test('legacy aggregate sessions remain readable without aggregate rewrites', async () => {
   const legacy = { sessionKey: 'f1:legacy', picks: [{ pickNumber: 1 }] };
   const api = fakeExtensionStorage({ yahooDraftRecorderSessions: { 'f1:legacy': legacy } });
-  const storage = createDraftStorage(api);
+  const storage = createTestDraftStorage(api);
 
   assert.equal(await storage.getSession('f1:legacy'), legacy);
   assert.deepEqual(await storage.listSessions(), { 'f1:legacy': legacy });
@@ -76,7 +81,7 @@ test('legacy aggregate sessions remain readable without aggregate rewrites', asy
 
 test('per-league tombstone prevents cleared legacy session from reappearing', async () => {
   const legacy = { sessionKey: 'f1:legacy', picks: [{ pickNumber: 1 }], updatedAt: '2026-08-01T00:00:00.000Z' };
-  const storage = createDraftStorage(fakeExtensionStorage({
+  const storage = createTestDraftStorage(fakeExtensionStorage({
     yahooDraftRecorderSessions: { 'f1:legacy': legacy },
   }));
 
@@ -96,7 +101,7 @@ test('reset cleanup preserves unrelated extension data such as imported-profile 
     },
     yahooDraftProfileUiState: profileUiState,
   });
-  const storage = createDraftStorage(api);
+  const storage = createTestDraftStorage(api);
 
   await storage.clearSession(sessionKey, '2026-09-01T23:16:00.000Z');
 
@@ -124,7 +129,7 @@ test('server-accepted reset atomically clears draft and repair state before rese
     [`yahooDraftRecorderPendingRepair:${encoded}`]: { state: 'intent' },
     [`yahooDraftRecorderPendingReset:${encoded}`]: accepted,
   });
-  const storage = createDraftStorage(api);
+  const storage = createTestDraftStorage(api);
 
   await storage.finalizeReset(sessionKey, accepted.resetAt);
 
@@ -150,27 +155,34 @@ test('tabs loaded before reset stay blocked until explicitly authorized or reloa
   assert.equal(isTabBlockedByReset('not-a-time', resetAt, null), true);
 });
 
-test('same-league scan and repair operations serialize across tabs', async () => {
-  const lockManager = queuedLockManager();
-  const firstTab = createSessionOperationLock(lockManager);
-  const secondTab = createSessionOperationLock(lockManager);
-  const operations = [];
-  let releaseFirst;
-  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
-
-  const scan = firstTab.run('f1:league-a', async () => {
-    operations.push('scan-start');
-    await firstGate;
-    operations.push('scan-end');
+test('models Firefox content-script Web Locks rejecting after an async operation starts', async () => {
+  let operationRuns = 0;
+  const inaccessibleThenable = new Proxy({}, {
+    get(_target, property) {
+      if (property === 'then') {
+        throw new Error('Permission denied to access property "then"');
+      }
+      return undefined;
+    },
   });
-  const repair = secondTab.run('f1:league-a', async () => operations.push('repair'));
-  const otherLeague = secondTab.run('f1:league-b', async () => operations.push('other-league'));
+  const firefoxContentScriptLocks = {
+    request(_name, operation) {
+      const running = operation();
+      assert.equal(typeof running?.then, 'function');
+      running.catch(() => undefined);
+      return inaccessibleThenable;
+    },
+  };
+  const returned = firefoxContentScriptLocks.request('unsafe-page-realm-lock', async () => {
+    operationRuns += 1;
+    return 'completed in the extension compartment';
+  });
 
-  await otherLeague;
-  assert.deepEqual(operations, ['scan-start', 'other-league']);
-  releaseFirst();
-  await Promise.all([scan, repair]);
-  assert.deepEqual(operations, ['scan-start', 'other-league', 'scan-end', 'repair']);
+  await assert.rejects(
+    Promise.resolve(returned),
+    /Permission denied to access property "then"/,
+  );
+  assert.equal(operationRuns, 1, 'the mutation can start before Firefox reports failure');
 });
 
 for (const pendingState of ['intent', 'accepted']) {
@@ -186,7 +198,7 @@ for (const pendingState of ['intent', 'accepted']) {
       },
       yahooDraftRecorderSessions: { [sessionKey]: { sessionKey, picks: [{ pickNumber: 1 }] } },
     });
-    const storage = createDraftStorage(api, { lockManager: queuedLockManager() });
+    const storage = createTestDraftStorage(api);
 
     await storage.clearSession(sessionKey, '2026-08-01T00:01:00.000Z');
 
@@ -212,9 +224,9 @@ test('concurrent clears remove only their leagues from the legacy aggregate', as
       'f1:league-c': untouched,
     },
   });
-  const lockManager = queuedLockManager();
-  const firstPopup = createDraftStorage(api, { lockManager });
-  const secondPopup = createDraftStorage(api, { lockManager });
+  const operationLock = queuedOperationLock();
+  const firstPopup = createTestDraftStorage(api, operationLock);
+  const secondPopup = createTestDraftStorage(api, operationLock);
 
   await Promise.all([
     firstPopup.clearSession('f1:league-a'),
@@ -233,8 +245,8 @@ test('a scan read before clear cannot resurrect its stale session afterward', as
       updatedAt: '2026-08-01T00:00:00.000Z',
     },
   });
-  const scanTab = createDraftStorage(api);
-  const popup = createDraftStorage(api, { lockManager: queuedLockManager() });
+  const scanTab = createTestDraftStorage(api);
+  const popup = createTestDraftStorage(api);
   const staleRead = await scanTab.getSession(sessionKey);
 
   await popup.clearSession(sessionKey, '2026-08-01T00:02:00.000Z');

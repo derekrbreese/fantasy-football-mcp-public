@@ -6,6 +6,8 @@
   const TOMBSTONE_PREFIX = 'yahooDraftRecorderSessionDeleted:';
   const PENDING_REPAIR_PREFIX = 'yahooDraftRecorderPendingRepair:';
   const PENDING_RESET_PREFIX = 'yahooDraftRecorderPendingReset:';
+  const LOCK_PORT_NAME = 'yahoo-draft-recorder-lock-v1';
+  const LOCK_PROTOCOL_VERSION = 1;
 
   function suffix(prefix, sessionKey) {
     return `${prefix}${encodeURIComponent(sessionKey)}`;
@@ -36,7 +38,14 @@
   }
 
   function createDraftStorage(extensionApi, options = {}) {
-    const operationLock = createSessionOperationLock(options.lockManager);
+    const operationLock = options.operationLock ||
+      createSessionOperationLock(extensionApi?.native?.runtime);
+    if (
+      typeof operationLock.run !== 'function' ||
+      typeof operationLock.runGlobal !== 'function'
+    ) {
+      throw new Error('A complete extension operation lock is required.');
+    }
     const sessionStorageKey = (sessionKey) => suffix(SESSION_PREFIX, sessionKey);
     const tombstoneStorageKey = (sessionKey) => suffix(TOMBSTONE_PREFIX, sessionKey);
     const pendingRepairStorageKey = (sessionKey) => suffix(PENDING_REPAIR_PREFIX, sessionKey);
@@ -109,31 +118,49 @@
       });
     }
 
-    async function clearSessionData(sessionKey, clearedAt) {
+    function checkLease(lease) {
+      lease?.throwIfLost?.();
+    }
+
+    async function clearSessionData(sessionKey, clearedAt, sessionLease) {
+      checkLease(sessionLease);
       await extensionApi.storageSet({
         [sessionStorageKey(sessionKey)]: null,
         [tombstoneStorageKey(sessionKey)]: { clearedAt },
         [pendingRepairStorageKey(sessionKey)]: null,
       });
-      await operationLock.runGlobal(async () => {
+      checkLease(sessionLease);
+      await operationLock.runGlobal(async (globalLease) => {
+        checkLease(sessionLease);
+        checkLease(globalLease);
         const legacy = await readValue(LEGACY_SESSIONS_KEY);
+        checkLease(sessionLease);
+        checkLease(globalLease);
         if (!legacy || typeof legacy !== 'object' || !(sessionKey in legacy)) return;
         const remaining = { ...legacy };
         delete remaining[sessionKey];
+        checkLease(sessionLease);
+        checkLease(globalLease);
         if (Object.keys(remaining).length === 0) {
           await extensionApi.storageRemove(LEGACY_SESSIONS_KEY);
         } else {
           await extensionApi.storageSet({ [LEGACY_SESSIONS_KEY]: remaining });
         }
+        checkLease(sessionLease);
+        checkLease(globalLease);
       });
+      checkLease(sessionLease);
     }
 
     function clearSession(sessionKey, clearedAt = new Date().toISOString()) {
-      return clearSessionData(sessionKey, clearedAt);
+      return operationLock.run(
+        sessionKey,
+        (sessionLease) => clearSessionData(sessionKey, clearedAt, sessionLease),
+      );
     }
 
-    function finalizeReset(sessionKey, resetAt) {
-      return clearSessionData(sessionKey, resetAt);
+    function finalizeReset(sessionKey, resetAt, sessionLease) {
+      return clearSessionData(sessionKey, resetAt, sessionLease);
     }
 
     async function getPendingRepair(sessionKey) {
@@ -188,16 +215,191 @@
     ));
   }
 
-  function createSessionOperationLock(lockManager) {
+  function createLockError(message, code) {
+    const error = new Error(message);
+    error.name = 'YahooDraftLockError';
+    error.code = code;
+    return error;
+  }
+
+  function isExactBrokerReply(message, type) {
+    return message?.schemaVersion === LOCK_PROTOCOL_VERSION &&
+      message?.type === type &&
+      Object.keys(message).length === 2;
+  }
+
+  function runWithBroker(runtime, acquireMessage, operation, options = {}) {
+    if (!runtime || typeof runtime.connect !== 'function') {
+      return Promise.reject(new Error('The extension lock broker is unavailable.'));
+    }
+    if (typeof operation !== 'function') {
+      return Promise.reject(new TypeError('A lock operation function is required.'));
+    }
+    const AbortControllerImpl = globalScope.AbortController;
+    if (typeof AbortControllerImpl !== 'function') {
+      return Promise.reject(new Error('AbortController is required for brokered operations.'));
+    }
+    const heartbeatMs = Number.isInteger(options.heartbeatMs)
+      ? Math.max(5, Math.min(options.heartbeatMs, 1000))
+      : 1000;
+    const acquireTimeoutMs = Number.isInteger(options.acquireTimeoutMs)
+      ? Math.max(5, Math.min(options.acquireTimeoutMs, 30000))
+      : 15000;
+    const holdTimeoutMs = Number.isInteger(options.holdTimeoutMs)
+      ? Math.max(5, Math.min(options.holdTimeoutMs, 30000))
+      : 15000;
+
+    return new Promise((resolve, reject) => {
+      let port;
+      let granted = false;
+      let settled = false;
+      let portDisconnected = false;
+      let leaseLostError = null;
+      let heartbeatTimer;
+      let acquireTimer;
+      let holdTimer;
+      const controller = new AbortControllerImpl();
+      const lease = {
+        signal: controller.signal,
+        throwIfLost() {
+          if (leaseLostError) throw leaseLostError;
+        },
+      };
+
+      function clearTimers() {
+        if (heartbeatTimer !== undefined) globalScope.clearInterval?.(heartbeatTimer);
+        if (acquireTimer !== undefined) globalScope.clearTimeout?.(acquireTimer);
+        if (holdTimer !== undefined) globalScope.clearTimeout?.(holdTimer);
+      }
+
+      function disconnect() {
+        try { port?.disconnect(); } catch (_error) { /* already disconnected */ }
+      }
+
+      function rejectBeforeGrant(error) {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        if (!portDisconnected) disconnect();
+        reject(error);
+      }
+
+      function loseLease(error) {
+        if (leaseLostError) return;
+        leaseLostError = error;
+        if (heartbeatTimer !== undefined) globalScope.clearInterval?.(heartbeatTimer);
+        if (acquireTimer !== undefined) globalScope.clearTimeout?.(acquireTimer);
+        try { controller.abort(error); } catch (_abortError) { controller.abort(); }
+        if (!granted) rejectBeforeGrant(error);
+      }
+
+      function settleOperation(callback, value) {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        if (granted && !portDisconnected) {
+          try {
+            port.postMessage({ schemaVersion: LOCK_PROTOCOL_VERSION, type: 'release' });
+          } catch (_error) {
+            portDisconnected = true;
+          }
+        }
+        if (!portDisconnected) disconnect();
+        if (leaseLostError) reject(leaseLostError);
+        else callback(value);
+      }
+
+      function sendKeepalive() {
+        if (settled || portDisconnected) return;
+        try {
+          port.postMessage({ schemaVersion: LOCK_PROTOCOL_VERSION, type: 'keepalive' });
+        } catch (_error) {
+          portDisconnected = true;
+          loseLease(createLockError(
+            'The extension lock lease was lost; reconcile before retrying.',
+            'LOCK_LEASE_LOST',
+          ));
+        }
+      }
+
+      try {
+        port = runtime.connect({ name: LOCK_PORT_NAME });
+        port.onMessage.addListener((message) => {
+          if (
+            !granted &&
+            isExactBrokerReply(message, 'granted')
+          ) {
+            granted = true;
+            if (acquireTimer !== undefined) globalScope.clearTimeout?.(acquireTimer);
+            holdTimer = globalScope.setTimeout?.(() => loseLease(createLockError(
+              'The extension lock lease timed out; reconcile before retrying.',
+              'LOCK_HOLD_TIMEOUT',
+            )), holdTimeoutMs);
+            Promise.resolve()
+              .then(() => operation(lease))
+              .then(
+                (value) => settleOperation(resolve, value),
+                (error) => settleOperation(reject, error),
+              );
+            return;
+          }
+          if (isExactBrokerReply(message, 'rejected')) {
+            const error = createLockError(
+              'The extension lock broker rejected this request.',
+              'LOCK_REJECTED',
+            );
+            if (granted) loseLease(error);
+            else rejectBeforeGrant(error);
+          }
+        });
+        port.onDisconnect.addListener(() => {
+          if (settled) return;
+          portDisconnected = true;
+          const error = createLockError(
+            granted
+              ? 'The extension lock lease was lost; reconcile before retrying.'
+              : 'The extension lock broker disconnected before granting the operation.',
+            granted ? 'LOCK_LEASE_LOST' : 'LOCK_DISCONNECTED',
+          );
+          if (granted) loseLease(error);
+          else rejectBeforeGrant(error);
+        });
+        heartbeatTimer = globalScope.setInterval?.(sendKeepalive, heartbeatMs);
+        acquireTimer = globalScope.setTimeout?.(() => {
+          rejectBeforeGrant(createLockError(
+            'Timed out waiting for the extension lock broker.',
+            'LOCK_ACQUIRE_TIMEOUT',
+          ));
+        }, acquireTimeoutMs);
+        port.postMessage(acquireMessage);
+      } catch (error) {
+        rejectBeforeGrant(error);
+      }
+    });
+  }
+
+  function createSessionOperationLock(runtime, options = {}) {
+    if (!runtime || typeof runtime.connect !== 'function') {
+      throw new Error('The extension lock broker is unavailable.');
+    }
     return {
       run(sessionKey, operation) {
-        if (!lockManager || typeof lockManager.request !== 'function') return operation();
-        const lockName = `yahoo-draft-recorder:${encodeURIComponent(sessionKey)}`;
-        return lockManager.request(lockName, operation);
+        if (!/^[a-z0-9_-]{1,16}:\d{1,32}$/i.test(sessionKey || '')) {
+          return Promise.reject(new Error('A valid Yahoo sessionKey is required for locking.'));
+        }
+        return runWithBroker(runtime, {
+          schemaVersion: LOCK_PROTOCOL_VERSION,
+          type: 'acquire',
+          scope: 'session',
+          sessionKey,
+        }, operation, options);
       },
       runGlobal(operation) {
-        if (!lockManager || typeof lockManager.request !== 'function') return operation();
-        return lockManager.request('yahoo-draft-recorder:legacy-storage', operation);
+        return runWithBroker(runtime, {
+          schemaVersion: LOCK_PROTOCOL_VERSION,
+          type: 'acquire',
+          scope: 'legacy-storage',
+        }, operation, options);
       },
     };
   }

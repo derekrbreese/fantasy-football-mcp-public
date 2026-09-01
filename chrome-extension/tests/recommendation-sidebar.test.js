@@ -4,10 +4,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const {
+  createRecommendationAutoRefreshScheduler,
   leagueChoices,
   createRecommendationRequestGuard,
   recommendationStillMatchesSelection,
   resolveExplicitSelection,
+  storageChangeAffectsSession,
 } = require('../recommendation-sidebar-state.js');
 
 test('selects only a validated active Yahoo league and never falls back to latest saved state', () => {
@@ -80,6 +82,134 @@ test('new league selection aborts A and generation guards both A success and A e
   assert.equal(await aError, false);
 });
 
+test('recognizes storage changes only for the explicitly selected league', () => {
+  const selected = 'f1:111';
+  const encoded = encodeURIComponent(selected);
+
+  assert.equal(storageChangeAffectsSession({
+    [`yahooDraftRecorderSession:${encoded}`]: { newValue: { updatedAt: 'later' } },
+  }, selected), true);
+  assert.equal(storageChangeAffectsSession({
+    [`yahooDraftRecorderPendingRepair:${encoded}`]: { newValue: { state: 'intent' } },
+  }, selected), true);
+  assert.equal(storageChangeAffectsSession({
+    yahooDraftRecorderSessions: {
+      oldValue: {
+        [selected]: {
+          sport: 'f1', leagueId: '111', sessionKey: selected,
+          updatedAt: '2026-08-31T23:00:00.000Z',
+        },
+      },
+      newValue: {
+        [selected]: {
+          sport: 'f1', leagueId: '111', sessionKey: selected,
+          updatedAt: '2026-08-31T23:00:01.000Z',
+        },
+      },
+    },
+  }, selected), true);
+  const unchangedSelected = {
+    sport: 'f1', leagueId: '111', sessionKey: selected,
+    updatedAt: '2026-08-31T23:00:01.000Z',
+  };
+  assert.equal(storageChangeAffectsSession({
+    yahooDraftRecorderSessions: {
+      oldValue: { [selected]: unchangedSelected, 'f1:222': { updatedAt: 'before' } },
+      newValue: { [selected]: { ...unchangedSelected }, 'f1:222': { updatedAt: 'after' } },
+    },
+  }, selected), false);
+  assert.equal(storageChangeAffectsSession({
+    'yahooDraftRecorderSession:f1%3A222': { newValue: { updatedAt: 'later' } },
+  }, selected), false);
+  assert.equal(storageChangeAffectsSession({}, selected), false);
+  assert.equal(storageChangeAffectsSession({
+    [`yahooDraftRecorderSession:${encoded}`]: {},
+  }, null), false);
+});
+
+test('selected-league updates debounce, abort stale work, reload, and refresh one new revision', async () => {
+  const callbacks = [];
+  const cleared = [];
+  const sessions = {
+    'f1:111': {
+      sport: 'f1', leagueId: '111', sessionKey: 'f1:111', updatedAt: '2026-08-31T23:00:00.000Z',
+    },
+  };
+  let selected = 'f1:111';
+  let cancelCount = 0;
+  let reloadCount = 0;
+  let refreshCount = 0;
+  const scheduler = createRecommendationAutoRefreshScheduler({
+    delayMs: 350,
+    setTimeoutImpl(callback, delay) {
+      assert.equal(delay, 350);
+      callbacks.push(callback);
+      return callbacks.length;
+    },
+    clearTimeoutImpl(identifier) { cleared.push(identifier); },
+    selectedSessionKey: () => selected,
+    sessionForKey: (key) => sessions[key],
+    cancelInFlight() { cancelCount += 1; },
+    async reloadSessions() { reloadCount += 1; return true; },
+    async refresh() { refreshCount += 1; },
+  });
+  scheduler.markRequested(sessions[selected]);
+
+  assert.equal(scheduler.schedule('../unsafe'), false);
+  assert.equal(scheduler.schedule(selected), true);
+  assert.equal(scheduler.schedule(selected), true);
+  assert.equal(cancelCount, 2);
+  assert.deepEqual(cleared, [1]);
+  sessions[selected] = { ...sessions[selected], updatedAt: '2026-08-31T23:00:01.000Z' };
+
+  await callbacks[0]();
+  assert.equal(reloadCount, 0, 'superseded debounce callbacks stay inert');
+  await callbacks[1]();
+  assert.equal(reloadCount, 1);
+  assert.equal(refreshCount, 1);
+
+  scheduler.schedule(selected);
+  await callbacks[2]();
+  assert.equal(reloadCount, 2);
+  assert.equal(refreshCount, 1, 'the same snapshot is not requested twice');
+
+  scheduler.schedule(selected);
+  selected = 'f1:222';
+  await callbacks[3]();
+  assert.equal(reloadCount, 2);
+  assert.equal(refreshCount, 1, 'a selection change invalidates scheduled work');
+});
+
+test('auto-refresh debounce is clamped and reports asynchronous reload errors', async () => {
+  let scheduledDelay;
+  let scheduledCallback;
+  let reported;
+  const session = {
+    sport: 'f1', leagueId: '111', sessionKey: 'f1:111', updatedAt: '2026-08-31T23:00:01.000Z',
+  };
+  const scheduler = createRecommendationAutoRefreshScheduler({
+    delayMs: 60_000,
+    setTimeoutImpl(callback, delay) {
+      scheduledCallback = callback;
+      scheduledDelay = delay;
+      return 1;
+    },
+    clearTimeoutImpl() {},
+    selectedSessionKey: () => session.sessionKey,
+    sessionForKey: () => session,
+    cancelInFlight() {},
+    async reloadSessions() { throw new Error('storage unavailable'); },
+    async refresh() { throw new Error('must not refresh'); },
+    onError(error) { reported = error; },
+  });
+
+  scheduler.schedule(session.sessionKey);
+  await scheduledCallback();
+
+  assert.equal(scheduledDelay, 1_000);
+  assert.match(reported.message, /storage unavailable/);
+});
+
 test('sidebar controller wires cancellation, snapshot re-read, and five-way isolation guard', () => {
   const extensionRoot = path.join(__dirname, '..');
   const source = fs.readFileSync(path.join(extensionRoot, 'assistant.js'), 'utf8');
@@ -97,6 +227,16 @@ test('sidebar controller wires cancellation, snapshot re-read, and five-way isol
     source,
     /elements\.league\.addEventListener\('change', \(\) => \{\s*sessionLoadGeneration \+= 1;/,
   );
+  assert.match(source, /createRecommendationAutoRefreshScheduler/);
+  assert.match(source, /storageChangeAffectsSession\(\s*changes,\s*selectedSessionKey,?\s*\)/);
+  assert.match(source, /autoRefresh\.schedule\(selectedSessionKey\)/);
+  assert.match(source, /autoRefresh\.markRequested\(session\)/);
+  assert.match(source, /autoRefresh\.cancelScheduled\(\)/);
+  assert.match(
+    source,
+    /elements\.refresh\.addEventListener\('click', \(\) => \{\s*autoRefresh\.cancelScheduled\(\);\s*refreshRecommendations\(\);/,
+  );
+  assert.match(source, /simulations:\s*256/);
 
   const refreshStart = source.indexOf('async function refreshRecommendations()');
   const catchStart = source.indexOf('} catch (error) {', refreshStart);
@@ -125,7 +265,7 @@ test('league chooser exposes only allowlisted identity labels', () => {
   ]);
 });
 
-test('manifest keeps the recorder popup and adds a persistent Firefox sidebar', () => {
+test('manifest keeps the recorder UI and cross-browser background lock broker', () => {
   const extensionRoot = path.join(__dirname, '..');
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionRoot, 'manifest.json'), 'utf8'));
   const html = fs.readFileSync(path.join(extensionRoot, 'assistant.html'), 'utf8');
@@ -135,6 +275,11 @@ test('manifest keeps the recorder popup and adds a persistent Firefox sidebar', 
   assert.equal(manifest.action.default_popup, 'popup.html');
   assert.equal(manifest.sidebar_action.default_panel, 'assistant.html');
   assert.equal(manifest.sidebar_action.default_title, 'Fantasy Draft Assistant');
+  assert.deepEqual(manifest.background, {
+    scripts: ['lock-broker.js'],
+    service_worker: 'lock-broker.js',
+  });
+  assert.equal(manifest.minimum_chrome_version, '121');
   assert.equal(manifest.content_scripts[0].js.includes('assistant.js'), false);
   assert.match(html, /id="league-select"/);
   assert.match(html, /id="refresh-recommendations"/);

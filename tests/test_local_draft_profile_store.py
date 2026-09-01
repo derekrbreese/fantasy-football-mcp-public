@@ -235,6 +235,74 @@ def test_saves_loads_exact_identity_and_isolates_leagues(tmp_path: Path) -> None
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_lists_privacy_minimal_profile_summaries(tmp_path: Path) -> None:
+    path = tmp_path / "draft-profiles.json"
+    save_local_draft_profile(local_profile("111", "3"), path)
+
+    summaries = profile_store.list_local_draft_profile_summaries(path)
+
+    assert summaries == [
+        {
+            "sport": "nfl",
+            "leagueId": "111",
+            "importedAt": "2026-09-01T23:45:00Z",
+            "asOf": "2026-08-31",
+            "format": "draftsheets-2026",
+            "rankingCount": 2,
+        }
+    ]
+    serialized = json.dumps(summaries)
+    assert "teamId" not in serialized
+    assert "sessionKey" not in serialized
+    assert "Jahmyr" not in serialized
+    assert "rankings" not in serialized
+
+
+def test_explicit_bind_copies_only_profile_data_to_exact_target_identity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "draft-profiles.json"
+    source = save_local_draft_profile(local_profile("111", "3"), path)
+    target = draft_identity("222", "9")
+
+    bound = profile_store.bind_local_draft_profile("111", target, path)
+
+    assert bound["draft"] == target
+    assert bound["rankings"] == source["rankings"]
+    assert bound["leagueSettings"] == source["leagueSettings"]
+    assert bound["provenance"] == source["provenance"]
+    assert load_local_draft_profile(target, path) == bound
+    assert load_local_draft_profile(draft_identity("111", "3"), path) == source
+    assert "picks" not in json.dumps(bound)
+
+
+def test_explicit_bind_rejects_missing_cross_sport_and_existing_target_profiles(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "draft-profiles.json"
+    save_local_draft_profile(local_profile("111", "3"), path)
+
+    with pytest.raises(profile_store.LocalDraftProfileNotFoundError, match="not found"):
+        profile_store.bind_local_draft_profile("999", draft_identity("222", "9"), path)
+
+    cross_sport = draft_identity("222", "9")
+    cross_sport.update(sport="f1", sessionKey="f1:222")
+    with pytest.raises(profile_store.LocalDraftProfileConflictError, match="sport"):
+        profile_store.bind_local_draft_profile("111", cross_sport, path)
+
+    existing = local_profile("222", "9")
+    existing["rankings"][0]["rank"] = 2
+    existing["rankings"][1]["rank"] = 1
+    save_local_draft_profile(existing, path)
+    with pytest.raises(profile_store.LocalDraftProfileConflictError, match="different"):
+        profile_store.bind_local_draft_profile("111", draft_identity("222", "9"), path)
+
+    # Rebinding a profile with identical reusable content is idempotent.
+    assert profile_store.bind_local_draft_profile(
+        "111", draft_identity("111", "3"), path
+    ) == load_local_draft_profile(draft_identity("111", "3"), path)
+
+
 def test_rejects_cross_team_overwrite_and_stale_import(tmp_path: Path) -> None:
     path = tmp_path / "draft-profiles.json"
     saved = local_profile("111", "3")

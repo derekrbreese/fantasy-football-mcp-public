@@ -207,6 +207,11 @@ def _profile_source_label(profile: Mapping[str, Any]) -> str:
 
 
 def _resolve_league_key(result: Mapping[str, Any], league_id: str) -> str:
+    if result.get("status") == "error" or isinstance(result.get("error"), str):
+        raise LiveDraftValidationError(
+            "Yahoo league discovery is unavailable. Configure Yahoo credentials or "
+            "explicitly bind a saved local profile to this draft."
+        )
     leagues = result.get("leagues")
     if not isinstance(leagues, list):
         raise LiveDraftValidationError(

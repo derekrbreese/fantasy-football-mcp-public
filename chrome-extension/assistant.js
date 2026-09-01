@@ -3,9 +3,8 @@
 
   const extensionApi = YahooDraftWebExtension.createWebExtensionApi(globalThis);
   const webext = extensionApi.native;
-  const draftStorage = YahooDraftStorage.createDraftStorage(extensionApi, {
-    lockManager: globalThis.navigator?.locks,
-  });
+  const operationLock = YahooDraftStorage.createSessionOperationLock(webext.runtime);
+  const draftStorage = YahooDraftStorage.createDraftStorage(extensionApi, { operationLock });
   const requestGuard = YahooDraftRecommendationSidebarState.createRecommendationRequestGuard();
   const elements = {
     league: document.querySelector('#league-select'),
@@ -20,6 +19,26 @@
   let selectedSessionKey = null;
   let refreshing = false;
   let sessionLoadGeneration = 0;
+  const autoRefresh = YahooDraftRecommendationSidebarState
+    .createRecommendationAutoRefreshScheduler({
+      delayMs: 350,
+      selectedSessionKey: () => selectedSessionKey,
+      sessionForKey: (sessionKey) => sessions[sessionKey],
+      cancelInFlight: cancelPendingRecommendation,
+      reloadSessions: () => loadSessions({ preferActive: false }),
+      refresh: refreshRecommendations,
+      onUnchanged: (session) => {
+        if (session?.sessionKey === selectedSessionKey) {
+          setControllerStatus('Recommendations already match the latest recorded draft state.');
+        }
+      },
+      onError: (error) => {
+        setControllerStatus(
+          `Could not auto-refresh recommendations: ${String(error?.message || error)}`,
+          'error',
+        );
+      },
+    });
 
   function cancelPendingRecommendation() {
     requestGuard.cancel();
@@ -141,6 +160,7 @@
       }
       sessions[selected] = session;
       token = requestGuard.begin(session);
+      autoRefresh.markRequested(session);
       const result = await YahooDraftRecommendationClient.fetchDraftRecommendations(session, {
         strategy: elements.strategy.value,
         count: 5,
@@ -189,6 +209,7 @@
 
   elements.league.addEventListener('change', () => {
     sessionLoadGeneration += 1;
+    autoRefresh.cancelScheduled();
     cancelPendingRecommendation();
     const value = elements.league.value;
     selectedSessionKey = sessions[value] ? value : null;
@@ -203,26 +224,30 @@
     renderMessage('Refresh to request recommendations for this explicitly selected league.', session);
   });
 
-  elements.refresh.addEventListener('click', refreshRecommendations);
+  elements.refresh.addEventListener('click', () => {
+    autoRefresh.cancelScheduled();
+    refreshRecommendations();
+  });
 
   webext.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !YahooDraftStorage.isRelevantStorageChange(changes)) return;
-    cancelPendingRecommendation();
-    renderMessage('Recorded draft state changed. Refresh recommendations after the league state reloads.');
+    if (
+      selectedSessionKey &&
+      YahooDraftRecommendationSidebarState.storageChangeAffectsSession(
+        changes,
+        selectedSessionKey,
+      )
+    ) {
+      setControllerStatus('Draft state updated; refreshing recommendations shortly…', 'loading');
+      autoRefresh.schedule(selectedSessionKey);
+      return;
+    }
     loadSessions({ preferActive: false })
-      .then(() => {
-        if (selectedSessionKey) {
-          setControllerStatus('New recorded draft state is available. Refresh recommendations when ready.');
-          renderMessage(
-            'Recorded draft state changed. Refresh to compute recommendations from the new snapshot.',
-            sessions[selectedSessionKey],
-          );
-        }
-      })
       .catch((error) => setControllerStatus(String(error?.message || error), 'error'));
   });
 
   webext.tabs?.onActivated?.addListener?.(() => {
+    autoRefresh.cancelScheduled();
     cancelPendingRecommendation();
     renderMessage('Active Yahoo tab changed. Resolving its recorded league before refreshing.');
     loadSessions({ preferActive: true })

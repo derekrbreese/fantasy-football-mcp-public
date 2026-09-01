@@ -513,6 +513,33 @@ async def test_service_rejects_unresolved_or_ambiguous_yahoo_league_identity(
 
 
 @pytest.mark.asyncio
+async def test_service_reports_unavailable_yahoo_discovery_without_private_detail(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "drafts.json"
+    save_live_draft(live_context(), path)
+    private_detail = "secret token and private auth URL"
+
+    async def call_tool(name: str, **arguments):
+        assert name == "ff_get_leagues"
+        return {"error": private_detail, "tool": name}
+
+    with pytest.raises(ValueError) as captured:
+        await get_live_draft_recommendation(
+            call_tool,
+            league_key=None,
+            league_id="10462193",
+            store_path=path,
+        )
+
+    assert str(captured.value) == (
+        "Yahoo league discovery is unavailable. Configure Yahoo credentials or "
+        "explicitly bind a saved local profile to this draft."
+    )
+    assert private_detail not in str(captured.value)
+
+
+@pytest.mark.asyncio
 async def test_service_rejects_authenticated_team_mismatch(tmp_path: Path) -> None:
     path = tmp_path / "drafts.json"
     save_live_draft(live_context(), path)

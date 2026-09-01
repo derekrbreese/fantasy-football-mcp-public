@@ -2,13 +2,148 @@
 
 from __future__ import annotations
 
+import json
+import stat
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from src.services.fantasypros_provider import FantasyProsProvider
+from src.services import fantasypros_request_budget as request_budget_module
+from src.services.fantasypros_provider import FantasyProsProvider, FantasyProsProviderError
+from src.services.fantasypros_request_budget import (
+    FantasyProsDailyRequestBudget,
+    FantasyProsRequestBudgetExhausted,
+    FantasyProsRequestBudgetUnavailable,
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_persistent_request_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        request_budget_module,
+        "DEFAULT_REQUEST_BUDGET_PATH",
+        tmp_path / "app-private" / "fantasypros-request-budget.json",
+    )
+
+
+def _provider(**kwargs: Any) -> FantasyProsProvider:
+    kwargs.setdefault("request_interval_seconds", 0.0)
+    return FantasyProsProvider(**kwargs)
+
+
+def test_budget_persists_only_minimal_private_metadata_across_restarts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "app-private" / "fantasypros-request-budget.json"
+    now = datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+
+    budget = FantasyProsDailyRequestBudget(path=path, daily_limit=3)
+    budget.reserve(now)
+    budget.reserve(now + timedelta(minutes=1))
+    restarted = FantasyProsDailyRequestBudget(path=path, daily_limit=3)
+    restarted.reserve(now + timedelta(minutes=2))
+
+    with pytest.raises(FantasyProsRequestBudgetExhausted) as raised:
+        restarted.reserve(now + timedelta(minutes=3))
+
+    assert raised.value.retry_at == datetime(2026, 9, 2, tzinfo=timezone.utc)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "schemaVersion": 1,
+        "utcDate": "2026-09-01",
+        "requestCount": 3,
+    }
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_budget_resets_only_after_the_next_utc_day(tmp_path: Path) -> None:
+    path = tmp_path / "app-private" / "fantasypros-request-budget.json"
+    first_day = datetime(2026, 9, 1, 23, 59, tzinfo=timezone.utc)
+    budget = FantasyProsDailyRequestBudget(path=path, daily_limit=1)
+    budget.reserve(first_day)
+
+    with pytest.raises(FantasyProsRequestBudgetExhausted):
+        budget.reserve(first_day + timedelta(seconds=30))
+
+    budget.reserve(first_day + timedelta(minutes=1))
+    assert json.loads(path.read_text(encoding="utf-8"))["requestCount"] == 1
+    assert json.loads(path.read_text(encoding="utf-8"))["utcDate"] == "2026-09-02"
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"schemaVersion": 1, "utcDate": "not-a-date", "requestCount": 1},
+        {"schemaVersion": 1, "utcDate": "2026-09-01", "requestCount": -1},
+        {
+            "schemaVersion": 1,
+            "utcDate": "2026-09-01",
+            "requestCount": 1,
+            "unexpected": "must-not-survive",
+        },
+    ],
+)
+def test_budget_fails_closed_for_malformed_state(
+    tmp_path: Path,
+    stored: dict[str, object],
+) -> None:
+    path = tmp_path / "app-private" / "fantasypros-request-budget.json"
+    path.parent.mkdir(mode=0o700)
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    budget = FantasyProsDailyRequestBudget(path=path, daily_limit=3)
+
+    with pytest.raises(FantasyProsRequestBudgetUnavailable):
+        budget.reserve(datetime(2026, 9, 1, 16, tzinfo=timezone.utc))
+
+
+def test_budget_fails_closed_if_the_clock_moves_behind_stored_date(tmp_path: Path) -> None:
+    path = tmp_path / "app-private" / "fantasypros-request-budget.json"
+    budget = FantasyProsDailyRequestBudget(path=path, daily_limit=3)
+    budget.reserve(datetime(2026, 9, 2, 0, 1, tzinfo=timezone.utc))
+
+    with pytest.raises(FantasyProsRequestBudgetUnavailable):
+        budget.reserve(datetime(2026, 9, 1, 23, 59, tzinfo=timezone.utc))
+
+
+def test_budget_fails_closed_when_atomic_persistence_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "app-private" / "fantasypros-request-budget.json"
+
+    def fail_replace(_source: str, _destination: Path) -> None:
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(request_budget_module.os, "replace", fail_replace)
+
+    with pytest.raises(FantasyProsRequestBudgetUnavailable):
+        FantasyProsDailyRequestBudget(path=path, daily_limit=3).reserve(
+            datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+        )
+
+    assert not path.exists()
+    assert list(path.parent.glob(".fantasypros-budget-*.json")) == []
+
+
+def test_explicit_budget_path_does_not_chmod_an_existing_shared_parent(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
+    path = parent / "fantasypros-request-budget.json"
+
+    FantasyProsDailyRequestBudget(path=path, daily_limit=3).reserve(
+        datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+    )
+
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 class FakeTransport:
@@ -121,7 +256,7 @@ async def test_provider_uses_official_contract_and_returns_only_allowlisted_fiel
 ) -> None:
     now = datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
     transport = FakeTransport(source_payloads)
-    provider = FantasyProsProvider(
+    provider = _provider(
         api_key="unit-test-secret",
         transport=transport,
         clock=lambda: now,
@@ -255,7 +390,7 @@ async def test_provider_prefers_fp_id_and_otherwise_requires_exact_full_identity
             "news": {"items": []},
         }
     )
-    provider = FantasyProsProvider(
+    provider = _provider(
         api_key="secret",
         transport=transport,
         clock=lambda: now,
@@ -302,7 +437,7 @@ async def test_current_injury_snapshot_and_stale_news_are_distinguished(
     source_payloads: dict[str, dict[str, Any]],
 ) -> None:
     now = datetime(2026, 9, 20, 16, tzinfo=timezone.utc)
-    provider = FantasyProsProvider(
+    provider = _provider(
         api_key="secret",
         transport=FakeTransport(source_payloads),
         clock=lambda: now,
@@ -340,7 +475,7 @@ async def test_provider_reads_env_without_returning_key_and_degrades_safely(
     secret = "env-secret-that-must-not-leak"
     monkeypatch.setenv("FANTASY_PROS_API", secret)
     source_payloads["news"] = RuntimeError(f"failed with header x-api-key={secret}")
-    provider = FantasyProsProvider(
+    provider = _provider(
         transport=FakeTransport(source_payloads),
         clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
     )
@@ -363,7 +498,7 @@ async def test_missing_api_key_returns_unknown_without_network(
 ) -> None:
     monkeypatch.delenv("FANTASY_PROS_API", raising=False)
     transport = FakeTransport(source_payloads)
-    provider = FantasyProsProvider(
+    provider = _provider(
         transport=transport,
         clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
     )
@@ -382,12 +517,287 @@ async def test_missing_api_key_returns_unknown_without_network(
 
 
 @pytest.mark.asyncio
+async def test_provider_spaces_external_requests_to_the_public_api_limit(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    monotonic = [0.0]
+    starts: list[float] = []
+    sleeps: list[float] = []
+
+    class TimedTransport(FakeTransport):
+        async def get_json(self, *args, **kwargs):
+            starts.append(monotonic[0])
+            return await super().get_json(*args, **kwargs)
+
+    async def advance(delay: float) -> None:
+        sleeps.append(delay)
+        monotonic[0] += delay
+
+    provider = _provider(
+        api_key="secret",
+        transport=TimedTransport(source_payloads),
+        clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
+        request_interval_seconds=1.0,
+        monotonic=lambda: monotonic[0],
+        sleep=advance,
+    )
+
+    result = await provider.get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
+        year=2026,
+    )
+
+    assert result["status"] == "success"
+    assert starts == [0.0, 1.0, 2.0]
+    assert sleeps == [1.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_provider_enforces_persistent_daily_budget_before_network_and_returns_unknown(
+    tmp_path: Path,
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    now = datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+    budget_path = tmp_path / "app-private" / "fantasypros-request-budget.json"
+    first_transport = FakeTransport(source_payloads)
+    first = _provider(
+        api_key="secret",
+        transport=first_transport,
+        clock=lambda: now,
+        daily_request_limit=3,
+        daily_budget_path=budget_path,
+    )
+    await first.get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
+        year=2026,
+    )
+    assert len(first_transport.calls) == 3
+
+    restarted_transport = FakeTransport(source_payloads)
+    restarted = _provider(
+        api_key="secret",
+        transport=restarted_transport,
+        clock=lambda: now,
+        daily_request_limit=3,
+        daily_budget_path=budget_path,
+    )
+    result = await restarted.get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
+        year=2026,
+    )
+
+    assert restarted_transport.calls == []
+    assert result["status"] == "degraded"
+    assert result["warnings"] == [
+        "FantasyPros daily request budget is exhausted; missing data remains unknown until the next UTC day"
+    ]
+    assert result["players"][0]["identityResolved"] is False
+    assert result["players"][0]["injury_status"] == "unknown"
+    assert result["players"][0]["recentNews"] == []
+
+
+@pytest.mark.asyncio
+async def test_provider_counts_targeted_lookups_in_the_same_daily_budget(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+    transport = FakeTransport(
+        {
+            "players": {"sport": "NFL", "players": []},
+            "injuries": {"sport": "NFL", "injuries": []},
+            "news": {
+                "sport": "NFL",
+                "items": [
+                    {
+                        "player_id": player_id,
+                        "title": f"Player {player_id} update",
+                        "created": "2026-09-01 15:00:00",
+                        "categories": ["News"],
+                    }
+                    for player_id in (901, 902)
+                ],
+            },
+            "players:901": {
+                "sport": "NFL",
+                "players": [
+                    {
+                        "player_id": 901,
+                        "player_name": "First Target",
+                        "position_id": "WR",
+                        "team_id": "SF",
+                    }
+                ],
+            },
+            "players:902": {
+                "sport": "NFL",
+                "players": [
+                    {
+                        "player_id": 902,
+                        "player_name": "Second Target",
+                        "position_id": "WR",
+                        "team_id": "SEA",
+                    }
+                ],
+            },
+        }
+    )
+    provider = _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: now,
+        daily_request_limit=4,
+        daily_budget_path=tmp_path / "app-private" / "fantasypros-request-budget.json",
+    )
+
+    result = await provider.get_player_updates(
+        [
+            {"name": "First Target", "position": "WR", "team": "SF"},
+            {"name": "Second Target", "position": "WR", "team": "SEA"},
+        ],
+        year=2026,
+    )
+
+    assert len(transport.calls) == 4
+    assert [call["params"].get("player") for call in transport.calls] == [None, None, None, 901]
+    assert result["status"] == "degraded"
+    assert result["warnings"] == [
+        "FantasyPros daily request budget is exhausted; missing data remains unknown until the next UTC day"
+    ]
+    assert result["players"][0]["identityResolved"] is True
+    assert result["players"][1]["identityResolved"] is False
+
+
+@pytest.mark.asyncio
+async def test_provider_budget_failure_deadline_is_not_extended_by_repeated_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    monotonic = [0.0]
+    transport = FakeTransport(source_payloads)
+    provider = _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: datetime(2026, 9, 1, 16, tzinfo=timezone.utc),
+        monotonic=lambda: monotonic[0],
+        failure_backoff_seconds=60.0,
+        daily_budget_path=tmp_path / "app-private" / "fantasypros-request-budget.json",
+    )
+    reserve_calls = 0
+
+    def unavailable(_now: datetime) -> None:
+        nonlocal reserve_calls
+        reserve_calls += 1
+        raise FantasyProsRequestBudgetUnavailable
+
+    monkeypatch.setattr(provider._daily_request_budget, "reserve", unavailable)
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+
+    first = await provider.get_player_updates(identity, year=2026)
+    monotonic[0] = 30.0
+    second = await provider.get_player_updates(identity, year=2026)
+    monotonic[0] = 59.0
+    third = await provider.get_player_updates(identity, year=2026)
+
+    assert first["warnings"] == second["warnings"] == third["warnings"] == [
+        "FantasyPros daily request budget is unavailable; missing data remains unknown"
+    ]
+    assert reserve_calls == 1
+    assert transport.calls == []
+
+    monotonic[0] = 61.0
+    await provider.get_player_updates(identity, year=2026)
+    assert reserve_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_backs_off_failed_endpoints_without_retry_storms() -> None:
+    monotonic = [0.0]
+    transport = FakeTransport(
+        {
+            "players": RuntimeError("rate limited with secret details"),
+            "injuries": RuntimeError("rate limited with secret details"),
+            "news": RuntimeError("rate limited with secret details"),
+        }
+    )
+    provider = _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
+        request_interval_seconds=0.0,
+        failure_backoff_seconds=60.0,
+        monotonic=lambda: monotonic[0],
+    )
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+
+    first = await provider.get_player_updates(identity, year=2026)
+    second = await provider.get_player_updates(identity, year=2026)
+
+    assert first["status"] == second["status"] == "degraded"
+    assert len(transport.calls) == 3
+    assert "secret details" not in repr(second)
+
+    monotonic[0] = 30.0
+    await provider.get_player_updates(identity, year=2026)
+    assert len(transport.calls) == 3
+
+    monotonic[0] = 61.0
+    await provider.get_player_updates(identity, year=2026)
+    assert len(transport.calls) == 6
+
+
+@pytest.mark.asyncio
+async def test_provider_uses_longer_backoff_for_public_api_rate_limits() -> None:
+    monotonic = [0.0]
+    rate_limit = FantasyProsProviderError(
+        "FantasyPros returned HTTP status 429",
+        status_code=429,
+    )
+    transport = FakeTransport(
+        {"players": rate_limit, "injuries": rate_limit, "news": rate_limit}
+    )
+    provider = _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
+        failure_backoff_seconds=60.0,
+        rate_limit_backoff_seconds=900.0,
+        monotonic=lambda: monotonic[0],
+    )
+    identity = [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+
+    first = await provider.get_player_updates(identity, year=2026)
+    assert first["warnings"] == [
+        "FantasyPros player catalog is rate-limited; missing data remains unknown",
+        "FantasyPros injuries is rate-limited; missing data remains unknown",
+        "FantasyPros news is rate-limited; missing data remains unknown",
+    ]
+    assert len(transport.calls) == 1
+    budget_state = json.loads(provider._daily_request_budget.path.read_text(encoding="utf-8"))
+    assert budget_state["requestCount"] == 1
+    monotonic[0] = 120.0
+    backed_off = await provider.get_player_updates(identity, year=2026)
+    assert backed_off["warnings"] == first["warnings"]
+    assert len(transport.calls) == 1
+    assert json.loads(
+        provider._daily_request_budget.path.read_text(encoding="utf-8")
+    )["requestCount"] == 1
+
+    monotonic[0] = 901.0
+    await provider.get_player_updates(identity, year=2026)
+    assert len(transport.calls) == 2
+    assert json.loads(
+        provider._daily_request_budget.path.read_text(encoding="utf-8")
+    )["requestCount"] == 2
+
+
+@pytest.mark.asyncio
 async def test_provider_caches_fast_data_and_player_directory_on_separate_ttls(
     source_payloads: dict[str, dict[str, Any]],
 ) -> None:
     current = [datetime(2026, 9, 1, tzinfo=timezone.utc)]
     transport = FakeTransport(source_payloads)
-    provider = FantasyProsProvider(
+    provider = _provider(
         api_key="secret",
         transport=transport,
         clock=lambda: current[0],
@@ -455,7 +865,7 @@ async def test_provider_cache_is_lru_bounded_across_rotating_targeted_ids() -> N
             }
 
     transport = RotatingTransport()
-    provider = FantasyProsProvider(
+    provider = _provider(
         api_key="secret",
         transport=transport,
         clock=lambda: current[0],
@@ -464,7 +874,7 @@ async def test_provider_cache_is_lru_bounded_across_rotating_targeted_ids() -> N
         max_cache_entries=16,
     )
 
-    for batch in range(3):
+    for batch in range(10):
         generation[0] = batch
         first_id = 1_000 + batch * 10
         candidates = [
@@ -527,7 +937,7 @@ async def test_provider_clamps_request_and_output_bounds() -> None:
             },
         }
     )
-    provider = FantasyProsProvider(
+    provider = _provider(
         api_key="secret",
         transport=transport,
         clock=lambda: now,
@@ -601,7 +1011,7 @@ async def test_limited_catalog_resolves_current_injury_from_exact_row_identity()
             "news": {"sport": "NFL", "count": 0, "items": []},
         }
     )
-    provider = FantasyProsProvider(api_key="secret", transport=transport, clock=lambda: now)
+    provider = _provider(api_key="secret", transport=transport, clock=lambda: now)
 
     result = await provider.get_player_updates(
         [
@@ -635,7 +1045,7 @@ async def test_limited_catalog_resolves_current_injury_from_exact_row_identity()
 
 
 @pytest.mark.asyncio
-async def test_limited_catalog_uses_ten_cached_targeted_news_identity_lookups() -> None:
+async def test_limited_catalog_bounds_and_caches_targeted_news_identity_lookups() -> None:
     current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
     news_items = [
         {
@@ -664,7 +1074,7 @@ async def test_limited_catalog_uses_ten_cached_targeted_news_identity_lookups() 
             "items": news_items,
         },
     }
-    for player_id in range(100, 110):
+    for player_id in range(100, 102):
         responses[f"players:{player_id}"] = {
             "sport": "NFL",
             "count": 1,
@@ -681,7 +1091,7 @@ async def test_limited_catalog_uses_ten_cached_targeted_news_identity_lookups() 
             ],
         }
     transport = FakeTransport(responses)
-    provider = FantasyProsProvider(
+    provider = _provider(
         api_key="secret",
         transport=transport,
         clock=lambda: current[0],
@@ -700,20 +1110,20 @@ async def test_limited_catalog_uses_ten_cached_targeted_news_identity_lookups() 
         for call in transport.calls
         if call["url"].endswith("/players") and "player" in call["params"]
     ]
-    assert [call["params"]["player"] for call in targeted_calls] == list(range(100, 110))
+    assert [call["params"]["player"] for call in targeted_calls] == [100, 101]
     assert first["status"] == "degraded"
     assert first["coverage"]["targetedPlayerLookups"] == {
-        "attempted": 10,
-        "resolved": 10,
+        "attempted": 2,
+        "resolved": 2,
         "capped": True,
     }
     assert any("player catalog coverage" in warning for warning in first["warnings"])
     assert any("news coverage" in warning for warning in first["warnings"])
     assert any("news identity coverage" in warning for warning in first["warnings"])
-    assert all(player["identityResolved"] is True for player in first["players"][:10])
-    assert all(player["news_fresh"] is True for player in first["players"][:10])
-    assert all(player["identityResolved"] is False for player in first["players"][10:])
-    assert all(player["news_fresh"] is False for player in first["players"][10:])
+    assert all(player["identityResolved"] is True for player in first["players"][:2])
+    assert all(player["news_fresh"] is True for player in first["players"][:2])
+    assert all(player["identityResolved"] is False for player in first["players"][2:])
+    assert all(player["news_fresh"] is False for player in first["players"][2:])
     assert "example.invalid" not in repr(first)
     assert "must-not-escape" not in repr(first)
 
@@ -749,7 +1159,7 @@ async def test_targeted_news_identity_failure_is_generic_and_remains_unknown() -
             "players:101": RuntimeError(f"failed with x-api-key={secret}"),
         }
     )
-    provider = FantasyProsProvider(
+    provider = _provider(
         api_key=secret,
         transport=transport,
         clock=lambda: datetime(2026, 9, 1, 16, tzinfo=timezone.utc),

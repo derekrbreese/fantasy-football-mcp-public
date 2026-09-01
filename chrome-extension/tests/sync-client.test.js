@@ -36,6 +36,32 @@ test('reports a useful error when the MCP server is unavailable', async () => {
   );
 });
 
+test('lock lease cancellation aborts an in-flight draft sync', async () => {
+  const external = new AbortController();
+  let requestSignal;
+  const pending = syncDraftContext(
+    { schemaVersion: 1, draft: { sessionKey: 'f1:123' }, picks: [] },
+    {
+      signal: external.signal,
+      fetchImpl: async (_url, options) => {
+        requestSignal = options.signal;
+        await new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true }));
+      },
+    },
+  );
+
+  await Promise.resolve();
+  external.abort();
+  await Promise.resolve();
+
+  assert.equal(requestSignal.aborted, true);
+  await assert.rejects(pending, /aborted/);
+});
+
 test('resets only the allowlisted exact draft identity at the synced snapshot', async () => {
   let request;
   const result = await resetDraftSession({
@@ -170,6 +196,35 @@ test('reset surfaces the exact bounded server rejection', async () => {
     }),
     /Draft changed; rescan before reset\./,
   );
+});
+
+test('lock lease cancellation aborts an in-flight draft reset', async () => {
+  const external = new AbortController();
+  let requestSignal;
+  const pending = resetDraftSession({
+    sport: 'f1',
+    leagueId: '10547893',
+    teamId: '6',
+    sessionKey: 'f1:10547893',
+    updatedAt: '2026-09-01T23:15:00.000Z',
+  }, {
+    signal: external.signal,
+    fetchImpl: async (_url, options) => {
+      requestSignal = options.signal;
+      await new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => {
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        reject(error);
+      }, { once: true }));
+    },
+  });
+
+  await Promise.resolve();
+  external.abort();
+  await Promise.resolve();
+
+  assert.equal(requestSignal.aborted, true);
+  await assert.rejects(pending, /aborted/);
 });
 
 test('post-reset rescan waits until its timestamp is strictly after server reset time', async () => {

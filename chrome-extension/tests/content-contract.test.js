@@ -87,6 +87,26 @@ test('content blocks scans and sync while a durable reset journal exists', () =>
   assert.match(contentSource, /teamId: metadata\.teamId/);
 });
 
+test('content repair uses the extension broker instead of Firefox page-realm Web Locks', () => {
+  const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+  const popupSource = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
+  const assistantSource = fs.readFileSync(path.join(__dirname, '..', 'assistant.js'), 'utf8');
+
+  for (const source of [contentSource, popupSource, assistantSource]) {
+    assert.match(source, /createSessionOperationLock\(webext\.runtime\)/);
+    assert.doesNotMatch(source, /navigator\?*\.locks|navigator\.locks/);
+    assert.match(source, /createDraftStorage\(extensionApi, \{ operationLock \}\)/);
+  }
+  assert.match(contentSource, /async function performScan\(lease\)/);
+  assert.match(contentSource, /async function performRepair\(lease\)/);
+  assert.match(contentSource, /syncDraftContext\(context, \{ signal: lease\?\.signal \}\)/);
+  assert.match(contentSource, /Repair was interrupted; its durable journal will block and reconcile/);
+  assert.doesNotMatch(contentSource, /Repair failed without changing saved picks/);
+  assert.match(popupSource, /operationLock\.run\(sessionKey, async \(lease\)/);
+  assert.match(popupSource, /resetDraftSession\(session, \{ signal: lease\?\.signal \}\)/);
+  assert.match(popupSource, /finalizeReset\(sessionKey, resetAt, lease\)/);
+});
+
 test('popup requires full active identity including team before reset', () => {
   const popupSource = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
 
