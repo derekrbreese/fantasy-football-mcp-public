@@ -92,3 +92,104 @@ test('renders exact blocker details and an empty-state instead of player cards',
   assert.match(root.textContent, /Full rescan & repair/);
   assert.equal(findAll(root, (node) => node.className === 'recommendation-card').length, 0);
 });
+
+test('renders an available AI critic after deterministic recommendations as inert advisory text', () => {
+  globalThis.pwned = false;
+  const malicious = '<img src=x onerror="globalThis.pwned=true">';
+  const root = new FakeElement('main');
+  renderRecommendationView(root, {
+    mode: 'success',
+    leagueLabel: 'League 123',
+    statusTitle: 'Recommendations ready',
+    statusMessage: 'Ready.',
+    actionNotice: 'Recommendations only — this assistant never drafts players.',
+    draftContext: [],
+    ledgerIssues: [],
+    degradations: [],
+    recommendations: [{
+      rankLabel: '1',
+      name: 'Deterministic Player',
+      playerMeta: 'WR · SEA',
+      valueLabel: 'Rank 1',
+      scoreLabel: 'Score 88.2',
+      confidenceLabel: 'Confidence 81% · uncalibrated',
+      returnProbabilityLabel: 'Estimated return 37% · uncalibrated heuristic',
+      scenarioProbabilityLabel: 'Scenario survival 42% · uncalibrated simulation',
+      rosterImpact: 'Fills WR.',
+      riskLabel: 'Injury/news: unknown — not assumed healthy',
+      riskSourceLabel: '',
+      recentNews: [],
+      reasoning: [],
+    }],
+    advisoryCritic: {
+      status: 'available',
+      provider: 'Databricks',
+      model: malicious,
+      advisoryOnly: true,
+      summary: malicious,
+      cautions: [malicious],
+      cached: true,
+      latencyMs: 321,
+    },
+    contingency: ['Re-run after every pick.'],
+    emptyMessage: '',
+  }, { document: fakeDocument });
+
+  const recommendationIndex = root.children.findIndex((node) => node.className === 'recommendations');
+  const criticIndex = root.children.findIndex((node) => (
+    node.className.split(' ').includes('advisory-critic')
+  ));
+  const contingencyIndex = root.children.findIndex((node) => node.className === 'contingency');
+  assert.ok(recommendationIndex >= 0 && criticIndex > recommendationIndex);
+  assert.ok(contingencyIndex > criticIndex);
+  assert.match(root.textContent, /AI critic — advisory only/);
+  assert.match(root.textContent, /does not change deterministic recommendation order, scores, or confidence/i);
+  assert.match(root.textContent, /Cached response · 321 ms/);
+  assert.ok(findAll(root, (node) => node._textContent === malicious).length >= 2);
+  assert.match(root.textContent, new RegExp(malicious.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(globalThis.pwned, false);
+});
+
+test('renders only the generic reason details for an unavailable AI critic and nothing when absent', () => {
+  const base = {
+    mode: 'success',
+    leagueLabel: 'League 123',
+    statusTitle: 'Recommendations ready',
+    statusMessage: 'Ready.',
+    actionNotice: 'Recommendations only — this assistant never drafts players.',
+    draftContext: [],
+    ledgerIssues: [],
+    degradations: [],
+    recommendations: [],
+    contingency: [],
+    emptyMessage: 'No recommendations.',
+  };
+  const unavailableRoot = new FakeElement('main');
+  renderRecommendationView(unavailableRoot, {
+    ...base,
+    advisoryCritic: {
+      status: 'unavailable',
+      provider: 'Databricks',
+      model: 'secret-model-detail',
+      advisoryOnly: true,
+      cached: false,
+      latencyMs: 20,
+      unavailableReason: {
+        code: 'timeout',
+        message: 'The optional AI critic timed out.',
+      },
+    },
+  }, { document: fakeDocument });
+
+  assert.match(unavailableRoot.textContent, /The optional AI critic timed out\./);
+  assert.doesNotMatch(unavailableRoot.textContent, /secret-model-detail|timeoutCached|timeoutLive/);
+  assert.equal(findAll(unavailableRoot, (node) => (
+    node.className.split(' ').includes('advisory-critic')
+  )).length, 1);
+
+  const absentRoot = new FakeElement('main');
+  renderRecommendationView(absentRoot, base, { document: fakeDocument });
+  assert.equal(findAll(absentRoot, (node) => (
+    node.className.split(' ').includes('advisory-critic')
+  )).length, 0);
+});

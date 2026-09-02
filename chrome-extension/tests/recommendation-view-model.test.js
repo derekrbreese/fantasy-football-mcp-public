@@ -395,3 +395,95 @@ test('sanitizes untrusted response text and caps arrays', () => {
   assert.ok(model.recommendations[0].rosterImpact.length <= 300);
   assert.ok(model.degradations.length <= 12);
 });
+
+test('sanitizes and bounds an available advisory critic without changing deterministic cards', () => {
+  const malicious = '<img src=x onerror="globalThis.pwned=true">';
+  const deterministicRecommendations = [candidate(1), candidate(2), candidate(3)];
+  const model = createRecommendationViewModel(response({
+    recommendations: deterministicRecommendations,
+    advisoryCritic: {
+      status: 'available',
+      provider: 'Databricks',
+      model: malicious.repeat(20),
+      advisoryOnly: true,
+      summary: malicious.repeat(100),
+      cautions: Array.from({ length: 20 }, (_, index) => `${index} ${malicious.repeat(20)}`),
+      cached: true,
+      latencyMs: 999_999,
+    },
+  }), { leagueId: '10462193' });
+
+  assert.deepEqual(model.recommendations.map((item) => item.name), [
+    'Player 1',
+    'Player 2',
+    'Player 3',
+  ]);
+  assert.deepEqual(model.recommendations.map((item) => item.scoreLabel), [
+    'Score 89.0',
+    'Score 88.0',
+    'Score 87.0',
+  ]);
+  assert.equal(model.advisoryCritic.status, 'available');
+  assert.equal(model.advisoryCritic.provider, 'Databricks');
+  assert.equal(model.advisoryCritic.advisoryOnly, true);
+  assert.equal(model.advisoryCritic.cached, true);
+  assert.equal(model.advisoryCritic.latencyMs, 60_000);
+  assert.ok(model.advisoryCritic.model.length <= 120);
+  assert.ok(model.advisoryCritic.summary.length <= 600);
+  assert.equal(model.advisoryCritic.cautions.length, 6);
+  assert.ok(model.advisoryCritic.cautions.every((caution) => caution.length <= 240));
+});
+
+test('keeps an unavailable advisory critic generic and omits absent or malformed critics', () => {
+  const malicious = '<svg onload="globalThis.pwned=true">';
+  const unavailable = createRecommendationViewModel(response({
+    advisoryCritic: {
+      status: 'unavailable',
+      provider: 'Databricks',
+      model: 'unit-test-fast-model',
+      advisoryOnly: true,
+      cached: false,
+      latencyMs: -20,
+      unavailableReason: {
+        code: 'TIMEOUT<script>',
+        message: malicious.repeat(30),
+      },
+    },
+  }), { leagueId: '10462193' });
+
+  assert.equal(unavailable.advisoryCritic.status, 'unavailable');
+  assert.equal(unavailable.advisoryCritic.unavailableReason.code, 'timeout_script_');
+  assert.ok(unavailable.advisoryCritic.unavailableReason.message.startsWith(malicious));
+  assert.ok(unavailable.advisoryCritic.unavailableReason.message.length <= 300);
+  assert.equal(unavailable.advisoryCritic.latencyMs, 0);
+
+  const absent = createRecommendationViewModel(response(), { leagueId: '10462193' });
+  const malformed = createRecommendationViewModel(response({
+    advisoryCritic: {
+      status: 'available',
+      advisoryOnly: false,
+      summary: 'This must not be presented as authoritative.',
+    },
+  }), { leagueId: '10462193' });
+  assert.equal(absent.advisoryCritic, null);
+  assert.equal(malformed.advisoryCritic, null);
+});
+
+test('does not show available AI advice without a deterministic recommendation board', () => {
+  const model = createRecommendationViewModel(response({
+    recommendations: [],
+    advisoryCritic: {
+      status: 'available',
+      provider: 'Databricks',
+      model: 'unit-test-fast-model',
+      advisoryOnly: true,
+      summary: 'Draft someone who is not on the deterministic board.',
+      cautions: [],
+      cached: false,
+      latencyMs: 10,
+    },
+  }), { leagueId: '10462193' });
+
+  assert.deepEqual(model.recommendations, []);
+  assert.equal(model.advisoryCritic, null);
+});

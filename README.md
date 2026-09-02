@@ -30,6 +30,12 @@ cd fantasy-football-mcp-public
 uv sync
 ```
 
+The optional Databricks advisory critic uses public OSS SDK packages in a separate dependency extra. Install it only if you intend to opt in:
+
+```bash
+uv sync --extra databricks
+```
+
 Or use a virtual environment and `requirements.txt`:
 
 ```bash
@@ -66,6 +72,8 @@ YAHOO_GUID=...
 ```
 
 The repository ignores `.env`, token JSON, OAuth state, and common MCP configuration files. Rotate any secret that has ever entered public Git history. Restart the server after changing an API key or any other `.env` value; the running process does not reload credentials automatically.
+
+The optional Databricks advisory critic is disabled by default. Its setup and outbound-data boundary are documented in [Databricks advisory critic](#databricks-advisory-critic).
 
 ### 3. Start the private loopback server
 
@@ -143,16 +151,20 @@ When using Yahoo fallback instead of a local profile, a validated Yahoo `league_
 
 ## Instant Mock Drafts and repeated mocks
 
-Yahoo Instant Mock Drafts use the same recorder flow. Scan the exact mock first, then import a local profile or explicitly bind a saved one before requesting advice. If an Instant Mock Draft identity is not discoverable through Yahoo's Fantasy API, this local-profile path is the expected recovery; refreshing an OAuth token does not make that mock a normal Yahoo league.
+Yahoo Instant Mock Drafts use the same recorder flow. Scan the exact mock first, then import a local profile, explicitly bind a saved one, or configure a per-sport default before requesting advice. If an Instant Mock Draft identity is not discoverable through Yahoo's Fantasy API, this local-profile path is the expected recovery; refreshing an OAuth token does not make that mock a normal Yahoo league.
 
 Each newly created Yahoo mock has a new identity. To reuse the same rankings without uploading them again:
 
 1. Open and scan the new mock.
 2. Open **Full dashboard** from its popup.
 3. Under **Reuse a saved profile**, choose the prior source yourself.
-4. Select **Use for this mock & refresh**.
+4. Select **Use for this draft & refresh**.
 
 Only sanitized rankings, roster settings, and provenance are copied. Picks are never copied between mocks.
+
+To remove that manual step for later mocks, use **Default for future drafts** in the dashboard. Choose **Yahoo Football**, select the saved source, and select **Set sport default**. On the first recommendation for a newly synced draft with no exact profile, the server atomically binds that default to the new identity and continues without a Yahoo API call. An already bound or imported exact profile always wins, and changing or clearing the default does not alter prior drafts. Default selection and automatic binding require a source profile for the current UTC year, so import a new sheet and replace or clear the pointer after a season rollover.
+
+Yahoo's draft-client URL does not reliably distinguish a mock from a real draft, and the recorder intentionally discards its query string. The default therefore applies to every future profileless recorder draft for that sport, including real drafts and mocks. The dashboard states this scope before you enable it; use manual binding instead if you draft in multiple leagues with different settings.
 
 Use the two popup recovery controls for different jobs:
 
@@ -177,6 +189,36 @@ The integration is defensive by design:
 - Only allowlisted player identity, status, timestamp, category, and headline fields reach recommendations. Fresh, exactly resolved rows may still be used when the API labels its overall coverage as limited; missing, unresolved, stale, rate-limited, unavailable, or out-of-coverage players remain explicitly unknown, and the coverage warning remains visible.
 
 The first FantasyPros-enabled recommendation automatically fetches the base player catalog, injuries, and news and populates `~/.fantasy-football-mcp/fantasypros-snapshots.sqlite3` with each successful snapshot. No separate prefetch, database migration, or user refresh command is needed. The SQLite cache is bounded to sixteen snapshot variants and 8 MB of normalized record JSON. It contains normalized FantasyPros base snapshots only—not the API key, raw provider bodies, URLs, query strings, targeted identity lookups, Yahoo data, draft state, league IDs, or recommendation candidates. User-facing warnings identify stale fallback; stale per-player status and headlines are suppressed.
+
+## Databricks advisory critic
+
+The Databricks integration is an optional, advisory-only second look at a completed deterministic recommendation. The local deterministic engine remains authoritative: the model cannot reorder candidates, change scores, select or draft a player, or feed output back into any specialist. A missing, incomplete, or defective authoritative ledger skips the advisory path. Stale state may still produce degraded deterministic candidates; when it does, staleness is disclosed as a quality flag and the deterministic response remains visibly degraded. Disabled or skipped advisory work is omitted from the response entirely; a timeout, dependency problem, authentication failure, or invalid model response fails open and leaves the deterministic recommendations unchanged.
+
+Install the public SDK dependencies, then configure a private `.env` with a generic workspace root and serving-endpoint name:
+
+```bash
+uv sync --extra databricks
+```
+
+```env
+FANTASY_FOOTBALL_DATABRICKS_ADVISORY_ENABLED=true
+FANTASY_FOOTBALL_DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
+FANTASY_FOOTBALL_DATABRICKS_MODEL=your-serving-endpoint
+FANTASY_FOOTBALL_DATABRICKS_ADVISORY_TIMEOUT_SECONDS=8.0
+```
+
+The host must be an HTTPS Databricks workspace root with no path, query string, embedded username, or credential. The model is the exact serving endpoint made available by that workspace. Configure one of the Databricks SDK's supported unified-authentication methods outside this app; this app does not accept, persist, return, or log a Databricks access token. Do not commit a company workspace hostname, endpoint name, profile, or token to this public repository. Restart the server after changing the configuration.
+
+The eight-second default deadline includes first-call client/authentication setup as well as inference. You can configure a shorter deadline for a tighter draft clock; a timeout returns only an unavailable advisory notice and leaves the deterministic board unchanged.
+
+Only the following allowlisted, identity-free summary can be sent to the configured Databricks endpoint, and only after the local ledger is complete:
+
+- Candidate ordinal and position; overall and specialist component scores; explicitly uncalibrated return probability; and normalized risk status
+- Aggregate roster position counts and the positions of a bounded number of recent picks
+- Current and next overall-pick numbers
+- Bounded quality flags for stale state, unavailable evidence, or inferred settings
+
+Player names and keys, league/session/team identifiers, the pick ledger, news and headlines, URLs, browser fields, Yahoo credentials, and Databricks credentials are excluded. Provider output is treated as untrusted: only bounded summary/caution text is rendered, and it never changes candidate order. Identical sanitized inputs use a small, short-lived in-memory cache to reduce latency and requests; nothing from this advisory cache is written to disk, and restarting the server clears it. Any retention performed by the configured Databricks workspace is governed by that workspace's own policy.
 
 ## Yahoo API setup and limitations
 
@@ -239,7 +281,7 @@ This was associated with stale recorder code using Firefox's content-script Prom
 ### “Yahoo league identity could not be resolved”
 
 - First open the exact active draft tab and rescan so the popup and server agree on its numeric league ID.
-- For an Instant Mock Draft or while Yahoo approval is pending, open the dashboard from that popup and import or explicitly bind a saved local profile. Then refresh recommendations; this path should not call Yahoo.
+- For an Instant Mock Draft or while Yahoo approval is pending, open the dashboard from that popup and import, explicitly bind, or configure a saved local profile as the Yahoo Football default. Then refresh recommendations; this path should not call Yahoo.
 - For a real Yahoo league using fallback, confirm `ff_get_leagues` returns exactly one matching current-season league and that the authenticated Yahoo team matches the draft.
 - Do not choose the newest saved session by guesswork or copy a league ID from a different mock.
 
@@ -264,12 +306,13 @@ Private runtime data is stored under `~/.fantasy-football-mcp/`. The default dir
 
 - `live-drafts.json` — sanitized per-league draft sessions
 - `draft-profiles.json` — sanitized rankings, roster settings, and profile provenance
+- `draft-profile-defaults.json` — explicit per-sport pointers to saved default profiles
 - `fantasypros-snapshots.sqlite3` — normalized FantasyPros base snapshots only
 - `fantasypros-request-budget.json` — only UTC date and request count
 
 The browser profile separately stores the extension's sanitized per-league recorder state. The recorder does not store Yahoo cookies, OAuth credentials, page URLs, query parameters, chat, or arbitrary page fields. Loopback routes validate origins, cap payloads, allowlist fields, and return recommendation responses with `Cache-Control: no-store`.
 
-FantasyPros receives only its API requests. No draft ledger or Yahoo credential is sent to FantasyPros. Google Drive receives nothing from this app because it is not a runtime integration.
+FantasyPros receives only its API requests. No draft ledger or Yahoo credential is sent to FantasyPros. When the Databricks advisory critic is explicitly enabled, Databricks receives only the identity-free allowlist described above; this app keeps its advisory cache in memory only. Google Drive receives nothing from this app because it is not a runtime integration.
 
 ## Development and validation
 

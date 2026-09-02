@@ -15,8 +15,9 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Per-league browser storage, durable repair/reset reconciliation, and a cross-browser extension-background lock broker with bounded heartbeats, expiring session fences, and cooperative lease cancellation instead of Firefox content-script Web Locks.
 - Persistent Firefox Draft Assistant sidebar with explicit league selection, shared fail-closed recommendation components, and no Yahoo-page injection or draft actions.
 - Loopback-only local dashboard with a configurable recommendation board, roster and draft-history views, specialist comparisons, critic checks, and data-source diagnostics.
-- Exact-session local DraftSheets/JSON profile import with bounded parsing, private atomic storage, and zero Yahoo API calls when a matching profile is available.
+- Exact-session local DraftSheets/JSON profile import with bounded parsing, private atomic storage, zero Yahoo API calls when a matching profile is available, and current-season per-sport defaults for future profileless recorder drafts without overwriting exact profiles or copying picks.
 - Optional bounded FantasyPros injury/news enrichment with explicit API-tier coverage, one-request-per-second pacing, a private persistent 95-call UTC-day budget, FantasyPros attribution, rate-limit backoff, freshness, and per-player unknown-data weighting. Normalized base catalog/injury/news snapshots persist in a private SQLite cache (24-hour complete catalog; five-minute partial-catalog/injury/news retry), so fresh data survives restart without another request; failed refreshes can use stale identity data only while recommendation status/headlines remain unknown.
+- Optional disabled-by-default Databricks advisory critic with public OSS SDK dependencies, unified authentication, a strict identity-free outbound allowlist, bounded timeout/output, coalescing and in-memory-only caching, fail-open behavior, and no authority to reorder, score, select, or draft a player.
 - Strict local recommendation UI boundary: allowlisted bounded requests, exact saved/Yahoo league resolution, authenticated-team verification, serialized Yahoo calls, post-scoring snapshot revalidation, and no-store responses.
 - Uncalibrated labels for heuristic probabilities and confidence.
 - Beginner-facing local usage documentation covering API-free live drafts, Instant Mock Draft profile reuse, Firefox/Chrome loading, state-before-recommendation diagnosis, reset versus repair, and privacy-safe troubleshooting.
@@ -66,7 +67,7 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 
 2. **Local session management**
    - The extension popup now provides an explicitly confirmed, exact-active-session mock reset with durable browser/server tombstones and profile preservation.
-   - The loopback dashboard now lists privacy-minimal saved profile summaries with validated sport and source/import dates, explicitly rebinds a chosen ranking/settings profile to a new mock identity without copying picks or silently choosing a source, rejects cross-sport reuse server-side, and bounds list/bind waits.
+   - The loopback dashboard now lists privacy-minimal saved profile summaries with validated sport and source/import dates, explicitly rebinds a chosen ranking/settings profile to a new draft identity without copying picks, rejects cross-sport reuse server-side, and bounds list/bind waits. Users may also explicitly set or clear one per-sport default for future profileless drafts; existing exact profiles always win.
    - Add explicit list/delete/reset MCP tools for other saved local draft sessions with league-scoped confirmation and no caller-controlled filesystem paths.
    - Add retention limits for old completed drafts.
 

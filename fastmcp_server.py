@@ -29,11 +29,14 @@ from src.services.local_draft_profile_store import (
     LocalDraftProfileNotFoundError,
     LocalDraftProfileValidationError,
     bind_local_draft_profile,
+    clear_default_local_draft_profile,
+    list_local_draft_profile_defaults,
     list_local_draft_profile_summaries,
     load_local_draft_profile,
     profile_from_draftsheets_xlsx,
     sanitize_local_draft_profile,
     save_local_draft_profile,
+    set_default_local_draft_profile,
 )
 from src.services.live_draft_store import (
     LiveDraftConflictError,
@@ -712,6 +715,7 @@ _DRAFT_RECOMMENDATION_MAX_BODY = 4_096
 _DRAFT_RESET_MAX_BODY = 4_096
 _DRAFT_PROFILE_MAX_BODY = 512_000
 _DRAFT_PROFILE_BIND_MAX_BODY = 4_096
+_DRAFT_PROFILE_DEFAULT_MAX_BODY = 4_096
 _DRAFT_PROFILE_XLSX_MAX_BODY = 2_000_000
 _DRAFT_RECOMMENDATION_FIELDS = frozenset(
     {"schemaVersion", "leagueId", "strategy", "count", "rankingCount", "simulations"}
@@ -730,6 +734,9 @@ _DRAFT_PROFILE_FIELDS = frozenset(
 _DRAFT_PROFILE_BIND_FIELDS = frozenset(
     {"schemaVersion", "sourceLeagueId", "leagueId"}
 )
+_DRAFT_PROFILE_DEFAULT_FIELDS = frozenset(
+    {"schemaVersion", "sport", "sourceLeagueId"}
+)
 _DRAFT_PROFILE_FORMATS = frozenset({"draftsheets-2026", "csv", "json"})
 _DRAFT_PROFILE_XLSX_MEDIA_TYPE = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -747,6 +754,7 @@ _DRAFT_PROFILE_ROSTER_ORDER = (
     "IR",
 )
 _DRAFT_LEAGUE_ID = re.compile(r"^\d{1,32}$")
+_DRAFT_SPORT = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _DRAFT_EXTENSION_ORIGIN = re.compile(
     r"^(?:moz|chrome)-extension://[A-Za-z0-9._-]{1,128}$"
 )
@@ -1212,10 +1220,85 @@ async def list_draft_profiles(request: Request) -> Response:
         return _draft_json_error(request, "UI header required", 403)
     try:
         profiles = list_local_draft_profile_summaries()
+        defaults = list_local_draft_profile_defaults()
     except Exception:
         return _draft_json_error(request, "Draft profile service unavailable", 500)
     return JSONResponse(
-        {"status": "success", "profiles": profiles},
+        {"status": "success", "profiles": profiles, "defaults": defaults},
+        headers=headers,
+    )
+
+
+@server.custom_route(
+    "/draft-profile-default", methods=["POST", "OPTIONS"], include_in_schema=False
+)
+async def set_draft_profile_default(request: Request) -> Response:
+    """Set or clear one explicit per-sport default profile pointer."""
+
+    headers = _draft_ui_headers(request)
+    if not _is_loopback_request(request):
+        return _draft_json_error(request, "Loopback access required", 403)
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return _draft_json_error(request, "Origin required", 403)
+    if not _is_allowed_draft_ui_origin(request, origin):
+        return _draft_json_error(request, "Origin not allowed", 403)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+    if request.headers.get("x-fantasy-draft-ui") != "1":
+        return _draft_json_error(request, "UI header required", 403)
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        return _draft_json_error(request, "Content-Type must be application/json", 415)
+    try:
+        content_length = int(request.headers.get("content-length", "0") or 0)
+    except ValueError:
+        return _draft_json_error(request, "Invalid content length", 400)
+    if content_length < 0:
+        return _draft_json_error(request, "Invalid content length", 400)
+    if content_length > _DRAFT_PROFILE_DEFAULT_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+    body = await request.body()
+    if len(body) > _DRAFT_PROFILE_DEFAULT_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _draft_json_error(request, "Request body must be valid JSON", 400)
+    if not isinstance(payload, dict):
+        return _draft_json_error(request, "Request body must be a JSON object", 400)
+    if set(payload) != _DRAFT_PROFILE_DEFAULT_FIELDS:
+        return _draft_json_error(request, "Draft profile default fields are invalid", 400)
+    if payload.get("schemaVersion") != 1 or isinstance(payload.get("schemaVersion"), bool):
+        return _draft_json_error(request, "schemaVersion 1 is required", 400)
+    sport = payload.get("sport")
+    if not isinstance(sport, str) or not _DRAFT_SPORT.fullmatch(sport):
+        return _draft_json_error(request, "sport has an invalid format", 400)
+    source_league_id = payload.get("sourceLeagueId")
+    if source_league_id is not None and (
+        not isinstance(source_league_id, str)
+        or not _DRAFT_LEAGUE_ID.fullmatch(source_league_id)
+    ):
+        return _draft_json_error(request, "sourceLeagueId has an invalid format", 400)
+    try:
+        if source_league_id is None:
+            clear_default_local_draft_profile(sport)
+        else:
+            set_default_local_draft_profile(sport, source_league_id)
+    except LocalDraftProfileNotFoundError as exc:
+        return _draft_json_error(request, str(exc), 404)
+    except LocalDraftProfileConflictError as exc:
+        return _draft_json_error(request, str(exc), 409)
+    except LocalDraftProfileValidationError:
+        return _draft_json_error(request, "Draft profile default store is invalid", 400)
+    except Exception:
+        return _draft_json_error(request, "Draft profile service unavailable", 500)
+    return JSONResponse(
+        {
+            "status": "success",
+            "sport": sport,
+            "sourceLeagueId": source_league_id,
+        },
         headers=headers,
     )
 

@@ -8,8 +8,16 @@ import pytest
 
 import src.services.live_draft_recommendation_service as recommendation_service
 from src.agents.live_draft_recommender import LiveDraftRecommendationEngine
+from src.services.databricks_advisory_critic import DatabricksAdvisoryResult
 from src.services.live_draft_recommendation_service import get_live_draft_recommendation
 from src.services.live_draft_store import save_live_draft
+from src.services.local_draft_profile_store import (
+    LocalDraftProfileNotFoundError,
+    LocalDraftProfileValidationError,
+    load_local_draft_profile,
+    save_local_draft_profile,
+    set_default_local_draft_profile,
+)
 from tests.unit.test_live_draft_recommender import live_context, rankings
 
 
@@ -66,6 +74,43 @@ class FakeFantasyProsProvider:
     async def get_player_updates(self, players, **arguments):
         self.calls.append((deepcopy(list(players)), dict(arguments)))
         return deepcopy(self.result)
+
+
+class FakeAdvisoryCritic:
+    def __init__(self, payload: dict, *, enabled: bool = True) -> None:
+        self.payload = payload
+        self.enabled = enabled
+        self.model = "unit-test-fast-model"
+        self.calls = []
+
+    async def critique(self, request):
+        self.calls.append(request)
+        if self.payload.get("status") == "available":
+            return DatabricksAdvisoryResult(
+                status="available",
+                model=self.payload.get("model"),
+                summary=self.payload.get("summary"),
+                cautions=tuple(self.payload.get("cautions", [])),
+                cached=self.payload.get("cached") is True,
+                latency_ms=self.payload.get("latencyMs", 0.0),
+            )
+        return DatabricksAdvisoryResult.unavailable(
+            "provider_error",
+            model=self.payload.get("model"),
+        )
+
+
+def available_advisory_result() -> dict:
+    return {
+        "status": "available",
+        "provider": "Databricks",
+        "model": "unit-test-fast-model",
+        "advisoryOnly": True,
+        "summary": "The deterministic shortlist has a narrow top tier.",
+        "cautions": ["Candidate 1 carries more injury uncertainty."],
+        "cached": False,
+        "latencyMs": 18.5,
+    }
 
 
 def fantasypros_result(profile: dict, *, status: str = "success") -> dict:
@@ -164,6 +209,7 @@ async def test_local_profile_avoids_yahoo_and_adds_fantasypros_evidence(
         "opponentModel": "heuristic",
         "scenarioSimulation": True,
         "llmOnRequestPath": False,
+        "rosterSlotsAvailable": True,
     }
     assert result["dataSources"] == {
         "liveState": "local browser extension",
@@ -187,6 +233,477 @@ async def test_local_profile_avoids_yahoo_and_adds_fantasypros_evidence(
         item for item in result["recommendations"] if item["player"]["name"] == "De'Von Achane"
     )
     assert achane["risk"]["status"] == "questionable"
+
+
+@pytest.mark.asyncio
+async def test_unbound_recorder_draft_atomically_uses_same_sport_default_before_yahoo(
+    tmp_path: Path,
+) -> None:
+    live_path = tmp_path / "live-drafts.json"
+    profile_path = tmp_path / "draft-profiles.json"
+    save_live_draft(live_context(), live_path)
+    source = local_profile()
+    source["draft"] = {
+        "sport": "nfl",
+        "leagueId": "111",
+        "teamId": "3",
+        "sessionKey": "nfl:111",
+    }
+    source = save_local_draft_profile(source, profile_path)
+    set_default_local_draft_profile(
+        "nfl", "111", profile_path=profile_path
+    )
+    provider = FakeFantasyProsProvider(fantasypros_result(source))
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(f"default profile must bind before Yahoo: {name}")
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        count=5,
+        simulations=0,
+        store_path=live_path,
+        profile_path=profile_path,
+        fantasypros_provider=provider,
+    )
+
+    assert result["status"] == "success"
+    assert result["leagueKey"] is None
+    bound = load_local_draft_profile(live_context()["draft"], profile_path)
+    assert bound is not None
+    assert bound["draft"] == live_context()["draft"]
+    assert bound["rankings"] == source["rankings"]
+    assert "picks" not in bound
+
+
+@pytest.mark.asyncio
+async def test_broken_default_fails_closed_before_yahoo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live_path = tmp_path / "live-drafts.json"
+    save_live_draft(live_context(), live_path)
+    yahoo_calls = []
+
+    monkeypatch.setattr(
+        recommendation_service,
+        "bind_default_local_draft_profile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            LocalDraftProfileNotFoundError(
+                "default local draft profile source was not found"
+            )
+        ),
+        raising=False,
+    )
+
+    async def call_tool(name: str, **arguments):
+        yahoo_calls.append((name, arguments))
+        return {}
+
+    with pytest.raises(ValueError, match="default local draft profile source"):
+        await get_live_draft_recommendation(
+            call_tool,
+            league_key=None,
+            league_id="10462193",
+            simulations=0,
+            store_path=live_path,
+            profile_path=tmp_path / "draft-profiles.json",
+        )
+
+    assert yahoo_calls == []
+
+
+@pytest.mark.asyncio
+async def test_rollover_default_fails_closed_before_yahoo_or_target_binding(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live_path = tmp_path / "live-drafts.json"
+    profile_path = tmp_path / "draft-profiles.json"
+    defaults_path = tmp_path / "draft-profile-defaults.json"
+    save_live_draft(live_context(), live_path)
+    source = local_profile()
+    source["draft"] = {
+        "sport": "nfl",
+        "leagueId": "111",
+        "teamId": "3",
+        "sessionKey": "nfl:111",
+    }
+    save_local_draft_profile(source, profile_path)
+    set_default_local_draft_profile(
+        "nfl",
+        "111",
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+        current_season=2026,
+    )
+    original_bind = recommendation_service.bind_default_local_draft_profile
+    yahoo_calls = []
+
+    monkeypatch.setattr(
+        recommendation_service,
+        "bind_default_local_draft_profile",
+        lambda *args, **kwargs: original_bind(
+            *args, **kwargs, defaults_path=defaults_path, current_season=2027
+        ),
+    )
+
+    async def call_tool(name: str, **arguments):
+        yahoo_calls.append((name, arguments))
+        return {}
+
+    with pytest.raises(
+        ValueError, match=r"season 2026.*current UTC season 2027"
+    ):
+        await get_live_draft_recommendation(
+            call_tool,
+            league_key=None,
+            league_id="10462193",
+            simulations=0,
+            store_path=live_path,
+            profile_path=profile_path,
+        )
+
+    assert yahoo_calls == []
+    assert load_local_draft_profile(live_context()["draft"], profile_path) is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_default_store_error_is_sanitized_before_yahoo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live_path = tmp_path / "live-drafts.json"
+    save_live_draft(live_context(), live_path)
+    private_detail = "secret token at /Users/private/draft-profile-defaults.json"
+    yahoo_calls = []
+
+    monkeypatch.setattr(
+        recommendation_service,
+        "bind_default_local_draft_profile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            LocalDraftProfileValidationError(private_detail)
+        ),
+        raising=False,
+    )
+
+    async def call_tool(name: str, **arguments):
+        yahoo_calls.append((name, arguments))
+        return {}
+
+    with pytest.raises(ValueError) as captured:
+        await get_live_draft_recommendation(
+            call_tool,
+            league_key=None,
+            league_id="10462193",
+            simulations=0,
+            store_path=live_path,
+            profile_path=tmp_path / "draft-profiles.json",
+        )
+
+    assert str(captured.value) == (
+        "The saved default draft profile is unavailable. Choose or clear it "
+        "in the local dashboard."
+    )
+    assert private_detail not in str(captured.value)
+    assert yahoo_calls == []
+
+
+@pytest.mark.asyncio
+async def test_advisory_critic_is_attached_without_changing_deterministic_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "drafts.json"
+    save_live_draft(live_context(), path)
+    profile = local_profile()
+    monkeypatch.setattr(
+        recommendation_service,
+        "load_local_draft_profile",
+        lambda identity, path=None: deepcopy(profile),
+    )
+    deterministic_result = {}
+    original_recommend = LiveDraftRecommendationEngine.recommend
+
+    def capture_deterministic_result(self, *args, **kwargs):
+        result = original_recommend(self, *args, **kwargs)
+        deterministic_result.update(deepcopy(result))
+        return result
+
+    monkeypatch.setattr(
+        LiveDraftRecommendationEngine,
+        "recommend",
+        capture_deterministic_result,
+    )
+    critic = FakeAdvisoryCritic(available_advisory_result())
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(name)
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        store_path=path,
+        profile_path=tmp_path / "profiles.json",
+        fantasypros_provider=FakeFantasyProsProvider(fantasypros_result(profile)),
+        advisory_critic=critic,
+        simulations=0,
+    )
+
+    assert result["status"] == deterministic_result["status"]
+    assert result["primaryRecommendation"] == deterministic_result["primaryRecommendation"]
+    assert result["alternatives"] == deterministic_result["alternatives"]
+    assert result["recommendations"] == deterministic_result["recommendations"]
+    assert result["advisoryCritic"] == available_advisory_result()
+    assert result["capabilities"]["llmOnRequestPath"] is True
+    assert len(critic.calls) == 1
+    request_payload = critic.calls[0].to_payload()
+    assert len(request_payload["candidates"]) <= 5
+    request_text = repr(critic.calls[0])
+    for prohibited in (
+        "10462193",
+        "CeeDee Lamb",
+        "De'Von Achane",
+        "Alpha",
+        "Returns to full team drills",
+    ):
+        assert prohibited not in request_text
+
+
+@pytest.mark.asyncio
+async def test_disabled_advisory_critic_is_not_called_or_reported(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "drafts.json"
+    save_live_draft(live_context(), path)
+    profile = local_profile()
+    monkeypatch.setattr(
+        recommendation_service,
+        "load_local_draft_profile",
+        lambda identity, path=None: deepcopy(profile),
+    )
+    critic = FakeAdvisoryCritic(available_advisory_result(), enabled=False)
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(name)
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        store_path=path,
+        profile_path=tmp_path / "profiles.json",
+        fantasypros_provider=FakeFantasyProsProvider(fantasypros_result(profile)),
+        advisory_critic=critic,
+        simulations=0,
+    )
+
+    assert critic.calls == []
+    assert "advisoryCritic" not in result
+    assert result["capabilities"]["llmOnRequestPath"] is False
+
+
+@pytest.mark.asyncio
+async def test_degraded_complete_recommendations_still_receive_advisory_review(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "drafts.json"
+    save_live_draft(live_context(), path)
+    profile = local_profile()
+    monkeypatch.setattr(
+        recommendation_service,
+        "load_local_draft_profile",
+        lambda identity, path=None: deepcopy(profile),
+    )
+    critic = FakeAdvisoryCritic(available_advisory_result())
+    unavailable_fantasypros = FakeFantasyProsProvider(
+        {
+            "status": "unavailable",
+            "provider": "FantasyPros",
+            "players": [],
+            "warnings": [],
+        }
+    )
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(name)
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        store_path=path,
+        profile_path=tmp_path / "profiles.json",
+        fantasypros_provider=unavailable_fantasypros,
+        advisory_critic=critic,
+        simulations=0,
+    )
+
+    assert result["status"] == "degraded"
+    assert len(result["recommendations"]) > 0
+    assert len(critic.calls) == 1
+    assert result["advisoryCritic"]["status"] == "available"
+    assert result["capabilities"]["llmOnRequestPath"] is True
+
+
+@pytest.mark.asyncio
+async def test_advisory_receives_structured_roster_slot_unavailability(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "drafts.json"
+    save_live_draft(live_context(), path)
+    profile = local_profile()
+    profile["leagueSettings"]["rosterPositions"] = []
+    monkeypatch.setattr(
+        recommendation_service,
+        "load_local_draft_profile",
+        lambda identity, path=None: deepcopy(profile),
+    )
+    critic = FakeAdvisoryCritic(available_advisory_result())
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(name)
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        store_path=path,
+        profile_path=tmp_path / "profiles.json",
+        fantasypros_provider=FakeFantasyProsProvider(fantasypros_result(profile)),
+        advisory_critic=critic,
+        simulations=0,
+    )
+
+    assert result["status"] == "degraded"
+    assert result["capabilities"]["rosterSlotsAvailable"] is False
+    assert len(critic.calls) == 1
+    assert "roster_slots_unavailable" in critic.calls[0].to_payload()["qualityFlags"]
+
+
+@pytest.mark.asyncio
+async def test_advisory_exception_fails_open_without_exposing_provider_details(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "drafts.json"
+    save_live_draft(live_context(), path)
+    profile = local_profile()
+    monkeypatch.setattr(
+        recommendation_service,
+        "load_local_draft_profile",
+        lambda identity, path=None: deepcopy(profile),
+    )
+
+    class FailingCritic:
+        enabled = True
+        model = "unit-test-fast-model"
+        timeout_seconds = 0.1
+
+        async def critique(self, request):
+            raise RuntimeError("authorization=Bearer secret-that-must-not-escape")
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(name)
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        store_path=path,
+        profile_path=tmp_path / "profiles.json",
+        fantasypros_provider=FakeFantasyProsProvider(fantasypros_result(profile)),
+        advisory_critic=FailingCritic(),
+        simulations=0,
+    )
+
+    assert result["status"] == "success"
+    assert result["advisoryCritic"]["unavailableReason"] == {
+        "code": "provider_error",
+        "message": "Databricks advisory review is temporarily unavailable.",
+    }
+    assert result["capabilities"]["llmOnRequestPath"] is True
+    assert "secret-that-must-not-escape" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_outer_advisory_timeout_fails_open_without_changing_recommendations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "drafts.json"
+    save_live_draft(live_context(), path)
+    profile = local_profile()
+    monkeypatch.setattr(
+        recommendation_service,
+        "load_local_draft_profile",
+        lambda identity, path=None: deepcopy(profile),
+    )
+    monkeypatch.setattr(
+        recommendation_service,
+        "_advisory_outer_timeout",
+        lambda critic: 0.01,
+    )
+
+    class SlowCritic:
+        enabled = True
+        model = "unit-test-fast-model"
+        timeout_seconds = 5.0
+
+        async def critique(self, request):
+            await asyncio.sleep(1)
+            return DatabricksAdvisoryResult.unavailable("provider_error", model=self.model)
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(name)
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        store_path=path,
+        profile_path=tmp_path / "profiles.json",
+        fantasypros_provider=FakeFantasyProsProvider(fantasypros_result(profile)),
+        advisory_critic=SlowCritic(),
+        simulations=0,
+    )
+
+    assert len(result["recommendations"]) > 0
+    assert result["advisoryCritic"]["unavailableReason"]["code"] == "timeout"
+    assert result["capabilities"]["llmOnRequestPath"] is True
+
+
+@pytest.mark.asyncio
+async def test_blocked_ledger_never_calls_advisory_critic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "drafts.json"
+    context = live_context()
+    context["picks"] = [pick for pick in context["picks"] if pick["pickNumber"] != 2]
+    save_live_draft(context, path)
+    profile = local_profile()
+    monkeypatch.setattr(
+        recommendation_service,
+        "load_local_draft_profile",
+        lambda identity, path=None: deepcopy(profile),
+    )
+    critic = FakeAdvisoryCritic(available_advisory_result())
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(name)
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        store_path=path,
+        profile_path=tmp_path / "profiles.json",
+        fantasypros_provider=FakeFantasyProsProvider(fantasypros_result(profile)),
+        advisory_critic=critic,
+        simulations=0,
+    )
+
+    assert result["status"] == "blocked"
+    assert critic.calls == []
+    assert "advisoryCritic" not in result
+    assert result["capabilities"]["llmOnRequestPath"] is False
 
 
 @pytest.mark.asyncio
@@ -723,6 +1240,114 @@ async def test_service_discards_result_when_synced_snapshot_advances_during_scor
         "recommendations": [],
         "contingency": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_service_discards_advisory_when_snapshot_advances_during_critic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "drafts.json"
+    initial = live_context()
+    initial["generatedAt"] = "2026-09-01T12:00:00+00:00"
+    save_live_draft(initial, path)
+    advanced = deepcopy(initial)
+    advanced["generatedAt"] = "2026-09-01T12:00:01+00:00"
+    advanced["picks"].append(
+        {
+            "pickNumber": 7,
+            "player": "A. St. Brown",
+            "position": "WR",
+            "nflTeam": "DET",
+            "fantasyTeam": "Alpha",
+            "isUserPick": False,
+        }
+    )
+    profile = local_profile()
+    monkeypatch.setattr(
+        recommendation_service,
+        "load_local_draft_profile",
+        lambda identity, path=None: deepcopy(profile),
+    )
+
+    class AdvancingCritic(FakeAdvisoryCritic):
+        async def critique(self, request):
+            self.calls.append(request)
+            save_live_draft(advanced, path)
+            return DatabricksAdvisoryResult(
+                status="available",
+                model=self.model,
+                summary="This stale advisory must be discarded.",
+            )
+
+    critic = AdvancingCritic(available_advisory_result())
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(name)
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        store_path=path,
+        profile_path=tmp_path / "profiles.json",
+        fantasypros_provider=FakeFantasyProsProvider(fantasypros_result(profile)),
+        advisory_critic=critic,
+        simulations=0,
+    )
+
+    assert result["status"] == "error"
+    assert result["errorCode"] == "draft_state_changed"
+    assert result["recommendations"] == []
+    assert "advisoryCritic" not in result
+
+
+@pytest.mark.asyncio
+async def test_service_discards_advisory_when_profile_changes_during_critic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "drafts.json"
+    save_live_draft(live_context(), path)
+    profile = local_profile()
+    changed = deepcopy(profile)
+    changed["importedAt"] = "2026-09-01T17:00:01Z"
+    changed_during_critic = False
+
+    def load_profile(identity, path=None):
+        return deepcopy(changed if changed_during_critic else profile)
+
+    monkeypatch.setattr(recommendation_service, "load_local_draft_profile", load_profile)
+
+    class ChangingProfileCritic(FakeAdvisoryCritic):
+        async def critique(self, request):
+            nonlocal changed_during_critic
+            self.calls.append(request)
+            changed_during_critic = True
+            return DatabricksAdvisoryResult(
+                status="available",
+                model=self.model,
+                summary="This stale advisory must be discarded.",
+            )
+
+    critic = ChangingProfileCritic(available_advisory_result())
+
+    async def no_yahoo(name: str, **arguments):
+        raise AssertionError(name)
+
+    result = await get_live_draft_recommendation(
+        no_yahoo,
+        league_key=None,
+        league_id="10462193",
+        store_path=path,
+        profile_path=tmp_path / "profiles.json",
+        fantasypros_provider=FakeFantasyProsProvider(fantasypros_result(profile)),
+        advisory_critic=critic,
+        simulations=0,
+    )
+
+    assert result["status"] == "error"
+    assert result["errorCode"] == "draft_profile_changed"
+    assert result["recommendations"] == []
+    assert "advisoryCritic" not in result
 
 
 @pytest.mark.asyncio

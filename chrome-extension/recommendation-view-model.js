@@ -44,14 +44,79 @@
     return text && Number.isFinite(Date.parse(text)) ? text : '';
   }
 
-  function uniqueStrings(values, maximum = 12) {
+  function uniqueStrings(values, maximum = 12, textMaximum = 300) {
     const result = [];
     for (const value of values) {
-      const text = safeText(value);
+      const text = safeText(value, textMaximum);
       if (text && !result.includes(text)) result.push(text);
       if (result.length >= maximum) break;
     }
     return result;
+  }
+
+  function machineCode(value) {
+    return safeText(value, 40, 'unavailable')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '_');
+  }
+
+  function advisoryLatency(value) {
+    const number = finiteNumber(value);
+    if (number === null) return null;
+    return Math.round(Math.max(0, Math.min(60_000, number)));
+  }
+
+  function advisoryCritic(rawCritic) {
+    if (
+      !rawCritic ||
+      typeof rawCritic !== 'object' ||
+      Array.isArray(rawCritic) ||
+      rawCritic.advisoryOnly !== true ||
+      !['available', 'unavailable'].includes(rawCritic.status)
+    ) return null;
+
+    const critic = {
+      status: rawCritic.status,
+      provider: safeText(rawCritic.provider, 40, 'Databricks'),
+      model: safeText(rawCritic.model, 120, 'Model unavailable'),
+      advisoryOnly: true,
+      cached: rawCritic.cached === true,
+      latencyMs: advisoryLatency(rawCritic.latencyMs),
+    };
+    if (rawCritic.status === 'available') {
+      return {
+        ...critic,
+        summary: safeText(
+          rawCritic.summary,
+          600,
+          'The optional AI critic did not provide a summary.',
+        ),
+        cautions: uniqueStrings(
+          Array.isArray(rawCritic.cautions) ? rawCritic.cautions : [],
+          6,
+          240,
+        ),
+        unavailableReason: null,
+      };
+    }
+
+    const rawReason = rawCritic.unavailableReason;
+    const reason = rawReason && typeof rawReason === 'object' && !Array.isArray(rawReason)
+      ? rawReason
+      : {};
+    return {
+      ...critic,
+      summary: '',
+      cautions: [],
+      unavailableReason: {
+        code: machineCode(reason.code),
+        message: safeText(
+          reason.message,
+          300,
+          'The optional AI critic is unavailable. Deterministic recommendations remain available.',
+        ),
+      },
+    };
   }
 
   function rosterSummary(roster) {
@@ -218,6 +283,7 @@
       ledgerIssues: [],
       degradations: [],
       recommendations: [],
+      advisoryCritic: null,
       contingency: [],
       emptyMessage: 'No recommendation is available.',
     };
@@ -270,6 +336,13 @@
           externalNewsAvailable: response?.capabilities?.externalNews === true,
         }))
       : [];
+    const normalizedAdvisoryCritic = mode === 'success' || mode === 'degraded'
+      ? advisoryCritic(response.advisoryCritic)
+      : null;
+    model.advisoryCritic = normalizedAdvisoryCritic?.status === 'available' &&
+      model.recommendations.length === 0
+      ? null
+      : normalizedAdvisoryCritic;
     model.contingency = mode === 'success' || mode === 'degraded'
       ? uniqueStrings([
         response?.contingency?.ifPrimaryUnavailable

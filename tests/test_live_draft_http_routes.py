@@ -423,11 +423,22 @@ async def test_structured_profile_route_binds_live_identity_and_saves_allowlist(
 
 
 @pytest.mark.asyncio
-async def test_profile_summary_route_returns_only_safe_metadata(monkeypatch) -> None:
+async def test_profile_summary_route_returns_safe_metadata_and_orphaned_defaults(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         fastmcp_server,
         "list_local_draft_profile_summaries",
         lambda: [profile_summary()],
+    )
+    monkeypatch.setattr(
+        fastmcp_server,
+        "list_local_draft_profile_defaults",
+        lambda: [
+            {"sport": "nfl", "sourceLeagueId": "498589"},
+            {"sport": "f1", "sourceLeagueId": "orphan"},
+        ],
+        raising=False,
     )
 
     response = await fastmcp_server.list_draft_profiles(
@@ -444,10 +455,296 @@ async def test_profile_summary_route_returns_only_safe_metadata(monkeypatch) -> 
     assert response_json(response) == {
         "status": "success",
         "profiles": [profile_summary()],
+        "defaults": [
+            {"sport": "nfl", "sourceLeagueId": "498589"},
+            {"sport": "f1", "sourceLeagueId": "orphan"},
+        ],
     }
     assert b"rankings" not in response.body
     assert b"teamId" not in response.body
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_profile_default_route_sets_and_clears_one_sport(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        fastmcp_server,
+        "set_default_local_draft_profile",
+        lambda sport, source_league_id: calls.append(
+            ("set", sport, source_league_id)
+        )
+        or {"sport": sport, "sourceLeagueId": source_league_id},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        fastmcp_server,
+        "clear_default_local_draft_profile",
+        lambda sport: calls.append(("clear", sport)),
+        raising=False,
+    )
+
+    selected = await fastmcp_server.set_draft_profile_default(
+        request_for(
+            "POST",
+            "/draft-profile-default",
+            payload={
+                "schemaVersion": 1,
+                "sport": "nfl",
+                "sourceLeagueId": "498589",
+            },
+        )
+    )
+    cleared = await fastmcp_server.set_draft_profile_default(
+        request_for(
+            "POST",
+            "/draft-profile-default",
+            payload={
+                "schemaVersion": 1,
+                "sport": "nfl",
+                "sourceLeagueId": None,
+            },
+        )
+    )
+
+    assert response_json(selected) == {
+        "status": "success",
+        "sport": "nfl",
+        "sourceLeagueId": "498589",
+    }
+    assert response_json(cleared) == {
+        "status": "success",
+        "sport": "nfl",
+        "sourceLeagueId": None,
+    }
+    assert calls == [("set", "nfl", "498589"), ("clear", "nfl")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status", "message"),
+    [
+        (
+            fastmcp_server.LocalDraftProfileNotFoundError(
+                "selected local draft profile was not found"
+            ),
+            404,
+            "not found",
+        ),
+        (
+            fastmcp_server.LocalDraftProfileConflictError(
+                "selected local profile belongs to a different sport"
+            ),
+            409,
+            "different sport",
+        ),
+    ],
+)
+async def test_profile_default_route_maps_source_errors(
+    monkeypatch, error, status, message
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "set_default_local_draft_profile",
+        lambda *_args: (_ for _ in ()).throw(error),
+        raising=False,
+    )
+
+    response = await fastmcp_server.set_draft_profile_default(
+        request_for(
+            "POST",
+            "/draft-profile-default",
+            payload={
+                "schemaVersion": 1,
+                "sport": "nfl",
+                "sourceLeagueId": "498589",
+            },
+        )
+    )
+
+    assert response.status_code == status
+    assert message in response_json(response)["message"]
+
+
+@pytest.mark.asyncio
+async def test_profile_default_route_returns_actionable_rollover_conflict(
+    monkeypatch,
+) -> None:
+    message = (
+        "selected local draft profile is for season 2026, not current UTC season "
+        "2027; choose a current-season profile or clear this default"
+    )
+    monkeypatch.setattr(
+        fastmcp_server,
+        "set_default_local_draft_profile",
+        lambda *_args: (_ for _ in ()).throw(
+            fastmcp_server.LocalDraftProfileConflictError(message)
+        ),
+        raising=False,
+    )
+
+    response = await fastmcp_server.set_draft_profile_default(
+        request_for(
+            "POST",
+            "/draft-profile-default",
+            payload={
+                "schemaVersion": 1,
+                "sport": "nfl",
+                "sourceLeagueId": "498589",
+            },
+        )
+    )
+
+    assert response.status_code == 409
+    assert response_json(response)["message"] == message
+
+
+@pytest.mark.asyncio
+async def test_profile_default_route_does_not_expose_private_store_errors(
+    monkeypatch,
+) -> None:
+    private_detail = "secret token at /Users/private/draft-profile-defaults.json"
+    monkeypatch.setattr(
+        fastmcp_server,
+        "set_default_local_draft_profile",
+        lambda *_args: (_ for _ in ()).throw(
+            fastmcp_server.LocalDraftProfileValidationError(private_detail)
+        ),
+        raising=False,
+    )
+
+    response = await fastmcp_server.set_draft_profile_default(
+        request_for(
+            "POST",
+            "/draft-profile-default",
+            payload={
+                "schemaVersion": 1,
+                "sport": "nfl",
+                "sourceLeagueId": "498589",
+            },
+        )
+    )
+
+    assert response.status_code == 400
+    assert response_json(response)["message"] == "Draft profile default store is invalid"
+    assert private_detail not in response.body.decode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changes", "status", "message"),
+    [
+        ({"origin": None}, 403, "Origin required"),
+        ({"origin": "https://evil.example"}, 403, "Origin not allowed"),
+        ({"client": "192.168.1.20"}, 403, "Loopback access required"),
+        ({"ui_header": None}, 403, "UI header required"),
+        ({"content_type": "text/plain"}, 415, "application/json"),
+        ({"content_length": "4097"}, 413, "Payload too large"),
+    ],
+)
+async def test_profile_default_route_rejects_unsafe_transport(
+    monkeypatch, changes, status, message
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "set_default_local_draft_profile",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not mutate")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        fastmcp_server,
+        "clear_default_local_draft_profile",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not mutate")),
+        raising=False,
+    )
+
+    response = await fastmcp_server.set_draft_profile_default(
+        request_for(
+            "POST",
+            "/draft-profile-default",
+            payload={
+                "schemaVersion": 1,
+                "sport": "nfl",
+                "sourceLeagueId": "498589",
+            },
+            **changes,
+        )
+    )
+
+    assert response.status_code == status
+    assert message in response_json(response)["message"]
+
+
+@pytest.mark.asyncio
+async def test_profile_default_route_rejects_oversized_actual_body(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "set_default_local_draft_profile",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not mutate")),
+        raising=False,
+    )
+
+    response = await fastmcp_server.set_draft_profile_default(
+        request_for(
+            "POST",
+            "/draft-profile-default",
+            body=b"{" + b" " * 4_096 + b"}",
+            content_length="1",
+        )
+    )
+
+    assert response.status_code == 413
+    assert response_json(response)["message"] == "Payload too large"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"schemaVersion": 1, "sport": "nfl"}, "fields"),
+        (
+            {
+                "schemaVersion": 1,
+                "sport": "nfl",
+                "sourceLeagueId": "498589",
+                "url": "https://example.test/?token=secret",
+            },
+            "fields",
+        ),
+        (
+            {"schemaVersion": True, "sport": "nfl", "sourceLeagueId": "498589"},
+            "schemaVersion 1",
+        ),
+        (
+            {"schemaVersion": 1, "sport": "../nfl", "sourceLeagueId": "498589"},
+            "sport",
+        ),
+        (
+            {"schemaVersion": 1, "sport": "nfl", "sourceLeagueId": "../498589"},
+            "sourceLeagueId",
+        ),
+    ],
+)
+async def test_profile_default_route_requires_exact_allowlisted_fields(
+    monkeypatch, payload, message
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "set_default_local_draft_profile",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not mutate")),
+        raising=False,
+    )
+
+    response = await fastmcp_server.set_draft_profile_default(
+        request_for("POST", "/draft-profile-default", payload=payload)
+    )
+
+    assert response.status_code == 400
+    serialized = json.dumps(response_json(response))
+    assert message in response_json(response)["message"]
+    assert "secret" not in serialized
 
 
 @pytest.mark.asyncio

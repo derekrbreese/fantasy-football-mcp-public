@@ -426,6 +426,9 @@ def test_missing_risk_feed_is_removed_from_applied_weights() -> None:
     assert result["capabilities"]["injuryStatus"] is False
     assert result["appliedWeights"]["riskNews"] == 0
     assert sum(result["appliedWeights"].values()) == pytest.approx(1)
+    for recommendation in result["recommendations"]:
+        assert recommendation["effectiveWeights"]["riskNews"] == 0
+        assert sum(recommendation["effectiveWeights"].values()) == pytest.approx(1)
 
 
 def test_inferred_team_count_degrades_snake_projections() -> None:

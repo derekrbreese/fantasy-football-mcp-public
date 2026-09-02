@@ -9,6 +9,7 @@ const {
   buildDraftProfileRequest,
   describeProfileFreshness,
   isProfileReuseRecommendationError,
+  listDraftProfileCatalog,
   listDraftProfiles,
   parseDraftProfileFile,
   parseRosterPositions,
@@ -16,6 +17,7 @@ const {
   profileSportLabel,
   saveDraftProfile,
   saveDraftProfileXlsx,
+  setDefaultDraftProfile,
 } = require('../../src/dashboard/draft-profile-client.js');
 
 test('parses a DraftSheets ECR CSV locally and allowlists ranking fields', () => {
@@ -343,6 +345,135 @@ test('lists only safe saved-profile summaries without choosing one', async () =>
   assert.equal(JSON.stringify(profiles).includes('rankings'), false);
 });
 
+test('lists a strict profile catalog with explicit per-sport defaults', async () => {
+  let captured;
+  const catalog = await listDraftProfileCatalog({
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'success',
+          profiles: [{
+            sport: 'f1',
+            leagueId: '498589',
+            importedAt: '2026-09-01T12:34:56Z',
+            asOf: '2026-08-31',
+            format: 'draftsheets-2026',
+            rankingCount: 500,
+          }],
+          defaults: [{ sport: 'f1', sourceLeagueId: '498589' }],
+          privatePath: '/Users/private/draft-profile-defaults.json',
+        }),
+      };
+    },
+  });
+
+  assert.equal(captured.url, '/draft-profiles');
+  assert.equal(captured.options.method, 'GET');
+  assert.deepEqual(catalog, {
+    profiles: [{
+      sport: 'f1',
+      leagueId: '498589',
+      importedAt: '2026-09-01T12:34:56.000Z',
+      asOf: '2026-08-31',
+      format: 'draftsheets-2026',
+      rankingCount: 500,
+    }],
+    defaults: [{ sport: 'f1', sourceLeagueId: '498589' }],
+  });
+  assert.equal(JSON.stringify(catalog).includes('privatePath'), false);
+});
+
+test('sets and clears only a canonical same-origin sport default', async () => {
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    const request = JSON.parse(options.body);
+    requests.push({ url, options, request });
+    return {
+      ok: true,
+      json: async () => ({
+        status: 'success',
+        sport: request.sport,
+        sourceLeagueId: request.sourceLeagueId,
+      }),
+    };
+  };
+
+  assert.deepEqual(
+    await setDefaultDraftProfile('f1', '498589', { fetchImpl }),
+    { status: 'success', sport: 'f1', sourceLeagueId: '498589' },
+  );
+  assert.deepEqual(
+    await setDefaultDraftProfile('f1', null, { fetchImpl }),
+    { status: 'success', sport: 'f1', sourceLeagueId: null },
+  );
+  for (const captured of requests) {
+    assert.equal(captured.url, '/draft-profile-default');
+    assert.equal(captured.options.method, 'POST');
+    assert.equal(captured.options.cache, 'no-store');
+    assert.equal(captured.options.credentials, 'omit');
+    assert.equal(captured.options.headers['Content-Type'], 'application/json');
+    assert.equal(captured.options.headers['X-Fantasy-Draft-UI'], '1');
+    assert.deepEqual(Object.keys(captured.request).sort(), [
+      'schemaVersion', 'sourceLeagueId', 'sport',
+    ]);
+  }
+  assert.deepEqual(requests.map(({ request }) => request), [
+    { schemaVersion: 1, sport: 'f1', sourceLeagueId: '498589' },
+    { schemaVersion: 1, sport: 'f1', sourceLeagueId: null },
+  ]);
+  assert.equal(JSON.stringify(requests).includes('picks'), false);
+  assert.equal(JSON.stringify(requests).includes('auth'), false);
+});
+
+test('default profile client rejects unsafe inputs and mismatched confirmations', async () => {
+  await assert.rejects(
+    setDefaultDraftProfile('f1', '498589', {
+      endpoint: 'https://example.test/draft-profile-default',
+      fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+    }),
+    /same-origin/i,
+  );
+  await assert.rejects(
+    setDefaultDraftProfile('https://private.example', '498589', {
+      fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+    }),
+    /sport/i,
+  );
+  await assert.rejects(
+    setDefaultDraftProfile('f1', '498589', {
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({ status: 'success', sport: 'nfl', sourceLeagueId: '498589' }),
+      }),
+    }),
+    /sport/i,
+  );
+});
+
+test('accepts a safe orphan default pointer so the dashboard can recover it', async () => {
+  const catalog = await listDraftProfileCatalog({
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        status: 'success',
+        profiles: [{
+          sport: 'f1',
+          leagueId: '498589',
+          importedAt: '2026-09-01T12:34:56Z',
+          format: 'json',
+          rankingCount: 250,
+        }],
+        defaults: [{ sport: 'f1', sourceLeagueId: '999' }],
+      }),
+    }),
+  });
+
+  assert.deepEqual(catalog.defaults, [{ sport: 'f1', sourceLeagueId: '999' }]);
+  assert.equal(catalog.profiles.some((profile) => profile.leagueId === '999'), false);
+});
+
 test('labels reusable profiles with validated sport and source or import date', () => {
   assert.equal(profileChoiceLabel({
     sport: 'f1',
@@ -475,7 +606,7 @@ test('saved-profile reuse rejects unsafe endpoints, invalid summaries, and chang
   );
 });
 
-test('bounds and clears saved-profile list and bind timeouts', async () => {
+test('bounds and clears saved-profile list, bind, and default timeouts', async () => {
   class FakeAbortSignal {
     constructor() {
       this.aborted = false;
@@ -527,6 +658,7 @@ test('bounds and clears saved-profile list and bind timeouts', async () => {
 
   await expectTimeout((options) => listDraftProfiles(options));
   await expectTimeout((options) => bindDraftProfile('498589', '777777', options));
+  await expectTimeout((options) => setDefaultDraftProfile('f1', '498589', options));
 });
 
 test('recognizes both Yahoo fallback failures that explicit profile reuse can recover', () => {
@@ -618,13 +750,52 @@ test('dashboard exposes a local import form while retaining recommendation contr
   assert.match(html, /id="profile-source-status"/);
   assert.match(html, /id="draft-profile-reuse-form"/);
   assert.match(html, /id="profile-source-league"/);
-  assert.match(html, /Use for this mock/);
+  assert.match(html, /Use for this draft/);
   assert.match(html, /rankings and league settings only/i);
+  assert.match(html, /id="draft-profile-default-form"/);
+  assert.match(html, /id="profile-default-sport"/);
+  assert.match(html, /id="profile-default-source"/);
+  assert.match(html, /id="clear-profile-default-button"/);
+  assert.match(html, /future profileless Yahoo drafts/i);
+  assert.match(html, /including real drafts and mocks/i);
+  assert.match(html, /Exact profiles are never overwritten/i);
+  assert.match(html, /picks are never copied/i);
+  assert.doesNotMatch(html, /automatically detect(?:s|ed)? (?:an )?(?:instant )?mock/i);
   assert.match(html, /DraftSheets \.xlsx/);
   assert.match(html, /id="recommendation-form"/);
   assert.match(html, /draft-profile-client\.js/);
-  assert.match(appSource, /listDraftProfiles\(/);
+  assert.match(appSource, /listDraftProfileCatalog\(/);
   assert.match(appSource, /bindDraftProfile\(/);
+  assert.match(appSource, /setDefaultDraftProfile\(/);
+  assert.doesNotMatch(appSource, /detect[^\n]{0,40}(?:instant )?mock/i);
+  const orphanGuard = appSource.indexOf('if (currentDefault && !sourceProfile)');
+  const validDefaultGuard = appSource.indexOf('if (currentDefault && sourceProfile)', orphanGuard);
+  const orphanBranch = appSource.slice(orphanGuard, validDefaultGuard);
+  assert.ok(orphanGuard > 0);
+  assert.match(orphanBranch, /source profile is missing/i);
+  assert.match(orphanBranch, /Clear it or choose another saved profile/i);
+  assert.match(orphanBranch, /'error'/);
+  const defaultReadyBranch = appSource.slice(
+    validDefaultGuard,
+    appSource.indexOf('function renderProfileDefaultChoices', validDefaultGuard),
+  );
+  assert.match(
+    defaultReadyBranch,
+    /describeProfileFreshness\(\s*sourceProfile\.asOf \|\| sourceProfile\.importedAt,?\s*\)/,
+  );
+  assert.doesNotMatch(defaultReadyBranch, /setProfileDefaultStatus\([\s\S]{0,500}'fresh'/);
+  assert.match(
+    appSource,
+    /new Set\(\[[\s\S]{0,160}savedProfiles\.map[\s\S]{0,160}savedProfileDefaults\.map/,
+  );
+  assert.match(
+    appSource,
+    /savedProfiles\.length === 0 && savedProfileDefaults\.length === 0/,
+  );
+  assert.match(
+    appSource,
+    /clear-profile-default-button'[\s\S]{0,120}disabled = profileControlsBusy \|\|\s*!currentDefault/,
+  );
   assert.match(appSource, /profileChoiceLabel\(profile\)/);
   assert.match(appSource, /profileSportLabel\(sourceProfile\.sport\)/);
   assert.doesNotMatch(appSource, /sourceProfile\.sport\.toUpperCase\(\)/);

@@ -166,6 +166,7 @@
         count: 5,
         rankingCount: 250,
         simulations: 256,
+        timeoutMs: 30000,
         signal: token.signal,
       });
       const currentSession = await draftStorage.getSession(selected);

@@ -91,7 +91,7 @@ The popup displays picks and recorder health, not recommendations, and it cannot
 
 The sidebar shows up to five recommendations beside Yahoo. It selects a league only from the active draft tab or an explicit saved-league choice; it never silently chooses the newest saved session. After the initial request, a newer pick for that exact league cancels stale work, debounces duplicate events, and refreshes automatically. Another league's storage updates do not affect it.
 
-Cards show roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, and explicitly uncalibrated confidence and return/simulation probabilities. Stale state, inferred team counts, unresolved player identities, unavailable roster settings, and unknown injury/news data are visibly degraded.
+Cards show roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, and explicitly uncalibrated confidence and return/simulation probabilities. Stale state, inferred team counts, unresolved player identities, unavailable roster settings, and unknown injury/news data are visibly degraded. When the server's optional Databricks critic is enabled and available, a separate advisory-only summary appears after the unchanged deterministic recommendations.
 
 ### Full dashboard
 
@@ -120,16 +120,18 @@ With an exact local profile, recommendations use the imported rankings and setti
 
 ## Instant Mock Drafts and profile reuse
 
-Yahoo Instant Mock Drafts use the normal scan/sync flow. Scan first and bind a local profile before requesting advice. If the dashboard says the Yahoo league identity could not be resolved, use the local-profile path; refreshing OAuth is not a fix for a mock that Yahoo's Fantasy API does not list as a league.
+Yahoo Instant Mock Drafts use the normal scan/sync flow. Scan first and bind a local profile or configure a per-sport default before requesting advice. If the dashboard says the Yahoo league identity could not be resolved, use the local-profile path; refreshing OAuth is not a fix for a mock that Yahoo's Fantasy API does not list as a league.
 
 Each newly created mock has a new identity. To reuse rankings without uploading them again:
 
 1. Open and scan the new mock.
 2. Open **Full dashboard** from the new mock's popup.
 3. Under **Reuse a saved profile**, explicitly choose the prior source.
-4. Select **Use for this mock & refresh**.
+4. Select **Use for this draft & refresh**.
 
-No source is chosen automatically. The server validates the sport and copies only sanitized rankings, roster settings, and provenance. It never copies or merges either mock's picks.
+For repeated mocks, the dashboard's **Default for future drafts** form can store one explicit saved source per sport. A first recommendation for a new profileless recorder identity binds that source before Yahoo fallback. Existing exact profiles always win, changing or clearing the default affects only future unbound drafts, and the server copies only sanitized rankings, roster settings, and provenance—never picks. The source must match the current UTC year when selected and when bound; replace or clear it after a season rollover.
+
+Yahoo uses the same draft-client URL shape for mocks and real drafts, so the extension cannot safely infer mock status without retaining unreliable page data. The sport default therefore applies to future profileless real drafts as well as mocks. The dashboard labels that scope; keep manual binding if your Yahoo leagues use different settings.
 
 ## Reset versus ledger repair
 
@@ -165,6 +167,14 @@ When `FANTASY_PROS_API` is set on the server, recommendation cards can show Fant
 The first FantasyPros-enabled recommendation creates and populates the private SQLite cache automatically; there is no separate prefetch or migration step. A complete normalized catalog snapshot lasts 24 hours; a provider-limited partial catalog and injury/news snapshots are retried after five minutes. Fresh snapshots survive server restarts. If an expired snapshot cannot refresh, last-known-good identity data may be retained, but recommendation risk remains unknown and stale headlines are not shown as recent news.
 
 See [FantasyPros injury/news cache](../README.md#fantasypros-injurynews-cache) for request limits, terms/attribution, cache contents, and privacy behavior.
+
+## Optional Databricks advisory critic
+
+The sidebar and dashboard can render the server's optional Databricks advisory section, but the extension never authenticates to Databricks and stores no model response or credential. Install and enable it on the local server as described in [Databricks advisory critic](../README.md#databricks-advisory-critic); it remains disabled by default.
+
+The deterministic recommendation order and scores are authoritative. The advisory model cannot reorder candidates, select or draft a player, or feed values back into scoring. It is skipped for an incomplete or defective authoritative ledger. Stale state can still yield degraded deterministic candidates; staleness is sent as a bounded quality flag and remains visibly degraded in the response. Disabled/skipped output is omitted; provider failure is shown as bounded unavailable context while the deterministic cards remain usable.
+
+Only an identity-free allowlist leaves the local server: anonymous candidate ordinal and position, overall/component scores, explicitly uncalibrated return probability, normalized risk status, aggregate roster position counts, recent pick positions, current/next overall-pick numbers, and bounded quality flags. It excludes player names/keys, league/session/team IDs, the pick ledger, news/headlines, URLs, browser fields, and credentials. Results use a bounded in-memory-only cache and are rendered as inert text after the recommendation cards.
 
 ## Agent handoff
 
@@ -207,7 +217,7 @@ The current extension avoids Firefox's content-script Promise boundary by serial
 
 - Open and rescan the exact active tab rather than choosing a latest saved draft.
 - Open the dashboard from that popup so its league ID is selected.
-- For an Instant Mock Draft or unavailable Yahoo API, import or explicitly bind a saved local profile, then refresh. This path should make zero Yahoo calls.
+- For an Instant Mock Draft or unavailable Yahoo API, import, explicitly bind, or configure a saved local profile as the sport default, then refresh. This path should make zero Yahoo calls.
 - For a normal league using Yahoo fallback, first verify `ff_get_leagues` returns the matching league and authenticated team.
 
 ### Popup reports ledger defects
@@ -227,6 +237,7 @@ Yahoo may have changed its layout. Select **Save diagnostics**. The report conta
 - Loopback endpoints allowlist fields, validate the exact session, cap payloads, restrict origins, and return recommendation responses with `Cache-Control: no-store`.
 - Server-side draft/profile/cache files use user-only permissions.
 - The extension stores no Yahoo credentials, cookies, OAuth parameters, full page locations, or arbitrary browser fields.
+- Optional Databricks review receives no player identity, league/session/team identity, ledger, headline, URL, or credential; it cannot mutate recommendation order or scores.
 - Recommendations never draft a player or inject controls into Yahoo.
 
 ## Store preparation

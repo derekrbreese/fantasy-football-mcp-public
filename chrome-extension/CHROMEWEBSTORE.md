@@ -30,7 +30,7 @@ Required to run the content script only on Yahoo Fantasy Sports draft-client pag
 
 ### Host access: `http://127.0.0.1/*`
 
-Required to send sanitized draft context to the user's optional fantasy-football MCP server on the same computer and open its local recommendation UI. The extension uses `http://127.0.0.1:8765/draft-sync`, the explicitly confirmed exact-session `http://127.0.0.1:8765/draft-reset`, `http://127.0.0.1:8765/draft-recommendation`, and `http://127.0.0.1:8765/draft-dashboard` plus packaged dashboard assets served from that loopback application. The dashboard also uses loopback-only profile import routes and the explicit `/draft-profiles` plus `/draft-profile-bind` flow to reuse sanitized rankings and roster settings for a separately selected mock identity. Only safe profile summaries and the chosen source/target league IDs cross that UI boundary; recorded picks are never copied by profile reuse. Failed ordinary sync continues to allow browser-only recording and manual export; reset fails closed without deleting browser state when the local server cannot confirm it.
+Required to send sanitized draft context to the user's optional fantasy-football MCP server on the same computer and open its local recommendation UI. The extension uses `http://127.0.0.1:8765/draft-sync`, the explicitly confirmed exact-session `http://127.0.0.1:8765/draft-reset`, `http://127.0.0.1:8765/draft-recommendation`, and `http://127.0.0.1:8765/draft-dashboard` plus packaged dashboard assets served from that loopback application. The dashboard also uses loopback-only profile import routes, `/draft-profiles`, `/draft-profile-bind`, and `/draft-profile-default` to reuse sanitized rankings and roster settings. Only safe profile summaries, an explicit per-sport default pointer, and chosen source/target league IDs cross that UI boundary; recorded picks are never copied by profile reuse. Failed ordinary sync continues to allow browser-only recording and manual export; reset fails closed without deleting browser state when the local server cannot confirm it.
 
 ## Data-use disclosure
 
@@ -39,7 +39,7 @@ Required to send sanitized draft context to the user's optional fantasy-football
 - **Transmission:** Sanitized draft context and allowlisted recommendation settings are sent only to `127.0.0.1`, the loopback interface. There are no developer-operated endpoints, analytics, advertising, or third-party requests.
 - **Sale or sharing:** None.
 - **Authentication data:** Not collected or stored.
-- **User controls:** Users can explicitly reset only the exact active draft from the popup while preserving its separately imported profile. In the local dashboard they can explicitly choose a saved ranking/settings profile for a new mock; no profile is selected or rebound automatically, and pick ledgers remain isolated. Users can remove all extension data by uninstalling the extension or clearing its site/extension storage.
+- **User controls:** Users can explicitly reset only the exact active draft from the popup while preserving its separately imported profile. In the local dashboard they can bind one saved ranking/settings profile to an exact draft, or explicitly set and clear one per-sport default for future profileless drafts. Exact profiles always win and pick ledgers remain isolated. Users can remove all extension data by uninstalling the extension or clearing its site/extension storage.
 
 ## Remote code
 

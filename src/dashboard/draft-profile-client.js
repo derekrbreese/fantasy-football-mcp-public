@@ -7,6 +7,7 @@
   const XLSX_ENDPOINT = '/draft-profile-xlsx';
   const PROFILES_ENDPOINT = '/draft-profiles';
   const PROFILE_BIND_ENDPOINT = '/draft-profile-bind';
+  const PROFILE_DEFAULT_ENDPOINT = '/draft-profile-default';
   const DEFAULT_PROFILE_REQUEST_TIMEOUT_MS = 5000;
   const MIN_PROFILE_REQUEST_TIMEOUT_MS = 250;
   const MAX_PROFILE_REQUEST_TIMEOUT_MS = 15000;
@@ -440,7 +441,23 @@
     }
   }
 
-  async function listDraftProfiles(options = {}) {
+  function safeProfileDefaults(values) {
+    if (values === undefined) return [];
+    if (!Array.isArray(values)) throw new Error('Saved profile defaults are invalid.');
+    const sports = new Set();
+    return values.map((value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('Saved profile default is invalid.');
+      }
+      const sport = safeSport(value.sport);
+      const sourceLeagueId = safeLeagueId(value.sourceLeagueId);
+      if (sports.has(sport)) throw new Error('Saved profile defaults contain a duplicate sport.');
+      sports.add(sport);
+      return { sport, sourceLeagueId };
+    });
+  }
+
+  async function listDraftProfileCatalog(options = {}) {
     const endpoint = options.endpoint || PROFILES_ENDPOINT;
     if (endpoint !== PROFILES_ENDPOINT) throw new Error('Saved profiles endpoint must be same-origin.');
     const fetchImpl = options.fetchImpl || globalScope.fetch?.bind(globalScope);
@@ -457,7 +474,50 @@
       if (result.status !== 'success' || !Array.isArray(result.profiles)) {
         throw new Error('Saved profile list did not confirm success.');
       }
-      return result.profiles.map(safeProfileSummary);
+      const profiles = result.profiles.map(safeProfileSummary);
+      return {
+        profiles,
+        defaults: safeProfileDefaults(result.defaults),
+      };
+    });
+  }
+
+  async function listDraftProfiles(options = {}) {
+    return (await listDraftProfileCatalog(options)).profiles;
+  }
+
+  async function setDefaultDraftProfile(sportValue, sourceLeagueIdValue, options = {}) {
+    const endpoint = options.endpoint || PROFILE_DEFAULT_ENDPOINT;
+    if (endpoint !== PROFILE_DEFAULT_ENDPOINT) {
+      throw new Error('Draft profile default endpoint must be same-origin.');
+    }
+    const sport = safeSport(sportValue);
+    const sourceLeagueId = sourceLeagueIdValue === null
+      ? null
+      : safeLeagueId(sourceLeagueIdValue);
+    const fetchImpl = options.fetchImpl || globalScope.fetch?.bind(globalScope);
+    if (!fetchImpl) throw new Error('Fetch is unavailable.');
+    return withProfileRequestTimeout(options, 'Draft profile default', async (signal) => {
+      const response = await fetchImpl(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Fantasy-Draft-UI': '1',
+        },
+        body: JSON.stringify({ schemaVersion: 1, sport, sourceLeagueId }),
+        cache: 'no-store',
+        credentials: 'omit',
+        signal,
+      });
+      const result = await responseObject(response, 'Draft profile default');
+      if (
+        result.status !== 'success' ||
+        result.sport !== sport ||
+        result.sourceLeagueId !== sourceLeagueId
+      ) {
+        throw new Error('Draft profile default response did not match the requested sport or source profile.');
+      }
+      return { status: 'success', sport, sourceLeagueId };
     });
   }
 
@@ -571,6 +631,7 @@
     buildDraftProfileRequest,
     describeProfileFreshness,
     isProfileReuseRecommendationError,
+    listDraftProfileCatalog,
     listDraftProfiles,
     parseDraftProfileFile,
     parseRosterPositions,
@@ -578,6 +639,7 @@
     profileSportLabel,
     saveDraftProfile,
     saveDraftProfileXlsx,
+    setDefaultDraftProfile,
   };
   globalScope.YahooDraftProfileClient = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

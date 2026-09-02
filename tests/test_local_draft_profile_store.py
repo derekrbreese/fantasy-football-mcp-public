@@ -10,12 +10,17 @@ import pytest
 import src.services.local_draft_profile_store as profile_store
 from src.services.local_draft_profile_store import (
     LocalDraftProfileValidationError,
+    bind_default_local_draft_profile,
+    clear_default_local_draft_profile,
+    list_local_draft_profile_defaults,
+    load_default_local_draft_profile,
     load_local_draft_profile,
     local_draft_profile_revision,
     profile_from_draftsheets_rows,
     profile_from_draftsheets_xlsx,
     sanitize_local_draft_profile,
     save_local_draft_profile,
+    set_default_local_draft_profile,
 )
 
 
@@ -75,6 +80,16 @@ def local_profile(league_id: str = "498589", team_id: str = "6") -> dict:
         },
         "credentials": "secret",
     }
+
+
+def local_profile_for_season(
+    season: int, league_id: str = "498589", team_id: str = "6"
+) -> dict:
+    profile = local_profile(league_id, team_id)
+    profile["season"] = season
+    profile["importedAt"] = f"{season}-09-01T16:45:00-07:00"
+    profile["provenance"]["asOf"] = f"{season}-08-31"
+    return profile
 
 
 def test_sanitizes_canonical_profile_and_strips_unknown_fields() -> None:
@@ -301,6 +316,306 @@ def test_explicit_bind_rejects_missing_cross_sport_and_existing_target_profiles(
     assert profile_store.bind_local_draft_profile(
         "111", draft_identity("111", "3"), path
     ) == load_local_draft_profile(draft_identity("111", "3"), path)
+
+
+def test_sets_lists_loads_and_clears_one_default_per_sport(tmp_path: Path) -> None:
+    profile_path = tmp_path / "private" / "draft-profiles.json"
+    defaults_path = tmp_path / "private" / "draft-profile-defaults.json"
+    save_local_draft_profile(local_profile("111", "3"), profile_path)
+
+    selected = set_default_local_draft_profile(
+        "nfl",
+        "111",
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+    )
+
+    assert selected == {"sport": "nfl", "sourceLeagueId": "111"}
+    assert load_default_local_draft_profile("nfl", defaults_path) == selected
+    assert load_default_local_draft_profile("f1", defaults_path) is None
+    assert list_local_draft_profile_defaults(defaults_path) == [selected]
+    assert json.loads(defaults_path.read_text(encoding="utf-8")) == {
+        "schemaVersion": 1,
+        "defaults": [selected],
+    }
+    assert stat.S_IMODE(defaults_path.stat().st_mode) == 0o600
+
+    assert clear_default_local_draft_profile("nfl", defaults_path) is True
+    assert clear_default_local_draft_profile("nfl", defaults_path) is False
+    assert list_local_draft_profile_defaults(defaults_path) == []
+
+
+def test_default_selection_rejects_missing_and_cross_sport_sources(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "draft-profiles.json"
+    defaults_path = tmp_path / "draft-profile-defaults.json"
+    save_local_draft_profile(local_profile("111", "3"), profile_path)
+
+    with pytest.raises(profile_store.LocalDraftProfileNotFoundError, match="not found"):
+        set_default_local_draft_profile(
+            "nfl",
+            "999",
+            profile_path=profile_path,
+            defaults_path=defaults_path,
+        )
+    with pytest.raises(profile_store.LocalDraftProfileConflictError, match="sport"):
+        set_default_local_draft_profile(
+            "f1",
+            "111",
+            profile_path=profile_path,
+            defaults_path=defaults_path,
+        )
+    assert not defaults_path.exists()
+
+
+@pytest.mark.parametrize("source_season", [2025, 2027])
+def test_default_selection_rejects_stale_and_future_source_seasons(
+    tmp_path: Path, source_season: int
+) -> None:
+    profile_path = tmp_path / "draft-profiles.json"
+    defaults_path = tmp_path / "draft-profile-defaults.json"
+    save_local_draft_profile(
+        local_profile_for_season(source_season, "111", "3"), profile_path
+    )
+
+    with pytest.raises(
+        profile_store.LocalDraftProfileConflictError,
+        match=rf"season {source_season}.*current UTC season 2026",
+    ):
+        set_default_local_draft_profile(
+            "nfl",
+            "111",
+            profile_path=profile_path,
+            defaults_path=defaults_path,
+            current_season=2026,
+        )
+
+    assert not defaults_path.exists()
+
+
+@pytest.mark.parametrize("source_season", [2025, 2027])
+def test_default_bind_rejects_stale_and_future_source_seasons_without_writing(
+    tmp_path: Path, source_season: int
+) -> None:
+    profile_path = tmp_path / "draft-profiles.json"
+    defaults_path = tmp_path / "draft-profile-defaults.json"
+    save_local_draft_profile(
+        local_profile_for_season(source_season, "111", "3"), profile_path
+    )
+    set_default_local_draft_profile(
+        "nfl",
+        "111",
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+        current_season=source_season,
+    )
+    target = draft_identity("222", "9")
+
+    with pytest.raises(
+        profile_store.LocalDraftProfileConflictError,
+        match=rf"season {source_season}.*current UTC season 2026",
+    ):
+        bind_default_local_draft_profile(
+            target,
+            profile_path=profile_path,
+            defaults_path=defaults_path,
+            current_season=2026,
+        )
+
+    assert load_local_draft_profile(target, profile_path) is None
+
+
+def test_default_bind_is_exact_idempotent_and_never_copies_picks(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "draft-profiles.json"
+    defaults_path = tmp_path / "draft-profile-defaults.json"
+    source = save_local_draft_profile(local_profile("111", "3"), profile_path)
+    set_default_local_draft_profile(
+        "nfl",
+        "111",
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+    )
+    target = draft_identity("222", "9")
+
+    bound = bind_default_local_draft_profile(
+        target,
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+    )
+
+    assert bound is not None
+    assert bound["draft"] == target
+    assert bound["rankings"] == source["rankings"]
+    assert bound["leagueSettings"] == source["leagueSettings"]
+    assert "picks" not in json.dumps(bound)
+    assert bind_default_local_draft_profile(
+        target,
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+    ) == bound
+
+    no_default_target = draft_identity("333", "7")
+    clear_default_local_draft_profile("nfl", defaults_path)
+    assert bind_default_local_draft_profile(
+        no_default_target,
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+    ) is None
+
+
+def test_orphaned_default_source_fails_closed_without_writing_target(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "draft-profiles.json"
+    defaults_path = tmp_path / "draft-profile-defaults.json"
+    save_local_draft_profile(local_profile("111", "3"), profile_path)
+    set_default_local_draft_profile(
+        "nfl",
+        "111",
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+    )
+    profile_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(profile_store.LocalDraftProfileNotFoundError, match="source"):
+        bind_default_local_draft_profile(
+            draft_identity("222", "9"),
+            profile_path=profile_path,
+            defaults_path=defaults_path,
+        )
+
+    assert json.loads(profile_path.read_text(encoding="utf-8")) == {}
+
+
+def test_existing_exact_profile_wins_over_a_different_default(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "draft-profiles.json"
+    defaults_path = tmp_path / "draft-profile-defaults.json"
+    save_local_draft_profile(local_profile("111", "3"), profile_path)
+    existing = local_profile("222", "9")
+    existing["importedAt"] = "2026-09-01T16:46:00-07:00"
+    existing["rankings"][0]["name"] = "Existing Exact Player"
+    saved_existing = save_local_draft_profile(existing, profile_path)
+    set_default_local_draft_profile(
+        "nfl",
+        "111",
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+    )
+
+    assert bind_default_local_draft_profile(
+        draft_identity("222", "9"),
+        profile_path=profile_path,
+        defaults_path=defaults_path,
+        current_season=2027,
+    ) == saved_existing
+    assert load_local_draft_profile(
+        draft_identity("222", "9"), profile_path
+    ) == saved_existing
+
+
+def test_default_store_permissions_and_custom_parent_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private_profile_path = tmp_path / "private" / "draft-profiles.json"
+    private_defaults_path = tmp_path / "private" / "draft-profile-defaults.json"
+    save_local_draft_profile(local_profile("111", "3"), private_profile_path)
+    set_default_local_draft_profile(
+        "nfl",
+        "111",
+        profile_path=private_profile_path,
+        defaults_path=private_defaults_path,
+    )
+    assert stat.S_IMODE(private_defaults_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(private_defaults_path.stat().st_mode) == 0o600
+
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    shared.chmod(0o755)
+    profile_path = shared / "profiles.json"
+    defaults_path = shared / "defaults.json"
+    save_local_draft_profile(local_profile("222", "4"), profile_path)
+    monkeypatch.setenv(
+        "FANTASY_FOOTBALL_DRAFT_PROFILE_DEFAULTS_PATH", str(defaults_path)
+    )
+    set_default_local_draft_profile("nfl", "222", profile_path=profile_path)
+
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+    assert stat.S_IMODE(defaults_path.stat().st_mode) == 0o600
+
+
+def test_default_store_tightens_app_directory_and_rejects_default_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH", raising=False)
+    monkeypatch.delenv(
+        "FANTASY_FOOTBALL_DRAFT_PROFILE_DEFAULTS_PATH", raising=False
+    )
+    parent = tmp_path / ".fantasy-football-mcp"
+    profile_path = parent / "draft-profiles.json"
+    defaults_path = parent / "draft-profile-defaults.json"
+    monkeypatch.setattr(profile_store, "DEFAULT_PROFILE_STORE_PATH", profile_path)
+    monkeypatch.setattr(
+        profile_store, "DEFAULT_PROFILE_DEFAULTS_STORE_PATH", defaults_path
+    )
+    save_local_draft_profile(local_profile("111", "3"))
+    parent.chmod(0o755)
+
+    set_default_local_draft_profile("nfl", "111")
+
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(defaults_path.stat().st_mode) == 0o600
+
+    real_parent = tmp_path / "real"
+    real_profile_path = real_parent / "draft-profiles.json"
+    save_local_draft_profile(local_profile("222", "4"), real_profile_path)
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    monkeypatch.setattr(
+        profile_store,
+        "DEFAULT_PROFILE_STORE_PATH",
+        linked_parent / "draft-profiles.json",
+    )
+    monkeypatch.setattr(
+        profile_store,
+        "DEFAULT_PROFILE_DEFAULTS_STORE_PATH",
+        linked_parent / "draft-profile-defaults.json",
+    )
+
+    with pytest.raises(LocalDraftProfileValidationError, match="symbolic link"):
+        set_default_local_draft_profile("nfl", "222")
+
+
+def test_default_store_atomic_failure_preserves_existing_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile_path = tmp_path / "draft-profiles.json"
+    defaults_path = tmp_path / "draft-profile-defaults.json"
+    save_local_draft_profile(local_profile("111", "3"), profile_path)
+    second = local_profile("222", "4")
+    second["importedAt"] = "2026-09-01T16:46:00-07:00"
+    save_local_draft_profile(second, profile_path)
+    set_default_local_draft_profile(
+        "nfl", "111", profile_path=profile_path, defaults_path=defaults_path
+    )
+    original = defaults_path.read_bytes()
+
+    monkeypatch.setattr(
+        profile_store.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("simulated replace failure")),
+    )
+    with pytest.raises(OSError, match="simulated"):
+        set_default_local_draft_profile(
+            "nfl", "222", profile_path=profile_path, defaults_path=defaults_path
+        )
+
+    assert defaults_path.read_bytes() == original
+    assert not list(defaults_path.parent.glob(".draft-profile-defaults-*.json"))
 
 
 def test_rejects_cross_team_overwrite_and_stale_import(tmp_path: Path) -> None:

@@ -65,6 +65,62 @@
     return card;
   }
 
+  function renderAdvisoryCritic(documentRef, critic) {
+    if (
+      !critic ||
+      critic.advisoryOnly !== true ||
+      !['available', 'unavailable'].includes(critic.status)
+    ) return null;
+
+    const section = element(
+      documentRef,
+      'section',
+      `notice notice--quality advisory-critic advisory-critic--${critic.status}`,
+    );
+    section.setAttribute('aria-label', 'AI critic advisory');
+    section.appendChild(element(documentRef, 'h2', '', 'AI critic — advisory only'));
+    section.appendChild(element(
+      documentRef,
+      'p',
+      'advisory-critic-disclaimer',
+      'Optional AI commentary does not change deterministic recommendation order, scores, or confidence.',
+    ));
+
+    if (critic.status === 'unavailable') {
+      section.appendChild(element(
+        documentRef,
+        'p',
+        'advisory-critic-message',
+        critic.unavailableReason?.message || 'The optional AI critic is unavailable.',
+      ));
+      return section;
+    }
+
+    section.appendChild(element(
+      documentRef,
+      'p',
+      'advisory-critic-source',
+      `${critic.provider} · ${critic.model}`,
+    ));
+    section.appendChild(element(documentRef, 'p', 'advisory-critic-summary', critic.summary));
+    if (critic.cautions?.length) {
+      const cautions = element(documentRef, 'section', 'advisory-critic-cautions');
+      cautions.appendChild(element(documentRef, 'h3', '', 'AI cautions'));
+      cautions.appendChild(list(documentRef, critic.cautions, 'advisory-critic-caution-list'));
+      section.appendChild(cautions);
+    }
+    const latency = typeof critic.latencyMs === 'number'
+      ? `${critic.latencyMs} ms`
+      : 'latency unavailable';
+    section.appendChild(element(
+      documentRef,
+      'p',
+      'advisory-critic-meta',
+      `${critic.cached ? 'Cached' : 'Live'} response · ${latency}`,
+    ));
+    return section;
+  }
+
   function renderRecommendationView(root, model, options = {}) {
     const documentRef = options.document || globalScope.document;
     if (!documentRef || !root) throw new Error('A document and root element are required.');
@@ -103,6 +159,9 @@
       recommendationSection.appendChild(element(documentRef, 'p', 'empty-message', model.emptyMessage));
     }
     root.appendChild(recommendationSection);
+
+    const advisoryCritic = renderAdvisoryCritic(documentRef, model.advisoryCritic);
+    if (advisoryCritic) root.appendChild(advisoryCritic);
 
     if (model.contingency.length) {
       const contingency = element(documentRef, 'section', 'contingency');

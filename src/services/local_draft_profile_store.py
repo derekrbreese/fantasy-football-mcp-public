@@ -24,7 +24,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 DEFAULT_PROFILE_STORE_PATH = Path.home() / ".fantasy-football-mcp" / "draft-profiles.json"
+DEFAULT_PROFILE_DEFAULTS_STORE_PATH = (
+    Path.home() / ".fantasy-football-mcp" / "draft-profile-defaults.json"
+)
 MAX_CANDIDATES = 500
+MAX_PROFILE_DEFAULTS = 32
 MAX_ECR_ROWS = 2_000
 MAX_SCORING_ROWS = 100
 MAX_XLSX_BYTES = 8 * 1024 * 1024
@@ -136,6 +140,19 @@ def _profile_store_path(path: str | Path | None = None) -> Path:
     return Path(configured).expanduser()
 
 
+def _profile_defaults_store_path(
+    path: str | Path | None = None,
+    *,
+    profile_path: str | Path | None = None,
+) -> Path:
+    configured = path or os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_DEFAULTS_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    if profile_path is not None or os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH"):
+        return _profile_store_path(profile_path).with_name("draft-profile-defaults.json")
+    return DEFAULT_PROFILE_DEFAULTS_STORE_PATH
+
+
 def _safe_string(value: Any, field: str, maximum: int = 100) -> str:
     if not isinstance(value, str):
         raise LocalDraftProfileValidationError(f"{field} must be a non-empty string")
@@ -217,6 +234,24 @@ def _normalize_timestamp(value: Any, field: str) -> str:
 
 def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _resolve_current_season(current_season: int | None) -> int:
+    if current_season is None:
+        return datetime.now(timezone.utc).year
+    return _strict_integer(current_season, "current_season", 2020, 2100)
+
+
+def _require_current_default_profile_season(
+    profile: Mapping[str, Any], current_season: int | None
+) -> None:
+    expected = _resolve_current_season(current_season)
+    actual = profile["season"]
+    if actual != expected:
+        raise LocalDraftProfileConflictError(
+            f"selected local draft profile is for season {actual}, not current UTC "
+            f"season {expected}; choose a current-season profile or clear this default"
+        )
 
 
 def _sanitize_draft_identity(value: Any) -> dict[str, str]:
@@ -463,6 +498,220 @@ def _write_all(sessions: Mapping[str, Any], destination: Path) -> None:
             os.unlink(temporary_name)
 
 
+def _sanitize_profile_default(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != {"sport", "sourceLeagueId"}:
+        raise LocalDraftProfileValidationError(
+            "local draft profile default fields are invalid"
+        )
+    sport = _safe_string(value.get("sport"), "sport", 32)
+    source_league_id = _safe_string(
+        value.get("sourceLeagueId"), "sourceLeagueId", 64
+    )
+    if not _IDENTIFIER.fullmatch(sport):
+        raise LocalDraftProfileValidationError("sport has an invalid format")
+    if not _IDENTIFIER.fullmatch(source_league_id):
+        raise LocalDraftProfileValidationError(
+            "sourceLeagueId has an invalid format"
+        )
+    return {"sport": sport, "sourceLeagueId": source_league_id}
+
+
+def _read_profile_defaults(path: Path) -> list[dict[str, str]]:
+    if path.is_symlink():
+        raise LocalDraftProfileValidationError(
+            "local draft profile default store cannot be a symbolic link"
+        )
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise LocalDraftProfileValidationError(
+            f"could not read local draft profile default store: {error}"
+        ) from error
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"schemaVersion", "defaults"}
+        or raw.get("schemaVersion") != 1
+        or isinstance(raw.get("schemaVersion"), bool)
+        or not isinstance(raw.get("defaults"), list)
+        or len(raw["defaults"]) > MAX_PROFILE_DEFAULTS
+    ):
+        raise LocalDraftProfileValidationError(
+            "local draft profile default store is malformed"
+        )
+    defaults = [_sanitize_profile_default(value) for value in raw["defaults"]]
+    sports = [value["sport"] for value in defaults]
+    if len(sports) != len(set(sports)):
+        raise LocalDraftProfileValidationError(
+            "local draft profile default store contains duplicate sports"
+        )
+    return sorted(defaults, key=lambda value: value["sport"])
+
+
+def _write_profile_defaults(
+    defaults: Sequence[Mapping[str, str]], destination: Path
+) -> None:
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=".draft-profile-defaults-", suffix=".json", dir=destination.parent
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as temporary:
+            json.dump(
+                {"schemaVersion": 1, "defaults": list(defaults)},
+                temporary,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            temporary.write("\n")
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, destination)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def list_local_draft_profile_defaults(
+    path: str | Path | None = None,
+) -> list[dict[str, str]]:
+    """List privacy-minimal per-sport default profile pointers."""
+
+    custom_path = path is not None or bool(
+        os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_DEFAULTS_PATH")
+    ) or bool(os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH"))
+    destination = _profile_defaults_store_path(path)
+    with _STORE_LOCK:
+        if not custom_path and destination.parent.is_symlink():
+            raise LocalDraftProfileValidationError(
+                "default local draft profile directory cannot be a symbolic link"
+            )
+        defaults = _read_profile_defaults(destination)
+    return defaults
+
+
+def load_default_local_draft_profile(
+    sport: str,
+    path: str | Path | None = None,
+) -> dict[str, str] | None:
+    """Load only the explicit default pointer for one exact sport."""
+
+    clean_sport = _safe_string(sport, "sport", 32)
+    if not _IDENTIFIER.fullmatch(clean_sport):
+        raise LocalDraftProfileValidationError("sport has an invalid format")
+    return next(
+        (
+            value
+            for value in list_local_draft_profile_defaults(path)
+            if value["sport"] == clean_sport
+        ),
+        None,
+    )
+
+
+def set_default_local_draft_profile(
+    sport: str,
+    source_league_id: str,
+    *,
+    profile_path: str | Path | None = None,
+    defaults_path: str | Path | None = None,
+    current_season: int | None = None,
+) -> dict[str, str]:
+    """Atomically select an existing same-sport profile as the default."""
+
+    selected = _sanitize_profile_default(
+        {"sport": sport, "sourceLeagueId": source_league_id}
+    )
+    profile_destination = _profile_store_path(profile_path)
+    defaults_destination = _profile_defaults_store_path(
+        defaults_path, profile_path=profile_path
+    )
+    custom_profile_path = profile_path is not None or bool(
+        os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH")
+    )
+    custom_defaults_path = (
+        defaults_path is not None
+        or bool(os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_DEFAULTS_PATH"))
+        or profile_path is not None
+        or bool(os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH"))
+    )
+    with _STORE_LOCK:
+        if not custom_profile_path and profile_destination.parent.is_symlink():
+            raise LocalDraftProfileValidationError(
+                "default local draft profile directory cannot be a symbolic link"
+            )
+        profiles = _read_all(profile_destination)
+        source_key = f"{selected['sport']}:{selected['sourceLeagueId']}"
+        source = profiles.get(source_key)
+        if source is None:
+            source_sports = {
+                profile["draft"]["sport"]
+                for profile in profiles.values()
+                if profile["draft"]["leagueId"] == selected["sourceLeagueId"]
+            }
+            if source_sports:
+                raise LocalDraftProfileConflictError(
+                    "selected local profile belongs to a different sport"
+                )
+            raise LocalDraftProfileNotFoundError(
+                "selected local draft profile was not found"
+            )
+        _require_current_default_profile_season(source, current_season)
+        _prepare_store_directory(
+            defaults_destination, tighten_existing=not custom_defaults_path
+        )
+        defaults = _read_profile_defaults(defaults_destination)
+        existing = next(
+            (value for value in defaults if value["sport"] == selected["sport"]),
+            None,
+        )
+        if existing == selected:
+            defaults_destination.chmod(0o600)
+            return existing
+        updated = [
+            value for value in defaults if value["sport"] != selected["sport"]
+        ]
+        updated.append(selected)
+        updated.sort(key=lambda value: value["sport"])
+        if len(updated) > MAX_PROFILE_DEFAULTS:
+            raise LocalDraftProfileValidationError(
+                f"local draft profile defaults cannot exceed {MAX_PROFILE_DEFAULTS} sports"
+            )
+        _write_profile_defaults(updated, defaults_destination)
+    return selected
+
+
+def clear_default_local_draft_profile(
+    sport: str,
+    path: str | Path | None = None,
+) -> bool:
+    """Atomically clear one sport's default without touching saved profiles."""
+
+    clean_sport = _safe_string(sport, "sport", 32)
+    if not _IDENTIFIER.fullmatch(clean_sport):
+        raise LocalDraftProfileValidationError("sport has an invalid format")
+    custom_path = path is not None or bool(
+        os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_DEFAULTS_PATH")
+    ) or bool(os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH"))
+    destination = _profile_defaults_store_path(path)
+    with _STORE_LOCK:
+        if not custom_path and destination.parent.is_symlink():
+            raise LocalDraftProfileValidationError(
+                "default local draft profile directory cannot be a symbolic link"
+            )
+        defaults = _read_profile_defaults(destination)
+        updated = [value for value in defaults if value["sport"] != clean_sport]
+        if len(updated) == len(defaults):
+            if destination.exists():
+                destination.chmod(0o600)
+            return False
+        _prepare_store_directory(destination, tighten_existing=not custom_path)
+        _write_profile_defaults(updated, destination)
+    return True
+
+
 def save_local_draft_profile(value: Any, path: str | Path | None = None) -> dict[str, Any]:
     """Atomically store one exact-identity local draft profile."""
 
@@ -606,6 +855,82 @@ def bind_local_draft_profile(
         bound = sanitize_local_draft_profile(bound)
         profiles[target["sessionKey"]] = bound
         _write_all(profiles, destination)
+    return bound
+
+
+def bind_default_local_draft_profile(
+    target_draft_identity: Mapping[str, Any],
+    *,
+    profile_path: str | Path | None = None,
+    defaults_path: str | Path | None = None,
+    current_season: int | None = None,
+) -> dict[str, Any] | None:
+    """Bind the selected same-sport default to an otherwise unbound draft."""
+
+    target = _sanitize_draft_identity(target_draft_identity)
+    profile_destination = _profile_store_path(profile_path)
+    defaults_destination = _profile_defaults_store_path(
+        defaults_path, profile_path=profile_path
+    )
+    custom_profile_path = profile_path is not None or bool(
+        os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH")
+    )
+    custom_defaults_path = (
+        defaults_path is not None
+        or bool(os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_DEFAULTS_PATH"))
+        or profile_path is not None
+        or bool(os.getenv("FANTASY_FOOTBALL_DRAFT_PROFILE_PATH"))
+    )
+    with _STORE_LOCK:
+        if not custom_profile_path and profile_destination.parent.is_symlink():
+            raise LocalDraftProfileValidationError(
+                "default local draft profile directory cannot be a symbolic link"
+            )
+        profiles = _read_all(profile_destination)
+        existing = profiles.get(target["sessionKey"])
+        if existing is not None:
+            if existing["draft"] != target:
+                raise LocalDraftProfileConflictError(
+                    "target local profile identity does not match the synced draft"
+                )
+            return existing
+
+        if not custom_defaults_path and defaults_destination.parent.is_symlink():
+            raise LocalDraftProfileValidationError(
+                "default local draft profile directory cannot be a symbolic link"
+            )
+        defaults = _read_profile_defaults(defaults_destination)
+        selected = next(
+            (value for value in defaults if value["sport"] == target["sport"]),
+            None,
+        )
+        if selected is None:
+            return None
+        source_key = f"{target['sport']}:{selected['sourceLeagueId']}"
+        source = profiles.get(source_key)
+        if source is None:
+            source_sports = {
+                profile["draft"]["sport"]
+                for profile in profiles.values()
+                if profile["draft"]["leagueId"] == selected["sourceLeagueId"]
+            }
+            if source_sports:
+                raise LocalDraftProfileConflictError(
+                    "default local profile belongs to a different sport"
+                )
+            raise LocalDraftProfileNotFoundError(
+                "default local draft profile source was not found"
+            )
+        _require_current_default_profile_season(source, current_season)
+
+        bound = deepcopy(source)
+        bound["draft"] = target
+        bound = sanitize_local_draft_profile(bound)
+        _prepare_store_directory(
+            profile_destination, tighten_existing=not custom_profile_path
+        )
+        profiles[target["sessionKey"]] = bound
+        _write_all(profiles, profile_destination)
     return bound
 
 

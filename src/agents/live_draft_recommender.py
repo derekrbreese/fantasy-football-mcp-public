@@ -64,6 +64,22 @@ _STRATEGY_WEIGHTS = {
         "scenario": 0.05,
     },
 }
+
+
+def _rounded_normalized_weights(weights: Mapping[str, float]) -> dict[str, float]:
+    """Round normalized weights while keeping their serialized total at one."""
+    rounded = {key: round(value, 6) for key, value in weights.items()}
+    active = [key for key, value in rounded.items() if value > 0]
+    if not active:
+        return rounded
+
+    residual = round(1.0 - sum(rounded.values()), 6)
+    if residual:
+        target = max(active, key=lambda key: rounded[key])
+        rounded[target] = round(rounded[target] + residual, 6)
+    return rounded
+
+
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
 # Yahoo league creation and the local profile contract both top out at 20 teams.
 # Enforcing the same ceiling here bounds snake-turn and simulation work even when
@@ -797,9 +813,7 @@ class LiveDraftRecommendationEngine:
                         key: round(value, 2) if value is not None else None
                         for key, value in scores.items()
                     },
-                    "effectiveWeights": {
-                        key: round(value, 6) for key, value in effective_weights.items()
-                    },
+                    "effectiveWeights": _rounded_normalized_weights(effective_weights),
                     "returnProbability": opponent_detail["returnProbability"],
                     "rosterImpact": roster_detail["impact"],
                     "reasoning": reasoning,
@@ -842,7 +856,7 @@ class LiveDraftRecommendationEngine:
             "primaryRecommendation": selected[0],
             "alternatives": selected[1:3],
             "recommendations": selected,
-            "appliedWeights": {key: round(value, 6) for key, value in weights.items()},
+            "appliedWeights": _rounded_normalized_weights(weights),
             "contingency": {
                 "ifPrimaryUnavailable": (
                     selected[1]["player"]["name"]

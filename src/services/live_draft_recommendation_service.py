@@ -10,14 +10,26 @@ from pathlib import Path
 from typing import Any
 
 from src.agents.live_draft_recommender import LiveDraftRecommendationEngine
+from src.services.databricks_advisory_critic import (
+    DatabricksAdvisoryCritic,
+    DatabricksAdvisoryRequest,
+    DatabricksAdvisoryResult,
+)
 from src.services.fantasypros_provider import FantasyProsProvider
 from src.services.live_draft_store import LiveDraftValidationError, load_live_draft
-from src.services.local_draft_profile_store import load_local_draft_profile
+from src.services.local_draft_profile_store import (
+    LocalDraftProfileConflictError,
+    LocalDraftProfileNotFoundError,
+    LocalDraftProfileValidationError,
+    bind_default_local_draft_profile,
+    load_local_draft_profile,
+)
 
 ToolCaller = Callable[..., Awaitable[dict[str, Any]]]
 _YAHOO_RECOMMENDATION_LOCK = asyncio.Lock()
 _DRAFT_IDENTITY_FIELDS = ("sport", "leagueId", "teamId", "sessionKey")
 _FANTASYPROS_PROVIDER = FantasyProsProvider()
+_DATABRICKS_ADVISORY_CRITIC = DatabricksAdvisoryCritic()
 _FANTASYPROS_FIELDS = (
     "fantasypros_id",
     "identityResolved",
@@ -33,6 +45,72 @@ _FANTASYPROS_FIELDS = (
     "retrievedAt",
 )
 _POSITION_ALIASES = {"DEF": "DST", "D/ST": "DST"}
+
+
+def _advisory_critic_enabled(critic: Any) -> bool:
+    try:
+        return critic.enabled is True
+    except Exception:
+        return False
+
+
+def _advisory_critic_eligible(result: Mapping[str, Any], critic: Any) -> bool:
+    if not _advisory_critic_enabled(critic):
+        return False
+    if result.get("status") not in {"success", "degraded"}:
+        return False
+    recommendations = result.get("recommendations")
+    if not isinstance(recommendations, list) or not recommendations:
+        return False
+    state = result.get("state")
+    health = state.get("health") if isinstance(state, Mapping) else None
+    return isinstance(health, Mapping) and health.get("complete") is True
+
+
+def _advisory_model(critic: Any) -> str | None:
+    try:
+        model = critic.model
+    except Exception:
+        return None
+    return model if isinstance(model, str) else None
+
+
+def _advisory_outer_timeout(critic: Any) -> float:
+    try:
+        timeout = float(critic.timeout_seconds)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        timeout = 1.5
+    if not 0.01 <= timeout <= 8.0:
+        timeout = 8.0
+    return min(8.25, timeout + 0.25)
+
+
+async def _run_advisory_critic(
+    result: Mapping[str, Any], critic: Any
+) -> DatabricksAdvisoryResult | None:
+    if not _advisory_critic_eligible(result, critic):
+        return None
+    request = DatabricksAdvisoryRequest.from_recommendation(result)
+    try:
+        advisory = await asyncio.wait_for(
+            critic.critique(request),
+            timeout=_advisory_outer_timeout(critic),
+        )
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        return DatabricksAdvisoryResult.unavailable(
+            "timeout", model=_advisory_model(critic)
+        )
+    except Exception:
+        return DatabricksAdvisoryResult.unavailable(
+            "provider_error", model=_advisory_model(critic)
+        )
+    if not isinstance(advisory, DatabricksAdvisoryResult):
+        return DatabricksAdvisoryResult.unavailable(
+            "provider_error", model=_advisory_model(critic)
+        )
+    return advisory
 
 
 def _snapshot_binding(live_state: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
@@ -278,6 +356,7 @@ async def get_live_draft_recommendation(
     store_path: str | Path | None = None,
     profile_path: str | Path | None = None,
     fantasypros_provider: Any | None = None,
+    advisory_critic: Any | None = None,
     require_authenticated_team: bool = False,
 ) -> dict[str, Any]:
     """Return a recommendation while keeping network calls off the scoring path."""
@@ -317,6 +396,21 @@ async def get_live_draft_recommendation(
         }
     analyzed_snapshot = _snapshot_binding(live_state)
     profile = load_local_draft_profile(live_state["draft"], path=profile_path)
+    if profile is None:
+        try:
+            profile = bind_default_local_draft_profile(
+                live_state["draft"], profile_path=profile_path
+            )
+        except (
+            LocalDraftProfileNotFoundError,
+            LocalDraftProfileConflictError,
+        ) as error:
+            raise LiveDraftValidationError(str(error)) from error
+        except LocalDraftProfileValidationError as error:
+            raise LiveDraftValidationError(
+                "The saved default draft profile is unavailable. Choose or clear it "
+                "in the local dashboard."
+            ) from error
     ranking_limit = max(25, min(int(ranking_count), 500))
     if profile is not None:
         raw_rankings = profile.get("rankings")
@@ -396,15 +490,18 @@ async def get_live_draft_recommendation(
         if ranking_error:
             result["warnings"].append(f"Yahoo rankings: {ranking_error}")
     league_warning = None
+    roster_slots_available = True
     if isinstance(league_result, Mapping) and (
         "error" in league_result or league_result.get("status") == "error"
     ):
+        roster_slots_available = False
         league_warning = league_result.get("message") or league_result.get("error")
     else:
         roster_positions = league_info.get("roster_positions")
         if not isinstance(roster_positions, list):
             roster_positions = league_info.get("rosterPositions")
         if not isinstance(roster_positions, list) or not roster_positions:
+            roster_slots_available = False
             source_name = "Local profile" if profile is not None else "Yahoo league"
             league_warning = (
                 f"{source_name} roster positions are unavailable; using 1QB defaults"
@@ -417,6 +514,15 @@ async def get_live_draft_recommendation(
     result["warnings"].extend(enrichment_warnings)
     if enrichment.get("status") != "success" and result.get("status") == "success":
         result["status"] = "degraded"
+    capabilities = result.get("capabilities")
+    if isinstance(capabilities, dict):
+        capabilities["rosterSlotsAvailable"] = roster_slots_available
+    critic_provider = (
+        _DATABRICKS_ADVISORY_CRITIC
+        if advisory_critic is None
+        else advisory_critic
+    )
+    advisory = await _run_advisory_critic(result, critic_provider)
     current_state = load_live_draft(
         league_id=league_id,
         path=store_path,
@@ -431,6 +537,11 @@ async def get_live_draft_recommendation(
     current_profile = load_local_draft_profile(current_state["draft"], path=profile_path)
     if current_profile != profile:
         return _profile_refresh_required_result(league_id)
+    if advisory is not None:
+        result["advisoryCritic"] = advisory.to_dict()
+        capabilities = result.get("capabilities")
+        if isinstance(capabilities, dict):
+            capabilities["llmOnRequestPath"] = True
     result["leagueKey"] = league_key
     result["leagueId"] = live_state.get("draft", {}).get("leagueId")
     result["dataSources"] = {

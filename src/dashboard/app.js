@@ -9,13 +9,18 @@
   const profileForm = document.getElementById('draft-profile-form');
   const profileReuseForm = document.getElementById('draft-profile-reuse-form');
   const profileSourceLeague = document.getElementById('profile-source-league');
+  const profileDefaultForm = document.getElementById('draft-profile-default-form');
+  const profileDefaultSport = document.getElementById('profile-default-sport');
+  const profileDefaultSource = document.getElementById('profile-default-source');
   const leagueInput = document.getElementById('league-id');
   const requestStatus = document.getElementById('request-status');
   const recommendationView = document.getElementById('recommendation-view');
   const formControls = [...form.elements];
   const profileControls = [...profileForm.elements];
   const profileReuseControls = [...profileReuseForm.elements];
+  const profileDefaultControls = [...profileDefaultForm.elements];
   let savedProfiles = [];
+  let savedProfileDefaults = [];
   let savedProfilesLoaded = false;
   let savedProfilesLoadFailed = false;
   let savedProfileLoadGeneration = 0;
@@ -77,7 +82,13 @@
     profileReuseControls.forEach((control) => {
       control.disabled = disabled;
     });
-    if (!disabled) updateProfileReuseControls();
+    profileDefaultControls.forEach((control) => {
+      control.disabled = disabled;
+    });
+    if (!disabled) {
+      updateProfileReuseControls();
+      updateProfileDefaultControls();
+    }
   }
 
   function setStatus(message, kind) {
@@ -91,6 +102,13 @@
     document.getElementById('profile-source-detail').textContent = detail;
     document.getElementById('profile-freshness').textContent = freshness.label;
     status.className = `profile-source-status ${freshness.kind}`;
+  }
+
+  function setProfileDefaultStatus(title, detail, kind = 'unknown') {
+    const status = document.getElementById('profile-default-status');
+    document.getElementById('profile-default-title').textContent = title;
+    document.getElementById('profile-default-detail').textContent = detail;
+    status.className = `profile-default-status ${kind}`;
   }
 
   function selectedRosterPositions() {
@@ -140,6 +158,17 @@
     return savedProfiles.find((profile) => profile.leagueId === leagueId) || null;
   }
 
+  function defaultForSport(sport) {
+    return savedProfileDefaults.find((entry) => entry.sport === sport) || null;
+  }
+
+  function profileForDefault(entry) {
+    if (!entry) return null;
+    return savedProfiles.find((profile) => (
+      profile.sport === entry.sport && profile.leagueId === entry.sourceLeagueId
+    )) || null;
+  }
+
   function updateProfileReuseControls() {
     const leagueId = leagueInput.value.trim();
     const sourceLeagueId = profileSourceLeague.value;
@@ -153,6 +182,26 @@
     document.getElementById('reuse-profile-button').disabled = profileControlsBusy ||
       Boolean(profileForSelectedLeague()) ||
       !validSource;
+  }
+
+  function updateProfileDefaultControls() {
+    const sport = profileDefaultSport.value;
+    const sourceLeagueId = profileDefaultSource.value;
+    const currentDefault = defaultForSport(sport);
+    const validSource = savedProfiles.some((profile) => (
+      profile.sport === sport && profile.leagueId === sourceLeagueId
+    ));
+    profileDefaultSport.disabled = profileControlsBusy ||
+      !savedProfilesLoaded ||
+      (savedProfiles.length === 0 && savedProfileDefaults.length === 0);
+    profileDefaultSource.disabled = profileControlsBusy ||
+      !savedProfilesLoaded ||
+      !sport;
+    document.getElementById('set-profile-default-button').disabled = profileControlsBusy ||
+      !validSource ||
+      currentDefault?.sourceLeagueId === sourceLeagueId;
+    document.getElementById('clear-profile-default-button').disabled = profileControlsBusy ||
+      !currentDefault;
   }
 
   function renderSavedProfileChoices() {
@@ -183,6 +232,101 @@
     updateProfileReuseControls();
   }
 
+  function renderProfileDefaultSourceChoices() {
+    const previousValue = profileDefaultSource.value;
+    const sport = profileDefaultSport.value;
+    const currentDefault = defaultForSport(sport);
+    const choices = savedProfiles.filter((profile) => profile.sport === sport);
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = sport
+      ? (choices.length ? 'Choose a saved profile' : 'No saved profiles for this sport')
+      : 'Choose a sport first';
+    profileDefaultSource.replaceChildren(placeholder);
+    choices.forEach((profile) => {
+      const option = document.createElement('option');
+      option.value = profile.leagueId;
+      const suffix = currentDefault?.sourceLeagueId === profile.leagueId
+        ? ' · current default'
+        : '';
+      option.textContent = `${profileClient.profileChoiceLabel(profile)}${suffix}`;
+      profileDefaultSource.appendChild(option);
+    });
+    if (currentDefault && choices.some((profile) => (
+      profile.leagueId === currentDefault.sourceLeagueId
+    ))) {
+      profileDefaultSource.value = currentDefault.sourceLeagueId;
+    } else {
+      profileDefaultSource.value = choices.some((profile) => profile.leagueId === previousValue)
+        ? previousValue
+        : '';
+    }
+    updateProfileDefaultControls();
+  }
+
+  function showProfileDefaultStatus() {
+    const sport = profileDefaultSport.value;
+    if (!sport) {
+      setProfileDefaultStatus(
+        savedProfiles.length ? 'Choose a Yahoo sport' : 'No default profile selected',
+        savedProfiles.length
+          ? 'Select a sport to view or change its default profile.'
+          : 'Import a profile before setting a default for future drafts.',
+      );
+      return;
+    }
+    const currentDefault = defaultForSport(sport);
+    const sourceProfile = profileForDefault(currentDefault);
+    if (currentDefault && !sourceProfile) {
+      setProfileDefaultStatus(
+        `${profileClient.profileSportLabel(sport)} default source is missing`,
+        `The saved default points to League ${currentDefault.sourceLeagueId}, but that source profile is missing and will not be applied. Clear it or choose another saved profile for this sport.`,
+        'error',
+      );
+      return;
+    }
+    if (currentDefault && sourceProfile) {
+      const freshness = profileClient.describeProfileFreshness(
+        sourceProfile.asOf || sourceProfile.importedAt,
+      );
+      setProfileDefaultStatus(
+        `${profileClient.profileSportLabel(sport)} default: League ${sourceProfile.leagueId}`,
+        `${freshness.label}. This profile will be copied only to future profileless Yahoo drafts for this sport, including real drafts and mocks. Existing exact profiles win, and picks are never copied.`,
+        freshness.kind,
+      );
+      return;
+    }
+    setProfileDefaultStatus(
+      `No ${profileClient.profileSportLabel(sport)} default`,
+      'Future drafts for this sport remain unbound until an exact profile is imported, reused, or explicitly set as the default here.',
+    );
+  }
+
+  function renderProfileDefaultChoices() {
+    const previousSport = profileDefaultSport.value;
+    const sports = [...new Set([
+      ...savedProfiles.map((profile) => profile.sport),
+      ...savedProfileDefaults.map((entry) => entry.sport),
+    ])].sort();
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = savedProfilesLoaded
+      ? (sports.length ? 'Choose a Yahoo sport' : 'No saved profile sports')
+      : (savedProfilesLoadFailed ? 'Saved profiles unavailable' : 'Loading saved profiles…');
+    profileDefaultSport.replaceChildren(placeholder);
+    sports.forEach((sport) => {
+      const option = document.createElement('option');
+      option.value = sport;
+      option.textContent = profileClient.profileSportLabel(sport);
+      profileDefaultSport.appendChild(option);
+    });
+    if (sports.includes(previousSport)) profileDefaultSport.value = previousSport;
+    else if (sports.length === 1) profileDefaultSport.value = sports[0];
+    else profileDefaultSport.value = '';
+    renderProfileDefaultSourceChoices();
+    showProfileDefaultStatus();
+  }
+
   function showSelectedProfileStatus() {
     const leagueId = leagueInput.value.trim();
     const selectedProfile = profileForSelectedLeague();
@@ -195,7 +339,7 @@
     } else if (savedProfiles.length && validLeagueId(leagueId)) {
       setProfileStatus(
         'This draft has no local profile',
-        'Choose a saved source profile above, then use it explicitly for this mock.',
+        'Choose a saved source profile above, then use it explicitly for this draft.',
         { kind: 'unknown', label: 'No profile selected for this draft' },
       );
     } else if (savedProfiles.length) {
@@ -218,21 +362,26 @@
     savedProfilesLoaded = false;
     savedProfilesLoadFailed = false;
     renderSavedProfileChoices();
+    renderProfileDefaultChoices();
     try {
-      const profiles = await profileClient.listDraftProfiles();
+      const catalog = await profileClient.listDraftProfileCatalog();
       if (loadGeneration !== savedProfileLoadGeneration) return false;
-      savedProfiles = profiles;
+      savedProfiles = catalog.profiles;
+      savedProfileDefaults = catalog.defaults;
       savedProfilesLoaded = true;
       savedProfilesLoadFailed = false;
       renderSavedProfileChoices();
+      renderProfileDefaultChoices();
       showSelectedProfileStatus();
       return true;
     } catch (error) {
       if (loadGeneration !== savedProfileLoadGeneration) return false;
       savedProfiles = [];
+      savedProfileDefaults = [];
       savedProfilesLoaded = false;
       savedProfilesLoadFailed = true;
       renderSavedProfileChoices();
+      renderProfileDefaultChoices();
       setProfileStatus(
         'Saved profile list unavailable',
         String(error?.message || 'Saved profiles could not be loaded.').slice(0, 240),
@@ -429,7 +578,7 @@
     const message = String(error?.message || 'Recommendation unavailable.');
     const hasReusableProfile = savedProfiles.some((profile) => profile.leagueId !== leagueId);
     if (hasReusableProfile && profileClient.isProfileReuseRecommendationError(message)) {
-      return `${message}. This mock has no matching local profile; choose a saved source profile above and select Use for this mock.`;
+      return `${message}. This draft has no matching local profile; choose a saved source profile above and select Use for this draft.`;
     }
     return message;
   }
@@ -476,7 +625,7 @@
     if (!sourceProfile) {
       setProfileStatus(
         'Profile reuse needs a source',
-        'Choose one saved profile explicitly before using it for this mock.',
+        'Choose one saved profile explicitly before using it for this draft.',
         { kind: 'error', label: 'No profile was selected or changed' },
       );
       return;
@@ -488,7 +637,7 @@
     setProfileStatus(
       'Reusing saved profile…',
       `Copying rankings and league settings from league ${sourceLeagueId} to league ${leagueId}. Recorded picks will not be copied.`,
-      { kind: 'loading', label: 'Binding exact mock identity' },
+      { kind: 'loading', label: 'Binding exact draft identity' },
     );
     try {
       const result = await profileClient.bindDraftProfile(sourceLeagueId, leagueId);
@@ -498,18 +647,18 @@
       await loadSavedProfiles();
       const rankingCount = safeResponseCount(result.rankingCount, sourceProfile.rankingCount);
       setProfileStatus(
-        'Saved profile ready for this mock',
+        'Saved profile ready for this draft',
         `${rankingCount} ranked players and league settings copied from league ${sourceLeagueId} to league ${leagueId}. Recorded picks stayed with league ${leagueId}.`,
         profileClient.describeProfileFreshness(result.asOf || sourceProfile.asOf),
       );
       shouldRefresh = true;
     } catch (error) {
       const message = String(
-        error?.message || 'The saved profile could not be used for this mock.',
+        error?.message || 'The saved profile could not be used for this draft.',
       ).slice(0, 240);
       const crossSport = /different sport/i.test(message);
       setProfileStatus(
-        crossSport ? 'Saved profile sport does not match this mock' : 'Profile reuse failed',
+        crossSport ? 'Saved profile sport does not match this draft' : 'Profile reuse failed',
         crossSport
           ? `${profileClient.profileSportLabel(sourceProfile.sport)} source rejected: its sport does not match the server-resolved target draft. Choose a source labeled for the same sport.`
           : message,
@@ -520,6 +669,84 @@
       setProfileControlsDisabled(false);
     }
     if (shouldRefresh) await refreshAnalysis(leagueId);
+  });
+
+  profileDefaultForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!profileDefaultForm.reportValidity()) return;
+    const sport = profileDefaultSport.value;
+    const sourceLeagueId = profileDefaultSource.value;
+    const sourceProfile = savedProfiles.find((profile) => (
+      profile.sport === sport && profile.leagueId === sourceLeagueId
+    ));
+    if (!sourceProfile) {
+      setProfileDefaultStatus(
+        'Default profile needs a source',
+        'Choose one saved profile for the selected sport. No default was changed.',
+        'error',
+      );
+      return;
+    }
+
+    setControlsDisabled(true);
+    setProfileControlsDisabled(true);
+    setProfileDefaultStatus(
+      `Setting ${profileClient.profileSportLabel(sport)} default…`,
+      `League ${sourceLeagueId} will apply only to future profileless Yahoo drafts for this sport.`,
+      'loading',
+    );
+    try {
+      await profileClient.setDefaultDraftProfile(sport, sourceLeagueId);
+      await loadSavedProfiles();
+      const freshness = profileClient.describeProfileFreshness(
+        sourceProfile.asOf || sourceProfile.importedAt,
+      );
+      setProfileDefaultStatus(
+        `${profileClient.profileSportLabel(sport)} default saved`,
+        `${freshness.label}. League ${sourceLeagueId} will apply to future profileless Yahoo drafts, including real drafts and mocks. Existing exact profiles win, and picks are never copied.`,
+        freshness.kind,
+      );
+    } catch (error) {
+      setProfileDefaultStatus(
+        'Default profile was not changed',
+        String(error?.message || 'The profile default could not be saved.').slice(0, 240),
+        'error',
+      );
+    } finally {
+      setControlsDisabled(false);
+      setProfileControlsDisabled(false);
+    }
+  });
+
+  document.getElementById('clear-profile-default-button').addEventListener('click', async () => {
+    const sport = profileDefaultSport.value;
+    const currentDefault = defaultForSport(sport);
+    if (!currentDefault) return;
+
+    setControlsDisabled(true);
+    setProfileControlsDisabled(true);
+    setProfileDefaultStatus(
+      `Clearing ${profileClient.profileSportLabel(sport)} default…`,
+      'Already bound exact profiles will remain unchanged.',
+      'loading',
+    );
+    try {
+      await profileClient.setDefaultDraftProfile(sport, null);
+      await loadSavedProfiles();
+      setProfileDefaultStatus(
+        `${profileClient.profileSportLabel(sport)} default cleared`,
+        'Future profileless drafts will remain unbound. Existing exact profiles and recorded picks were not changed.',
+      );
+    } catch (error) {
+      setProfileDefaultStatus(
+        'Default profile was not cleared',
+        String(error?.message || 'The profile default could not be cleared.').slice(0, 240),
+        'error',
+      );
+    } finally {
+      setControlsDisabled(false);
+      setProfileControlsDisabled(false);
+    }
   });
 
   profileForm.addEventListener('submit', async (event) => {
@@ -606,6 +833,11 @@
   });
 
   profileSourceLeague.addEventListener('change', updateProfileReuseControls);
+  profileDefaultSport.addEventListener('change', () => {
+    renderProfileDefaultSourceChoices();
+    showProfileDefaultStatus();
+  });
+  profileDefaultSource.addEventListener('change', updateProfileDefaultControls);
   leagueInput.addEventListener('input', () => {
     renderSavedProfileChoices();
     if (savedProfilesLoaded) showSelectedProfileStatus();

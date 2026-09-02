@@ -78,7 +78,7 @@
         <form id="draft-profile-reuse-form" class="profile-reuse-form">
           <div>
             <h3>Reuse a saved profile</h3>
-            <p id="profile-reuse-help">Choose the source yourself. This copies rankings and league settings only; the selected mock keeps its own recorded picks.</p>
+            <p id="profile-reuse-help">Choose the source yourself. This copies rankings and league settings only; the selected draft keeps its own recorded picks.</p>
           </div>
           <label>
             <span>Saved source draft</span>
@@ -86,7 +86,34 @@
               <option value="">Loading saved profiles…</option>
             </select>
           </label>
-          <button id="reuse-profile-button" type="submit" disabled>Use for this mock &amp; refresh</button>
+          <button id="reuse-profile-button" type="submit" disabled>Use for this draft &amp; refresh</button>
+        </form>
+
+        <form id="draft-profile-default-form" class="profile-default-form">
+          <div class="profile-default-copy">
+            <h3>Default for future drafts</h3>
+            <p id="profile-default-help">Choose one current-season saved profile per sport for future profileless Yahoo drafts, including real drafts and mocks. Exact profiles are never overwritten; picks are never copied. Replace or clear the default after a season rollover.</p>
+          </div>
+          <label>
+            <span>Yahoo sport</span>
+            <select id="profile-default-sport" name="sport" aria-describedby="profile-default-help" required disabled>
+              <option value="">Loading saved profiles…</option>
+            </select>
+          </label>
+          <label>
+            <span>Default saved profile</span>
+            <select id="profile-default-source" name="sourceLeagueId" aria-describedby="profile-default-help" required disabled>
+              <option value="">Choose a sport first</option>
+            </select>
+          </label>
+          <div class="profile-default-actions">
+            <button id="set-profile-default-button" type="submit" disabled>Set sport default</button>
+            <button id="clear-profile-default-button" type="button" class="secondary-button" disabled>Clear sport default</button>
+          </div>
+          <div id="profile-default-status" class="profile-default-status unknown" role="status" aria-live="polite">
+            <strong id="profile-default-title">No default profile selected</strong>
+            <span id="profile-default-detail">New drafts remain unbound until an exact profile is imported or reused.</span>
+          </div>
         </form>
 
         <h3 class="profile-subtitle">Or import a new profile</h3>
