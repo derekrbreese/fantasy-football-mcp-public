@@ -78,7 +78,7 @@ test('current-pick mismatch falls back to conservative merge and sync', () => {
 
   assert.ok(guardStart > 0);
   assert.match(guardedBranch, /automaticUpdate\.reason === 'downward-prefix'/);
-  assert.match(guardedBranch, /updateDraftSession\(existing, metadata, picks, now\)/);
+  assert.match(guardedBranch, /updateDraftSessionFromSecondaryObservations\([\s\S]*existing,[\s\S]*metadata,[\s\S]*picks,[\s\S]*now,/);
   assert.match(guardedBranch, /setAuthoritativeCaptureBlocked/);
 });
 
@@ -93,13 +93,28 @@ test('unsafe authoritative rows still sync conservatively parsed observations', 
   assert.ok(scanStart > 0);
   assert.match(
     scanSource,
-    /if \(authoritativeEvaluation\.authoritativePicks\)[\s\S]*else \{\s*updated = YahooDraftSessionStore\.updateDraftSession\(existing, metadata, picks, now\);/,
+    /if \(authoritativeEvaluation\.authoritativePicks\)[\s\S]*else \{\s*updated = YahooDraftSessionStore\.updateDraftSessionFromSecondaryObservations\(/,
   );
   assert.match(scanSource, /await syncSession\(updated, \{\}, lease\);/);
   assert.match(
     scanSource,
     /if \(authoritativeEvaluation\.error\)[\s\S]*setAuthoritativeCaptureBlocked\(updated, true\)/,
   );
+});
+
+test('Picks-tab cards enter only the ordinary non-ledger observation path', () => {
+  const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+  const scanStart = contentSource.indexOf('async function performScan(lease)');
+  const repairStart = contentSource.indexOf('async function performRepair(lease)', scanStart);
+  const scanSource = contentSource.slice(scanStart, repairStart);
+  const repairSource = contentSource.slice(repairStart, contentSource.indexOf('function scanNow(', repairStart));
+
+  assert.match(scanSource, /findPicksPanelSnapshots\(document\)/);
+  assert.match(scanSource, /parsePicksPanelSnapshot/);
+  assert.match(scanSource, /nonLedgerPicks\.push\(\.\.\.picksPanelPicks\)/);
+  assert.match(scanSource, /updateDraftSessionFromSecondaryObservations/);
+  assert.doesNotMatch(repairSource, /PicksPanel|picksPanel/);
+  assert.doesNotMatch(scanSource, /repair:\s*true/);
 });
 
 test('capture-only changes participate in sync deduplication and browser persistence', () => {
@@ -112,6 +127,10 @@ test('capture-only changes participate in sync deduplication and browser persist
   assert.match(
     contentSource,
     /existing\?\.authoritativeCaptureBlocked === true[\s\S]*updated\.authoritativeCaptureBlocked === true/,
+  );
+  assert.match(
+    contentSource,
+    /existing\?\.numberedLedgerAuthoritative === true[\s\S]*updated\.numberedLedgerAuthoritative === true/,
   );
 });
 

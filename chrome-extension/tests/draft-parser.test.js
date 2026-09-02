@@ -5,6 +5,7 @@ const {
   buildPickKey,
   parseDraftUrl,
   parseLiveDraftSnapshot,
+  parsePicksPanelSnapshot,
   parsePickSnapshot,
   parseRoundByRoundSnapshot,
   upsertPicks,
@@ -61,6 +62,58 @@ test('parses a compact Yahoo-style multiline draft row', () => {
     nflTeam: 'ATL',
     fantasyTeam: 'Sunday Winners',
   });
+});
+
+test('the word Team is never misread as position TE and NFL team AM', () => {
+  assert.equal(parsePickSnapshot({ text: '1\nJ. Gibbs\nTeam 1' }), null);
+});
+
+test('strictly parses one sanitized Yahoo Picks-tab card', () => {
+  assert.deepEqual(parsePicksPanelSnapshot({
+    pickNumberText: '3',
+    playerText: 'P. Nacua\nQ',
+    detailsText: 'WR • Lar • Bye 11',
+    fantasyTeamText: 'My Team',
+    href: 'https://example.test/?auth=secret',
+    status: 'Q',
+  }), {
+    pickNumber: 3,
+    player: 'P. Nacua',
+    position: 'WR',
+    nflTeam: 'LAR',
+    fantasyTeam: 'Your Team',
+    isUserPick: true,
+  });
+});
+
+test('rejects malformed or loosely delimited Picks-tab cards', () => {
+  const valid = {
+    pickNumberText: '4',
+    playerText: 'C. McCaffrey',
+    detailsText: 'RB • SF • Bye 8',
+    fantasyTeamText: 'Team 4',
+  };
+
+  assert.equal(parsePicksPanelSnapshot({ ...valid, pickNumberText: 'Pick 4' }), null);
+  assert.equal(parsePicksPanelSnapshot({ ...valid, pickNumberText: '501' }), null);
+  assert.equal(parsePicksPanelSnapshot({ ...valid, detailsText: 'RB SF Bye 8' }), null);
+  assert.equal(parsePicksPanelSnapshot({ ...valid, detailsText: 'RUN • SF • Bye 8' }), null);
+  assert.equal(parsePicksPanelSnapshot({ ...valid, detailsText: 'RB • 49ERS • Bye 8' }), null);
+  assert.equal(parsePicksPanelSnapshot({ ...valid, playerText: 'https://example.test/?auth=secret' }), null);
+  assert.equal(parsePicksPanelSnapshot({ ...valid, fantasyTeamText: 'My Team joined' }), null);
+});
+
+test('normalizes Yahoo defense aliases in a Picks-tab card', () => {
+  const pick = parsePicksPanelSnapshot({
+    pickNumberText: '42',
+    playerText: 'San Francisco 49ers',
+    detailsText: 'D/ST · sf · Bye 8',
+    fantasyTeamText: 'Your Team',
+  });
+
+  assert.equal(pick.position, 'DEF');
+  assert.equal(pick.nflTeam, 'SF');
+  assert.equal(pick.isUserPick, true);
 });
 
 test('parses a sentence-style pick announcement', () => {

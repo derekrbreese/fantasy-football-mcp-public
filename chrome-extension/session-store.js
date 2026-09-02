@@ -11,14 +11,15 @@
   function updateDraftSession(existing, metadata, observedPicks, timestamp) {
     if (existing?.numberedLedgerAuthoritative === true) {
       const existingNumbered = (existing.picks || []).filter(hasPickNumber);
-      const existingNumbers = new Set(existingNumbered.map((pick) => Number(pick.pickNumber)));
-      const newlyNumbered = (observedPicks || []).filter((pick) => (
-        hasPickNumber(pick) && !existingNumbers.has(Number(pick.pickNumber))
-      ));
+      const mergedNumbered = mergeSecondaryNumberedObservations(
+        existingNumbered,
+        observedPicks,
+        timestamp,
+      );
       return updateDraftSessionFromAuthoritativeLedger(
         existing,
         metadata,
-        [...existingNumbered, ...newlyNumbered],
+        mergedNumbered,
         observedPicks,
         timestamp,
       );
@@ -57,15 +58,159 @@
   }
 
   function identityKey(sessionKey, pick) {
-    const baseKey = parser.buildPickKey(sessionKey, { ...pick, pickNumber: undefined });
+    const isUserPick = pick?.isUserPick === true || /^(?:My|Your) Team$/i.test(String(pick?.fantasyTeam || ''));
+    const canonicalPick = {
+      ...pick,
+      pickNumber: undefined,
+      fantasyTeam: isUserPick ? 'Your Team' : pick?.fantasyTeam,
+    };
+    const position = String(canonicalPick.position || '').toUpperCase();
+    const nflTeam = String(canonicalPick.nflTeam || '').toUpperCase();
+    if (position === 'DEF' && nflTeam) {
+      return `${sessionKey}:dst:${nflTeam}:team:${String(canonicalPick.fantasyTeam || '').toLocaleLowerCase()}`;
+    }
+    const baseKey = parser.buildPickKey(sessionKey, canonicalPick);
     if (/(?:^|\s)\p{L}\./u.test(String(pick?.player || ''))) {
-      return `${baseKey}:position:${String(pick?.position || '').toUpperCase()}:nfl:${String(pick?.nflTeam || '').toUpperCase()}`;
+      return `${baseKey}:position:${position}:nfl:${nflTeam}`;
     }
     return baseKey;
   }
 
   function numberedIdentityKey(sessionKey, pick) {
     return `${Number(pick.pickNumber)}:${identityKey(sessionKey, pick)}`;
+  }
+
+  function fillMissingPickFields(existing, incoming) {
+    const merged = { ...existing };
+    for (const [key, value] of Object.entries(incoming || {})) {
+      if (key === 'isUserPick' || key === 'fantasyTeam') continue;
+      if (
+        (merged[key] === undefined || merged[key] === null || merged[key] === '') &&
+        value !== undefined && value !== null && value !== ''
+      ) merged[key] = value;
+    }
+    if (!merged.fantasyTeam && incoming?.fantasyTeam) merged.fantasyTeam = incoming.fantasyTeam;
+    if (existing?.isUserPick === true || incoming?.isUserPick === true) {
+      merged.isUserPick = true;
+      if (/^(?:My|Your) Team$/i.test(String(incoming?.fantasyTeam || ''))) {
+        merged.fantasyTeam = 'Your Team';
+      }
+    } else if (existing?.isUserPick === false || incoming?.isUserPick === false) {
+      merged.isUserPick = false;
+    }
+    if (existing?.recordedAt) merged.recordedAt = existing.recordedAt;
+    return merged;
+  }
+
+  function normalizedPlayerName(value) {
+    return parser.normalizeText(value)
+      .toLocaleLowerCase()
+      .replace(/[’']/g, "'")
+      .replace(/\s+/g, ' ');
+  }
+
+  function initialedNameParts(value) {
+    const tokens = normalizedPlayerName(value).split(' ').filter(Boolean);
+    if (tokens.length < 2 || !/^(?:\p{L}\.)+$/u.test(tokens[0])) return null;
+    return {
+      firstInitial: tokens[0][0],
+      familyName: tokens.slice(1).join(' '),
+    };
+  }
+
+  function normalizedObservedPosition(value) {
+    const position = String(value || '').toUpperCase();
+    return position === 'DST' || position === 'D/ST' ? 'DEF' : position;
+  }
+
+  function sameNumberObservation(left, right) {
+    if (Number(left?.pickNumber) !== Number(right?.pickNumber)) return false;
+    const leftPosition = normalizedObservedPosition(left?.position);
+    const rightPosition = normalizedObservedPosition(right?.position);
+    const leftTeam = String(left?.nflTeam || '').toUpperCase();
+    const rightTeam = String(right?.nflTeam || '').toUpperCase();
+    if (leftPosition === 'DEF' && rightPosition === 'DEF') {
+      return Boolean(leftTeam && leftTeam === rightTeam);
+    }
+
+    const leftName = normalizedPlayerName(left?.player);
+    const rightName = normalizedPlayerName(right?.player);
+    if (!leftName || !rightName) return false;
+    const leftInitialed = initialedNameParts(leftName);
+    const rightInitialed = initialedNameParts(rightName);
+    if (!leftInitialed && !rightInitialed) return leftName === rightName;
+    if (!leftPosition || leftPosition !== rightPosition || !leftTeam || leftTeam !== rightTeam) {
+      return false;
+    }
+    if (leftName === rightName) return true;
+
+    const initialed = leftInitialed || rightInitialed;
+    const fullName = leftInitialed ? rightName : leftName;
+    const fullTokens = fullName.split(' ').filter(Boolean);
+    if (!initialed || fullTokens.length < 2 || initialedNameParts(fullName)) return false;
+    return fullTokens[0][0] === initialed.firstInitial &&
+      fullTokens.slice(1).join(' ') === initialed.familyName;
+  }
+
+  function mergeSecondaryNumberedObservations(
+    existingNumbered,
+    observedPicks,
+    timestamp,
+  ) {
+    const merged = (existingNumbered || []).map((pick) => ({ ...pick }));
+    for (const observed of observedPicks || []) {
+      if (!hasPickNumber(observed)) continue;
+      const matchingIndex = merged.findIndex((pick) => sameNumberObservation(pick, observed));
+      if (matchingIndex >= 0) {
+        merged[matchingIndex] = fillMissingPickFields(merged[matchingIndex], observed);
+        continue;
+      }
+      merged.push({
+        ...observed,
+        recordedAt: observed.recordedAt || timestamp,
+      });
+    }
+    return merged.sort((left, right) => Number(left.pickNumber) - Number(right.pickNumber));
+  }
+
+  function updateDraftSessionFromSecondaryObservations(
+    existing,
+    metadata,
+    observedPicks,
+    timestamp,
+  ) {
+    const hasNumberedObservation = (observedPicks || []).some(hasPickNumber);
+    if (!hasNumberedObservation) {
+      return updateDraftSession(existing, metadata, observedPicks, timestamp);
+    }
+    if (existing?.numberedLedgerAuthoritative === true) {
+      const savedHealth = ledgerHealth.analyzeLedger(existing?.picks || []);
+      const savedMissingNumbers = new Set(savedHealth.missingPickNumbers);
+      const fillsSavedGap = (observedPicks || []).some((pick) => (
+        hasPickNumber(pick) && savedMissingNumbers.has(Number(pick.pickNumber))
+      ));
+      const updated = updateDraftSession(existing, metadata, observedPicks, timestamp);
+      const resolvesIncompleteSavedState = !savedHealth.isComplete &&
+        ledgerHealth.analyzeLedger(updated.picks).isComplete;
+      return fillsSavedGap || resolvesIncompleteSavedState
+        ? setAuthoritativeCaptureBlocked(updated, true)
+        : updated;
+    }
+
+    const mergedNumbered = mergeSecondaryNumberedObservations(
+      (existing?.picks || []).filter(hasPickNumber),
+      observedPicks,
+      timestamp,
+    );
+    const updated = updateDraftSessionFromAuthoritativeLedger(
+      existing,
+      metadata,
+      mergedNumbered,
+      observedPicks,
+      timestamp,
+    );
+    delete updated.numberedLedgerAuthoritative;
+    return setAuthoritativeCaptureBlocked(updated, true);
   }
 
   function updateDraftSessionFromAuthoritativeLedger(
@@ -152,15 +297,27 @@
     const nextCaptureState = hasPositiveCurrentPickEvidence
       ? false
       : existing?.authoritativeCaptureBlocked;
+    const authoritativeSession = updateDraftSessionFromAuthoritativeLedger(
+      existing,
+      metadata,
+      authoritativePicks,
+      observedNonLedgerPicks,
+      timestamp,
+    );
+    const authoritativeNumbers = new Set(
+      (authoritativePicks || []).filter(hasPickNumber).map((pick) => Number(pick.pickNumber)),
+    );
+    const boundedSecondaryObservations = (observedNonLedgerPicks || []).filter((pick) => (
+      !hasPickNumber(pick) || authoritativeNumbers.has(Number(pick.pickNumber))
+    ));
     return {
       ok: true,
       health: visibleHealth,
       session: setAuthoritativeCaptureBlocked(
-        updateDraftSessionFromAuthoritativeLedger(
-          existing,
+        updateDraftSession(
+          authoritativeSession,
           metadata,
-          authoritativePicks,
-          observedNonLedgerPicks,
+          boundedSecondaryObservations,
           timestamp,
         ),
         nextCaptureState,
@@ -173,10 +330,11 @@
     if (!health.isComplete) return { ok: false, session: existing, health };
 
     const session = setAuthoritativeCaptureBlocked(
-      updateDraftSession(
+      updateDraftSessionFromAuthoritativeLedger(
         { ...(existing || {}), picks: [] },
         metadata,
         authoritativePicks,
+        [],
         timestamp,
       ),
       false,
@@ -527,6 +685,7 @@
     setAuthoritativeCaptureBlocked,
     updateDraftSession,
     updateDraftSessionFromAuthoritativeLedger,
+    updateDraftSessionFromSecondaryObservations,
   };
   globalScope.YahooDraftSessionStore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

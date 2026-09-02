@@ -49,6 +49,37 @@ test('does not include credentials, URLs, or arbitrary session properties', () =
   assert.equal('url' in context.draft, false);
 });
 
+test('strips injected non-allowlisted fields from Picks-panel observations', () => {
+  const context = sessionToAgentContext({
+    sport: 'f1',
+    leagueId: '123',
+    teamId: '6',
+    sessionKey: 'f1:123',
+    picks: [{
+      pickNumber: 1,
+      player: 'J. Gibbs',
+      position: 'RB',
+      nflTeam: 'DET',
+      fantasyTeam: 'Team 1',
+      source: 'picks-panel',
+      href: 'https://example.test/?auth=secret',
+      ariaLabel: 'private manager text',
+      injuryStatus: 'Q',
+    }],
+  }, '2026-08-31T22:45:00.000Z');
+
+  assert.deepEqual(context.picks, [{
+    pickNumber: 1,
+    player: 'J. Gibbs',
+    position: 'RB',
+    nflTeam: 'DET',
+    fantasyTeam: 'Team 1',
+  }]);
+  assert.equal(JSON.stringify(context).includes('example.test'), false);
+  assert.equal(JSON.stringify(context).includes('private manager'), false);
+  assert.equal(context.repair, undefined);
+});
+
 test('adds a top-level repair marker only for explicit repair sync', () => {
   const session = { sport: 'f1', leagueId: '123', teamId: '6', sessionKey: 'f1:123', picks: [] };
 

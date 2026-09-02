@@ -1,8 +1,10 @@
 (function initDraftParser(globalScope) {
   'use strict';
 
-  const POSITION_PATTERN = '(QB|RB|WR|TE|K|DEF|DST)';
+  const POSITION_PATTERN = '(QB|RB|WR|TE|K|DEF|DST|D/ST)';
   const TEAM_PATTERN = '([A-Z]{2,3})';
+  const TEAM_POSITION_SEPARATOR = '(?:\\s*[-–|/,•·]\\s*|\\s+)';
+  const INJURY_MARKER_PATTERN = /^(?:Q|O|D|IR|PUP|NFI|SUSP)$/i;
 
   function normalizeText(value) {
     return String(value ?? '')
@@ -21,7 +23,7 @@
   function normalizePosition(value) {
     const normalized = normalizeText(value).toUpperCase();
     if (!normalized) return undefined;
-    return normalized === 'DST' ? 'DEF' : normalized;
+    return normalized === 'DST' || normalized === 'D/ST' ? 'DEF' : normalized;
   }
 
   function parseDraftUrl(value) {
@@ -54,7 +56,7 @@
 
   function parseTeamAndPosition(text) {
     const teamThenPosition = text.match(
-      new RegExp(`\\b${TEAM_PATTERN}\\s*[-–|/,]?\\s*${POSITION_PATTERN}\\b`, 'i'),
+      new RegExp(`\\b${TEAM_PATTERN}${TEAM_POSITION_SEPARATOR}${POSITION_PATTERN}\\b`, 'i'),
     );
     if (teamThenPosition) {
       return {
@@ -64,7 +66,7 @@
     }
 
     const positionThenTeam = text.match(
-      new RegExp(`\\b${POSITION_PATTERN}\\s*[-–|/,]?\\s*${TEAM_PATTERN}\\b`, 'i'),
+      new RegExp(`\\b${POSITION_PATTERN}${TEAM_POSITION_SEPARATOR}${TEAM_PATTERN}\\b`, 'i'),
     );
     if (positionThenTeam) {
       return {
@@ -73,6 +75,70 @@
       };
     }
     return {};
+  }
+
+  function safePanelText(value, maximumLength) {
+    const normalized = normalizeText(value);
+    if (
+      !normalized ||
+      normalized.length > maximumLength ||
+      /[\r\n]/.test(normalized) ||
+      /(?:https?:\/\/|[?][^\s]*=|[<>])/i.test(normalized)
+    ) return null;
+    return normalized;
+  }
+
+  function parsePicksPanelSnapshot(snapshot) {
+    const pickNumberText = safePanelText(snapshot?.pickNumberText, 3);
+    if (!pickNumberText || !/^[1-9]\d{0,2}$/.test(pickNumberText)) return null;
+    const pickNumber = Number.parseInt(pickNumberText, 10);
+    if (pickNumber > 500) return null;
+
+    const detailsText = safePanelText(snapshot?.detailsText, 40);
+    const details = detailsText?.match(
+      /^(QB|RB|WR|TE|K|DEF|DST|D\/ST)\s*([•·])\s*([A-Z]{2,3})\s*\2\s*Bye\s+(\d{1,2})$/i,
+    );
+    if (!details) return null;
+    const byeWeek = Number.parseInt(details[4], 10);
+    if (byeWeek < 1 || byeWeek > 18) return null;
+
+    let playerLines = String(snapshot?.playerText ?? '')
+      .split(/\r?\n/)
+      .map(normalizeText)
+      .filter(Boolean);
+    if (playerLines.length === 2 && INJURY_MARKER_PATTERN.test(playerLines[1])) {
+      playerLines = playerLines.slice(0, 1);
+    }
+    if (playerLines.length === 1) {
+      const inlineStatus = playerLines[0].match(/^(.+\p{L})\s+(Q|O|D|IR|PUP|NFI|SUSP)$/iu);
+      if (inlineStatus) playerLines = [normalizeText(inlineStatus[1])];
+    }
+    if (playerLines.length !== 1) return null;
+    const player = safePanelText(playerLines[0], 80);
+    if (
+      !player ||
+      !/\p{L}/u.test(player) ||
+      !/^[\p{L}\p{M}\p{N} .,'’&()/-]+$/u.test(player)
+    ) return null;
+
+    let fantasyTeam = safePanelText(snapshot?.fantasyTeamText, 80);
+    if (
+      !fantasyTeam ||
+      !/\p{L}/u.test(fantasyTeam) ||
+      /\bjoined\b/i.test(fantasyTeam) ||
+      !/^[\p{L}\p{M}\p{N} .,'’&()_!#-]+$/u.test(fantasyTeam)
+    ) return null;
+    const isUserPick = /^(?:My|Your) Team$/i.test(fantasyTeam);
+    if (isUserPick) fantasyTeam = 'Your Team';
+
+    return {
+      pickNumber,
+      player,
+      position: normalizePosition(details[1]),
+      nflTeam: details[3].toUpperCase(),
+      fantasyTeam,
+      isUserPick,
+    };
   }
 
   function parsePickSnapshot(snapshot) {
@@ -290,6 +356,7 @@
     normalizeText,
     parseDraftUrl,
     parseLiveDraftSnapshot,
+    parsePicksPanelSnapshot,
     parsePickSnapshot,
     parseRoundByRoundSnapshot,
     upsertPicks,

@@ -95,15 +95,158 @@
 
   function findPickSnapshots(root) {
     const elements = root?.querySelectorAll?.(CANDIDATE_SELECTOR) || [];
+    const controlledSidebarPanels = new Set(
+      findPairedQueueAndPicksControls(root)
+        .flatMap(({ queuePanel, picksPanel }) => [queuePanel, picksPanel])
+        .filter(Boolean),
+    );
     const snapshots = [];
     const seen = new Set();
     for (const element of elements) {
       if (seen.has(element)) continue;
       seen.add(element);
+      if (!isRenderedElement(element)) continue;
+      const containingPanel = element.closest?.('[role="tabpanel"]');
+      if (
+        controlledSidebarPanels.has(containingPanel) ||
+        [...controlledSidebarPanels].some((panel) => panel?.contains?.(element))
+      ) continue;
       const snapshot = snapshotPickElement(element);
       if (snapshot) snapshots.push(snapshot);
     }
     return snapshots;
+  }
+
+  function exactTabText(tab) {
+    return clean(tab?.innerText || tab?.textContent).replace(/\s+/g, ' ');
+  }
+
+  function controlledPanel(root, tab) {
+    const id = clean(tab?.getAttribute?.('aria-controls'));
+    if (!id || id.length > 100 || !/^[A-Za-z][\w:.-]*$/.test(id)) return null;
+    const documentRoot = tab?.ownerDocument || root;
+    const panel = documentRoot?.getElementById?.(id) || root?.getElementById?.(id);
+    if (!panel || clean(panel.getAttribute?.('role')).toLowerCase() !== 'tabpanel') return null;
+    const labelledBy = clean(panel.getAttribute?.('aria-labelledby'));
+    if (labelledBy && (!tab.id || !labelledBy.split(/\s+/).includes(tab.id))) return null;
+    return panel;
+  }
+
+  function findPairedQueueAndPicksControls(root) {
+    const tabs = [...(root?.querySelectorAll?.('[role="tab"]') || [])];
+    const tablists = new Map();
+    for (const tab of tabs) {
+      const tablist = tab.closest?.('[role="tablist"]');
+      if (!tablist) continue;
+      if (!tablists.has(tablist)) tablists.set(tablist, []);
+      tablists.get(tablist).push(tab);
+    }
+
+    const pairs = [];
+    for (const [tablist, groupedTabs] of tablists) {
+      const picksTabs = groupedTabs.filter((tab) => /^Picks$/i.test(exactTabText(tab)));
+      const queueTabs = groupedTabs.filter((tab) => /^Queue$/i.test(exactTabText(tab)));
+      if (picksTabs.length !== 1 || queueTabs.length !== 1) continue;
+      const picksPanel = controlledPanel(root, picksTabs[0]);
+      const queuePanel = controlledPanel(root, queueTabs[0]);
+      if (!picksPanel || picksPanel === queuePanel) continue;
+      pairs.push({
+        tablist,
+        picksTab: picksTabs[0],
+        queueTab: queueTabs[0],
+        picksPanel,
+        queuePanel,
+      });
+    }
+    return pairs;
+  }
+
+  const PANEL_DETAILS_PATTERN = /^(QB|RB|WR|TE|K|DEF|DST|D\/ST)\s*([•·])\s*[A-Z]{2,3}\s*\2\s*Bye\s+(\d{1,2})$/i;
+  const PANEL_STATUS_PATTERN = /^(?:Q|O|D|IR|PUP|NFI|SUSP)$/i;
+  const PANEL_PLAYER_PATTERN = /^[\p{L}\p{M}\p{N} .,'’&()/-]+$/u;
+  const PANEL_TEAM_PATTERN = /^[\p{L}\p{M}\p{N} .,'’&()_!#-]+$/u;
+
+  function safePanelField(value, maximumLength, pattern) {
+    const normalized = clean(value);
+    if (
+      !normalized ||
+      normalized.length > maximumLength ||
+      /[\r\n]/.test(normalized) ||
+      /(?:https?:\/\/|[?][^\s]*=|[<>])/i.test(normalized) ||
+      !/\p{L}/u.test(normalized) ||
+      !pattern.test(normalized)
+    ) return null;
+    return normalized;
+  }
+
+  function snapshotPicksPanelElement(element) {
+    const source = typeof element?.innerText === 'string'
+      ? element.innerText
+      : element?.textContent;
+    if (!source || String(source).length > 500 || !isRenderedElement(element)) return null;
+    const lines = String(source)
+      .split(/\r?\n/)
+      .map(clean)
+      .filter(Boolean);
+    if (lines.length < 4 || lines.length > 6) return null;
+
+    const numberIndexes = lines
+      .map((line, index) => (/^[1-9]\d{0,2}$/.test(line) && Number(line) <= 500 ? index : -1))
+      .filter((index) => index >= 0);
+    const detailsIndexes = lines
+      .map((line, index) => {
+        const match = line.match(PANEL_DETAILS_PATTERN);
+        const byeWeek = match ? Number.parseInt(match[3], 10) : 0;
+        return match && byeWeek >= 1 && byeWeek <= 18 ? index : -1;
+      })
+      .filter((index) => index >= 0);
+    if (numberIndexes.length !== 1 || detailsIndexes.length !== 1) return null;
+
+    const numberIndex = numberIndexes[0];
+    const detailsIndex = detailsIndexes[0];
+    if (numberIndex >= detailsIndex) return null;
+    const playerLines = lines
+      .slice(numberIndex + 1, detailsIndex)
+      .filter((line) => !PANEL_STATUS_PATTERN.test(line));
+    const teamLines = [
+      ...lines.slice(0, numberIndex),
+      ...lines.slice(detailsIndex + 1),
+    ];
+    if (playerLines.length !== 1 || teamLines.length !== 1) return null;
+
+    const playerText = safePanelField(playerLines[0], 80, PANEL_PLAYER_PATTERN);
+    const fantasyTeamText = safePanelField(teamLines[0], 80, PANEL_TEAM_PATTERN);
+    if (!playerText || !fantasyTeamText || /\bjoined\b/i.test(fantasyTeamText)) return null;
+    return {
+      pickNumberText: lines[numberIndex],
+      playerText,
+      detailsText: lines[detailsIndex],
+      fantasyTeamText,
+    };
+  }
+
+  function findPicksPanelSnapshots(root) {
+    const activePairs = findPairedQueueAndPicksControls(root).filter((pair) => (
+      clean(pair.picksTab.getAttribute?.('aria-selected')).toLowerCase() === 'true' &&
+      clean(pair.queueTab.getAttribute?.('aria-selected')).toLowerCase() !== 'true' &&
+      isRenderedElement(pair.tablist) &&
+      isRenderedElement(pair.picksTab) &&
+      isRenderedElement(pair.picksPanel)
+    ));
+    if (activePairs.length !== 1) return [];
+
+    const descendants = [...(activePairs[0].picksPanel.querySelectorAll?.('*') || [])]
+      .slice(0, 1500);
+    const snapshotsBySignature = new Map();
+    for (const element of descendants) {
+      const snapshot = snapshotPicksPanelElement(element);
+      if (!snapshot) continue;
+      const signature = JSON.stringify(snapshot);
+      if (!snapshotsBySignature.has(signature)) snapshotsBySignature.set(signature, snapshot);
+    }
+    return [...snapshotsBySignature.values()].sort(
+      (left, right) => Number(left.pickNumberText) - Number(right.pickNumberText),
+    );
   }
 
   function findRoundByRoundSnapshots(root) {
@@ -294,12 +437,14 @@
       }
     }
     const ledgerScan = scanAuthoritativeRoundByRoundTables(root);
+    const picksPanelSnapshots = findPicksPanelSnapshots(root);
     return {
       candidateCount: candidates.length,
       snapshottedCandidateCount,
       roundByRoundTableCount: ledgerScan.tableCount,
       roundByRoundDistinctTableCount: ledgerScan.distinctTableCount,
       roundByRoundApparentRowCount: ledgerScan.apparentRowCount,
+      picksPanelSnapshotCount: picksPanelSnapshots.length,
       fieldPresence,
     };
   }
@@ -309,6 +454,7 @@
     collectDiagnosticSnapshots,
     findCurrentPickNumber,
     findLiveDraftSnapshot,
+    findPicksPanelSnapshots,
     findPickSnapshots,
     findRoundByRoundSnapshots,
     scanAuthoritativeRoundByRoundTables,

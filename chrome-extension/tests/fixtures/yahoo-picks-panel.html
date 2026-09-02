@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+  <body>
+    <div role="tablist" aria-label="Draft sidebar">
+      <button id="queue-tab" role="tab" aria-selected="false" aria-controls="queue-panel">Queue</button>
+      <button id="picks-tab" role="tab" aria-selected="true" aria-controls="picks-panel">Picks</button>
+    </div>
+
+    <section id="queue-panel" role="tabpanel" aria-labelledby="queue-tab" hidden>
+      <article role="listitem" data-pick-number="99">
+        Team 9<br>99<br>QUEUE DECOY<br>WR • Sea • Bye 8
+      </article>
+    </section>
+
+    <section id="picks-panel" role="tabpanel" aria-labelledby="picks-tab">
+      <div role="status">My Team joined</div>
+      <article role="listitem">Team 1<br>1<br>J. GIBBS<br>RB • Det • Bye 6</article>
+      <article role="listitem">Team 2<br>2<br>B. ROBINSON<br>RB • atl • Bye 11</article>
+      <article role="listitem">
+        Team 3<br>3<br>P. NACUA<br><span aria-label="Questionable">Q</span><br>WR • Lar • Bye 11
+      </article>
+      <article role="listitem">Your Team<br>4<br>C. MCCAFFREY<br><span>Q</span><br>RB • sf • Bye 8</article>
+      <article role="listitem">Team 5<br>Pick five<br>MALFORMED<br>RB • NYJ • Bye 9</article>
+      <article role="listitem">
+        Team 6<br>6<br>PRIVATE LINK<br>WR • MIA • Bye 12<br>
+        <a href="https://example.test/private?auth=secret">https://example.test/private?auth=secret</a>
+        <img src="https://example.test/avatar.png?token=secret" alt="Private avatar">
+      </article>
+      <div aria-hidden="true">
+        <article role="listitem" aria-hidden="true">Team 8<br>8<br>HIDDEN COPY<br>RB • Buf • Bye 7</article>
+      </div>
+    </section>
+
+    <div role="tablist" aria-label="Hidden responsive draft sidebar" hidden>
+      <button id="hidden-queue-tab" role="tab" aria-selected="false" aria-controls="hidden-queue-panel">Queue</button>
+      <button id="hidden-picks-tab" role="tab" aria-selected="true" aria-controls="hidden-picks-panel">Picks</button>
+    </div>
+    <section id="hidden-picks-panel" role="tabpanel" aria-labelledby="hidden-picks-tab" hidden>
+      <article role="listitem">Team 7<br>7<br>RESPONSIVE DECOY<br>TE • KC • Bye 10</article>
+    </section>
+  </body>
+</html>

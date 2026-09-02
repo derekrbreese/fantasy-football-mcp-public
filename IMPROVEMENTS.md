@@ -4,7 +4,7 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 
 ## Delivered baseline
 
-- Firefox/Chrome Manifest V3 recorder with authoritative Round-by-Round backfill and last-pick capture.
+- Firefox/Chrome Manifest V3 recorder with authoritative Round-by-Round backfill plus strict rendered-card capture from the active Picks tab and last-pick banner. Secondary capture accumulates virtualized windows without auto-scrolling, cannot repair or replace the ledger, and stays recommendation-blocked until an authoritative baseline exists.
 - Private loopback sync plus sanitized JSON/CSV export.
 - Complete pick, fantasy-team, order, and user-roster context.
 - League-specific state validation and rollback-resistant private persistence.

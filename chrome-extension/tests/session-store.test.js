@@ -10,6 +10,7 @@ const {
   prepareAutomaticAuthoritativeUpdate,
   repairDraftSession,
   sameDraftIdentity,
+  updateDraftSessionFromSecondaryObservations,
   updateDraftSessionFromAuthoritativeLedger,
   updateDraftSession,
 } = require('../session-store.js');
@@ -327,6 +328,358 @@ test('automatic authoritative scan may advance the saved ledger', () => {
   assert.equal(result.session.picks.at(-1).pickNumber, 21);
 });
 
+test('same-scan secondary conflicts remain visible after establishing an authoritative baseline', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const result = prepareAutomaticAuthoritativeUpdate(
+    undefined,
+    metadata,
+    [{
+      pickNumber: 1,
+      player: 'Jahmyr Gibbs',
+      position: 'RB',
+      nflTeam: 'DET',
+      fantasyTeam: 'Team 1',
+    }],
+    [
+      { pickNumber: 1, player: 'J. GIBBS', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1' },
+      { pickNumber: 1, player: 'P. Nacua', position: 'WR', nflTeam: 'LAR', fantasyTeam: 'Team 2' },
+      { pickNumber: 2, player: 'Future race', position: 'WR', nflTeam: 'MIA', fantasyTeam: 'Team 3' },
+    ],
+    '2026-08-01T00:01:00.000Z',
+    { currentPickNumber: 2 },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.session.picks.map((pick) => pick.pickNumber), [1, 1]);
+  assert.equal(result.session.picks[0].player, 'Jahmyr Gibbs');
+  assert.deepEqual(analyzeLedger(result.session.picks).duplicatePickNumbers, [1]);
+});
+
+test('secondary observations cannot fill a missing number in the same authoritative scan', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const result = prepareAutomaticAuthoritativeUpdate(
+    undefined,
+    metadata,
+    [
+      { pickNumber: 1, player: 'Player 1' },
+      { pickNumber: 2, player: 'Player 2' },
+      { pickNumber: 4, player: 'Player 4' },
+    ],
+    [{ pickNumber: 3, player: 'Panel Player 3' }],
+    '2026-08-01T00:01:00.000Z',
+    { currentPickNumber: 5 },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.session.picks.map((pick) => pick.pickNumber), [1, 2, 4]);
+  assert.deepEqual(analyzeLedger(result.session.picks).missingPickNumbers, [3]);
+});
+
+test('equivalent panel and last-pick observations dedupe after an authoritative baseline', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    picks: [{ pickNumber: 1, player: 'J. Gibbs', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1' }],
+  };
+
+  const updated = updateDraftSession(existing, metadata, [
+    { pickNumber: 2, player: 'B. Robinson', position: 'RB', nflTeam: 'ATL', fantasyTeam: 'Team 4', isUserPick: false },
+    { pickNumber: 2, player: 'B. Robinson', position: 'RB', nflTeam: 'ATL', fantasyTeam: 'Your Team', isUserPick: true },
+  ], '2026-08-01T00:01:00.000Z');
+
+  assert.deepEqual(updated.picks.map((pick) => pick.pickNumber), [1, 2]);
+  assert.equal(updated.picks[1].isUserPick, true);
+  assert.equal(updated.picks[1].fantasyTeam, 'Your Team');
+});
+
+test('initialed Picks-panel names match full authoritative names only with position and NFL team', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    picks: [{
+      pickNumber: 1,
+      player: 'Jahmyr Gibbs',
+      position: 'RB',
+      nflTeam: 'DET',
+      fantasyTeam: 'Team 4',
+    }],
+  };
+
+  const compatible = updateDraftSession(existing, metadata, [{
+    pickNumber: 1,
+    player: 'J. GIBBS',
+    position: 'RB',
+    nflTeam: 'DET',
+    fantasyTeam: 'Your Team',
+    isUserPick: true,
+  }], '2026-08-01T00:01:00.000Z');
+  assert.equal(compatible.picks.length, 1);
+  assert.equal(compatible.picks[0].player, 'Jahmyr Gibbs');
+  assert.equal(compatible.picks[0].isUserPick, true);
+
+  const incompatible = updateDraftSession(existing, metadata, [{
+    pickNumber: 1,
+    player: 'J. GIBBS',
+    position: 'WR',
+    nflTeam: 'DET',
+    fantasyTeam: 'Your Team',
+  }], '2026-08-01T00:01:00.000Z');
+  assert.equal(incompatible.picks.length, 2);
+  assert.deepEqual(analyzeLedger(incompatible.picks).duplicatePickNumbers, [1]);
+});
+
+test('conflicting same-number secondary identities remain duplicates and fail closed', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    picks: [{ pickNumber: 1, player: 'J. Gibbs', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1' }],
+  };
+
+  const updated = updateDraftSession(existing, metadata, [
+    { pickNumber: 2, player: 'B. Robinson', position: 'RB', nflTeam: 'ATL', fantasyTeam: 'Team 2' },
+    { pickNumber: 2, player: 'P. Nacua', position: 'WR', nflTeam: 'LAR', fantasyTeam: 'Team 3' },
+  ], '2026-08-01T00:01:00.000Z');
+
+  assert.deepEqual(updated.picks.map((pick) => pick.pickNumber), [1, 2, 2]);
+  assert.deepEqual(analyzeLedger(updated.picks).duplicatePickNumbers, [2]);
+});
+
+test('secondary conflicts cannot replace an authoritative pick and remain blocking duplicates', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    picks: [{ pickNumber: 1, player: 'Authoritative Player', fantasyTeam: 'Team 1' }],
+  };
+
+  const updated = updateDraftSession(existing, metadata, [
+    { pickNumber: 1, player: 'Conflicting Panel Player', fantasyTeam: 'Team 9' },
+    { pickNumber: 2, player: 'New Panel Player', position: 'RB', nflTeam: 'ATL', fantasyTeam: 'Team 2' },
+  ], '2026-08-01T00:01:00.000Z');
+
+  assert.deepEqual(updated.picks.map((pick) => pick.player), [
+    'Authoritative Player',
+    'Conflicting Panel Player',
+    'New Panel Player',
+  ]);
+  assert.deepEqual(analyzeLedger(updated.picks).duplicatePickNumbers, [1]);
+});
+
+test('overlapping Picks-panel windows accumulate without duplicating their overlap', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const baseline = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    picks: [{ pickNumber: 1, player: 'Player 1', fantasyTeam: 'Team 1' }],
+  };
+  const first = updateDraftSession(baseline, metadata, [
+    { pickNumber: 2, player: 'Player 2', fantasyTeam: 'Team 2' },
+    { pickNumber: 3, player: 'Player 3', fantasyTeam: 'Team 3' },
+  ], '2026-08-01T00:01:00.000Z');
+  const second = updateDraftSession(first, metadata, [
+    { pickNumber: 3, player: 'Player 3', fantasyTeam: 'Team 3' },
+    { pickNumber: 4, player: 'Player 4', fantasyTeam: 'Team 4' },
+  ], '2026-08-01T00:02:00.000Z');
+
+  assert.deepEqual(second.picks.map((pick) => pick.pickNumber), [1, 2, 3, 4]);
+});
+
+test('secondary capture cannot certify a pick that was missing from the saved ledger', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    authoritativeCaptureBlocked: false,
+    picks: [
+      { pickNumber: 1, player: 'Player 1' },
+      { pickNumber: 3, player: 'Player 3' },
+    ],
+  };
+
+  const updated = updateDraftSessionFromSecondaryObservations(
+    existing,
+    metadata,
+    [{ pickNumber: 2, player: 'Panel Player 2' }],
+    '2026-08-01T00:01:00.000Z',
+  );
+
+  assert.deepEqual(updated.picks.map((pick) => pick.pickNumber), [1, 2, 3]);
+  assert.equal(updated.authoritativeCaptureBlocked, true);
+});
+
+test('filling a gap created by an earlier out-of-order panel append remains blocked', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const baseline = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    authoritativeCaptureBlocked: false,
+    picks: Array.from({ length: 5 }, (_unused, index) => ({
+      pickNumber: index + 1,
+      player: `Player ${index + 1}`,
+    })),
+  };
+  const outOfOrder = updateDraftSessionFromSecondaryObservations(
+    baseline,
+    metadata,
+    [{ pickNumber: 7, player: 'Player 7' }],
+    '2026-08-01T00:01:00.000Z',
+  );
+  assert.deepEqual(analyzeLedger(outOfOrder.picks).missingPickNumbers, [6]);
+  assert.equal(outOfOrder.authoritativeCaptureBlocked, false);
+
+  const filled = updateDraftSessionFromSecondaryObservations(
+    outOfOrder,
+    metadata,
+    [{ pickNumber: 6, player: 'Player 6' }],
+    '2026-08-01T00:02:00.000Z',
+  );
+  assert.equal(analyzeLedger(filled.picks).isComplete, true);
+  assert.equal(filled.authoritativeCaptureBlocked, true);
+});
+
+test('strictly next secondary pick after a complete baseline stays unblocked', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    authoritativeCaptureBlocked: false,
+    picks: [
+      { pickNumber: 1, player: 'Player 1' },
+      { pickNumber: 2, player: 'Player 2' },
+    ],
+  };
+
+  const updated = updateDraftSessionFromSecondaryObservations(
+    existing,
+    metadata,
+    [{ pickNumber: 3, player: 'Player 3' }],
+    '2026-08-01T00:01:00.000Z',
+  );
+
+  assert.deepEqual(updated.picks.map((pick) => pick.pickNumber), [1, 2, 3]);
+  assert.equal(updated.authoritativeCaptureBlocked, false);
+});
+
+test('numbered panel-only capture persists observations but sets a durable blocker', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const session = updateDraftSessionFromSecondaryObservations(
+    undefined,
+    metadata,
+    [{ pickNumber: 1, player: 'J. Gibbs', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1' }],
+    '2026-08-01T00:01:00.000Z',
+  );
+
+  assert.equal(session.picks.length, 1);
+  assert.equal(session.authoritativeCaptureBlocked, true);
+
+  const laterPanelScan = updateDraftSessionFromSecondaryObservations(
+    session,
+    metadata,
+    [{ pickNumber: 2, player: 'B. Robinson', position: 'RB', nflTeam: 'ATL', fantasyTeam: 'Team 2' }],
+    '2026-08-01T00:02:00.000Z',
+  );
+  assert.equal(laterPanelScan.authoritativeCaptureBlocked, true);
+});
+
+test('panel-only capture preserves incompatible same-number observations as duplicates', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const first = updateDraftSessionFromSecondaryObservations(
+    undefined,
+    metadata,
+    [{ pickNumber: 1, player: 'J. Gibbs', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1' }],
+    '2026-08-01T00:01:00.000Z',
+  );
+  const conflicted = updateDraftSessionFromSecondaryObservations(
+    first,
+    metadata,
+    [{ pickNumber: 1, player: 'P. Nacua', position: 'WR', nflTeam: 'LAR', fantasyTeam: 'Team 2' }],
+    '2026-08-01T00:02:00.000Z',
+  );
+
+  assert.equal(conflicted.numberedLedgerAuthoritative, undefined);
+  assert.equal(conflicted.authoritativeCaptureBlocked, true);
+  assert.deepEqual(conflicted.picks.map((pick) => pick.player), ['J. Gibbs', 'P. Nacua']);
+  assert.deepEqual(analyzeLedger(conflicted.picks).duplicatePickNumbers, [1]);
+});
+
+test('verified Round-by-Round scan can clear a panel-only capture blocker', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const panelOnly = updateDraftSessionFromSecondaryObservations(
+    undefined,
+    metadata,
+    [{ pickNumber: 1, player: 'J. Gibbs', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1' }],
+    '2026-08-01T00:01:00.000Z',
+  );
+  const verified = prepareAutomaticAuthoritativeUpdate(
+    panelOnly,
+    metadata,
+    panelOnly.picks,
+    [],
+    '2026-08-01T00:02:00.000Z',
+    { currentPickNumber: 2 },
+  );
+
+  assert.equal(verified.ok, true);
+  assert.equal(verified.session.numberedLedgerAuthoritative, true);
+  assert.equal(verified.session.authoritativeCaptureBlocked, false);
+});
+
+test('Round-by-Round can establish only the authoritative marker with otherwise identical state', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const panelOnly = updateDraftSessionFromSecondaryObservations(
+    undefined,
+    metadata,
+    [{ pickNumber: 1, player: 'J. Gibbs', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1' }],
+    '2026-08-01T00:01:00.000Z',
+  );
+  const result = prepareAutomaticAuthoritativeUpdate(
+    panelOnly,
+    metadata,
+    panelOnly.picks,
+    [],
+    '2026-08-01T00:02:00.000Z',
+    { currentPickNumber: null },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.session.picks, panelOnly.picks);
+  assert.equal(result.session.authoritativeCaptureBlocked, true);
+  assert.equal(panelOnly.numberedLedgerAuthoritative, undefined);
+  assert.equal(result.session.numberedLedgerAuthoritative, true);
+});
+
+test('repair establishes a baseline so later panel picks append without reblocking', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const panelOnly = updateDraftSessionFromSecondaryObservations(
+    undefined,
+    metadata,
+    [{ pickNumber: 1, player: 'Incorrect observation', fantasyTeam: 'Team 1' }],
+    '2026-08-01T00:01:00.000Z',
+  );
+  const repaired = repairDraftSession(
+    panelOnly,
+    metadata,
+    [{ pickNumber: 1, player: 'J. Gibbs', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1' }],
+    '2026-08-01T00:02:00.000Z',
+  );
+
+  assert.equal(repaired.ok, true);
+  assert.equal(repaired.session.numberedLedgerAuthoritative, true);
+  assert.equal(repaired.session.authoritativeCaptureBlocked, false);
+
+  const laterPanelScan = updateDraftSessionFromSecondaryObservations(
+    repaired.session,
+    metadata,
+    [{ pickNumber: 2, player: 'B. Robinson', position: 'RB', nflTeam: 'ATL', fantasyTeam: 'Team 2' }],
+    '2026-08-01T00:03:00.000Z',
+  );
+  assert.equal(laterPanelScan.authoritativeCaptureBlocked, false);
+  assert.deepEqual(laterPanelScan.picks.map((pick) => pick.pickNumber), [1, 2]);
+});
+
 test('safe authoritative scan clears a durable capture-integrity blocker', () => {
   const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
   const existing = {
@@ -569,7 +922,7 @@ test('authoritative scan preserves duplicate rows and gaps in server-bound picks
     '2026-08-01T00:02:30.000Z',
   );
   const context = sessionToAgentContext(afterOrdinaryScan, '2026-08-01T00:02:31.000Z');
-  assert.deepEqual(context.picks.map((pick) => pick.pickNumber), [1, 2, 2, 4, 5, undefined]);
+  assert.deepEqual(context.picks.map((pick) => pick.pickNumber), [1, 2, 2, 2, 4, 5, undefined]);
   assert.equal(context.picks.at(-1).player, 'C. Olave');
   const blockedHealth = analyzeLedger(context.picks);
   assert.deepEqual(blockedHealth.missingPickNumbers, [3]);

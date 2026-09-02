@@ -14,7 +14,7 @@ Yahoo Fantasy Draft Recorder records completed picks shown in a Yahoo Fantasy Fo
 
 **Detailed description:**
 
-Yahoo Fantasy Draft Recorder watches the Round-by-Round results on an open Yahoo Fantasy Football draft page. It records the overall pick, round, player, NFL position and team, drafting fantasy team, and recording time. Open the extension popup to review the latest picks, repair or rescan the ledger, clear local history, export CSV, download agent-ready JSON, or open the local Draft Assistant dashboard.
+Yahoo Fantasy Draft Recorder watches the authoritative Round-by-Round results on an open Yahoo Fantasy Football draft page. It also uses strict, currently rendered cards in the active Picks tab as a secondary observation feed without auto-scrolling Yahoo. It records the overall pick, round when available, player, NFL position and team, drafting fantasy team, and recording time. Open the extension popup to review the latest picks, repair or rescan the ledger, clear local history, export CSV, download agent-ready JSON, or open the local Draft Assistant dashboard.
 
 When the user's fantasy-football MCP server is running locally, the extension sends sanitized draft context to `127.0.0.1` so the user's own agent can make next-pick recommendations. A recommendation request contains only a schema version, explicit league ID, and bounded strategy/count/simulation settings. Chrome users can open the full loopback dashboard; Firefox additionally exposes the same read-only recommendations in a persistent sidebar. Neither surface drafts players or modifies Yahoo. The extension does not send draft data to the extension developer or a third party, read Yahoo credentials, or retain Yahoo authentication URL parameters.
 
@@ -26,7 +26,7 @@ Required to save recorded draft picks in `chrome.storage.local` so history remai
 
 ### Host access: `https://football.fantasysports.yahoo.com/draftclient/*`
 
-Required to run the content script only on Yahoo Fantasy Sports draft-client pages. The content script reads completed-pick rows from the page DOM and watches that DOM for newly posted picks. Access is restricted to `/draftclient/`; the extension does not request access to unrelated Yahoo pages.
+Required to run the content script only on Yahoo Fantasy Sports draft-client pages. The content script reads completed-pick rows from the page DOM, observes strict rendered cards in the active Picks tab, and watches that DOM for newly posted picks. Round-by-Round remains authoritative; the secondary feed cannot repair or replace it. Access is restricted to `/draftclient/`; the extension does not request access to unrelated Yahoo pages.
 
 ### Host access: `http://127.0.0.1/*`
 
@@ -50,6 +50,7 @@ None. All JavaScript used by the extension is packaged with it. There are no rem
 - Popup, sidebar, and dashboard response content is written with `textContent`, not interpreted as HTML.
 - CSV export neutralizes formula-leading characters to reduce spreadsheet injection risk.
 - The draft URL parser keeps only the sport, league ID, and team ID path segments; query parameters are discarded.
+- Picks-tab scanning requires a rendered active Picks panel semantically paired with Queue, emits only allowlisted pick fields, ignores Queue entries and injury badges, and does not retain links, images, attributes, or arbitrary panel text.
 - The extension requests only `storage`, narrowly scoped Yahoo draft-client host access, and loopback host access for local sync and recommendation UI routes.
 - The packaged background script is a private lock broker. It receives only the allowlisted Yahoo session key needed to serialize same-session extension work, and keeps only an opaque nonce plus expiry in browser-session storage to fence a background restart. It receives no page URL, query parameters, cookies, credentials, player data, or arbitrary DOM fields.
 

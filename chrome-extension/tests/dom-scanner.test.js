@@ -6,11 +6,13 @@ const {
   collectDiagnosticSnapshots,
   findCurrentPickNumber,
   findLiveDraftSnapshot,
+  findPicksPanelSnapshots,
+  findPickSnapshots,
   findRoundByRoundSnapshots,
   scanAuthoritativeRoundByRoundTables,
   snapshotPickElement,
 } = require('../dom-scanner.js');
-const { parseRoundByRoundSnapshot } = require('../draft-parser.js');
+const { parsePicksPanelSnapshot, parseRoundByRoundSnapshot } = require('../draft-parser.js');
 const { evaluateAuthoritativeLedgerScan } = require('../ledger-health.js');
 
 function node(textContent) {
@@ -62,6 +64,145 @@ test('snapshots semantic pick fields from a candidate element', () => {
 test('does not snapshot oversized containers that are likely the whole draft page', () => {
   const element = fakeElement({ text: `Pick 1 ${'player '.repeat(200)}` });
   assert.equal(snapshotPickElement(element), null);
+});
+
+test('extracts only visible cards from the active semantic Yahoo Picks tab', () => {
+  const snapshots = findPicksPanelSnapshots(loadDomFixture('yahoo-picks-panel.html'));
+
+  assert.deepEqual(snapshots, [
+    {
+      pickNumberText: '1',
+      playerText: 'J. GIBBS',
+      detailsText: 'RB • Det • Bye 6',
+      fantasyTeamText: 'Team 1',
+    },
+    {
+      pickNumberText: '2',
+      playerText: 'B. ROBINSON',
+      detailsText: 'RB • atl • Bye 11',
+      fantasyTeamText: 'Team 2',
+    },
+    {
+      pickNumberText: '3',
+      playerText: 'P. NACUA',
+      detailsText: 'WR • Lar • Bye 11',
+      fantasyTeamText: 'Team 3',
+    },
+    {
+      pickNumberText: '4',
+      playerText: 'C. MCCAFFREY',
+      detailsText: 'RB • sf • Bye 8',
+      fantasyTeamText: 'Your Team',
+    },
+  ]);
+  assert.deepEqual(snapshots.map(parsePicksPanelSnapshot), [
+    { pickNumber: 1, player: 'J. GIBBS', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1', isUserPick: false },
+    { pickNumber: 2, player: 'B. ROBINSON', position: 'RB', nflTeam: 'ATL', fantasyTeam: 'Team 2', isUserPick: false },
+    { pickNumber: 3, player: 'P. NACUA', position: 'WR', nflTeam: 'LAR', fantasyTeam: 'Team 3', isUserPick: false },
+    { pickNumber: 4, player: 'C. MCCAFFREY', position: 'RB', nflTeam: 'SF', fantasyTeam: 'Your Team', isUserPick: true },
+  ]);
+
+  const serialized = JSON.stringify(snapshots);
+  for (const forbidden of ['Questionable', 'https:', 'example.test', 'auth=', 'secret', 'avatar', 'joined', 'QUEUE', 'HIDDEN', 'RESPONSIVE']) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test('requires one rendered active Picks tab paired with Queue', () => {
+  const visible = (text, attributes = {}, parentElement = null) => ({
+    innerText: text,
+    textContent: text,
+    parentElement,
+    hidden: false,
+    getAttribute: (name) => attributes[name] ?? null,
+    closest(selector) {
+      if (selector === '[role="tablist"]') return parentElement;
+      return null;
+    },
+  });
+  const tablist = visible('', { role: 'tablist' });
+  const picks = visible('Picks', { role: 'tab', 'aria-selected': 'false', 'aria-controls': 'picks-panel' }, tablist);
+  const queue = visible('Queue', { role: 'tab', 'aria-selected': 'true', 'aria-controls': 'queue-panel' }, tablist);
+  const root = {
+    querySelectorAll: (selector) => (selector === '[role="tab"]' ? [queue, picks] : []),
+    getElementById: () => null,
+  };
+
+  assert.deepEqual(findPicksPanelSnapshots(root), []);
+});
+
+test('generic pick scanning excludes cards mounted under semantic Queue and Picks panels', () => {
+  const panel = (id, labelledBy) => ({
+    id,
+    getAttribute(name) {
+      return { role: 'tabpanel', 'aria-labelledby': labelledBy }[name] ?? null;
+    },
+    contains(element) { return element === card; },
+  });
+  let card;
+  const picksPanel = panel('picks-panel', 'picks-tab');
+  const queuePanel = panel('queue-panel', 'queue-tab');
+  const tablist = { getAttribute: (name) => name === 'role' ? 'tablist' : null };
+  const tab = (id, text, controls, selected) => ({
+    id,
+    innerText: text,
+    getAttribute(name) {
+      return {
+        role: 'tab',
+        'aria-controls': controls,
+        'aria-selected': selected,
+      }[name] ?? null;
+    },
+    closest: (selector) => selector === '[role="tablist"]' ? tablist : null,
+  });
+  const queueTab = tab('queue-tab', 'Queue', 'queue-panel', 'false');
+  const picksTab = tab('picks-tab', 'Picks', 'picks-panel', 'true');
+  card = fakeElement({
+    text: '1\nJ. Gibbs\nDET - RB\nTeam 1',
+    attributes: { 'data-pick-number': '1' },
+  });
+  card.closest = (selector) => selector === '[role="tabpanel"]' ? picksPanel : null;
+  const root = {
+    querySelectorAll(selector) {
+      if (selector === '[role="tab"]') return [queueTab, picksTab];
+      return [card];
+    },
+    getElementById(id) {
+      return { 'queue-panel': queuePanel, 'picks-panel': picksPanel }[id] || null;
+    },
+  };
+
+  assert.deepEqual(findPickSnapshots(root), []);
+});
+
+test('generic pick scanning ignores hidden and non-rendered responsive candidates', () => {
+  const visible = fakeElement({
+    text: '1\nJ. Gibbs\nDET - RB\nTeam 1',
+    attributes: { 'data-pick-number': '1' },
+  });
+  const hidden = fakeElement({
+    text: '2\nHidden Player\nATL - RB\nTeam 2',
+    attributes: { 'data-pick-number': '2' },
+  });
+  hidden.hidden = true;
+  const ariaHidden = fakeElement({
+    text: '3\nAria Hidden\nLAR - WR\nTeam 3',
+    attributes: { 'data-pick-number': '3', 'aria-hidden': 'true' },
+  });
+  const styledHidden = fakeElement({
+    text: '4\nStyled Hidden\nSF - RB\nTeam 4',
+    attributes: { 'data-pick-number': '4' },
+  });
+  styledHidden.ownerDocument = {
+    defaultView: { getComputedStyle: () => ({ display: 'none', visibility: 'visible' }) },
+  };
+  const root = {
+    querySelectorAll(selector) {
+      return selector === '[role="tab"]' ? [] : [visible, hidden, ariaHidden, styledHidden];
+    },
+  };
+
+  assert.deepEqual(findPickSnapshots(root), [snapshotPickElement(visible)]);
 });
 
 test('finds Yahoo live status and last-pick banners by their visible text', () => {
@@ -300,6 +441,7 @@ test('collects only structural diagnostic counters from adversarial DOM', () => 
     roundByRoundTableCount: 0,
     roundByRoundDistinctTableCount: 0,
     roundByRoundApparentRowCount: 0,
+    picksPanelSnapshotCount: 0,
     fieldPresence: {
       pickNumber: 1,
       roundNumber: 0,

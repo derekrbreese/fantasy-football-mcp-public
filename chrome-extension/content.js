@@ -23,6 +23,7 @@
     candidateCount: 0,
     parsedCount: 0,
     ledgerCandidateCount: 0,
+    picksPanelCandidateCount: 0,
     recordedCount: 0,
     authoritativeLedgerHealth: null,
     authoritativeLedgerError: null,
@@ -230,6 +231,7 @@
     }
     const now = new Date().toISOString();
     const snapshots = YahooDraftDomScanner.findPickSnapshots(document);
+    const picksPanelSnapshots = YahooDraftDomScanner.findPicksPanelSnapshots(document);
     const ledgerSnapshots = YahooDraftDomScanner.findRoundByRoundSnapshots(document);
     const authoritativeResult = evaluateVisibleAuthoritativeLedger();
     const authoritativeEvaluation = authoritativeResult.evaluation;
@@ -239,6 +241,10 @@
     const nonLedgerPicks = snapshots
       .map((snapshot) => YahooDraftParser.parsePickSnapshot(snapshot))
       .filter(Boolean);
+    const picksPanelPicks = picksPanelSnapshots
+      .map((snapshot) => YahooDraftParser.parsePicksPanelSnapshot(snapshot))
+      .filter(Boolean);
+    nonLedgerPicks.push(...picksPanelPicks);
     const ledgerPicks = ledgerSnapshots
       .map((snapshot) => YahooDraftParser.parseRoundByRoundSnapshot(snapshot))
       .filter(Boolean);
@@ -251,7 +257,8 @@
 
     diagnostics.lastScanAt = now;
     diagnostics.ledgerCandidateCount = ledgerSnapshots.length;
-    diagnostics.candidateCount = snapshots.length + ledgerSnapshots.length + (liveSnapshot ? 1 : 0);
+    diagnostics.picksPanelCandidateCount = picksPanelSnapshots.length;
+    diagnostics.candidateCount = snapshots.length + picksPanelSnapshots.length + ledgerSnapshots.length + (liveSnapshot ? 1 : 0);
     diagnostics.parsedCount = picks.length;
 
     lease?.throwIfLost?.();
@@ -284,7 +291,12 @@
           );
         } else {
           updated = YahooDraftSessionStore.setAuthoritativeCaptureBlocked(
-            YahooDraftSessionStore.updateDraftSession(existing, metadata, picks, now),
+            YahooDraftSessionStore.updateDraftSessionFromSecondaryObservations(
+              existing,
+              metadata,
+              picks,
+              now,
+            ),
             true,
           );
         }
@@ -292,7 +304,12 @@
         updated = automaticUpdate.session;
       }
     } else {
-      updated = YahooDraftSessionStore.updateDraftSession(existing, metadata, picks, now);
+      updated = YahooDraftSessionStore.updateDraftSessionFromSecondaryObservations(
+        existing,
+        metadata,
+        picks,
+        now,
+      );
       if (authoritativeEvaluation.error) {
         updated = YahooDraftSessionStore.setAuthoritativeCaptureBlocked(updated, true);
       }
@@ -306,7 +323,9 @@
       (existing?.authoritativeCaptureBlocked === true) !==
         (updated.authoritativeCaptureBlocked === true) ||
       (existing?.authoritativeCaptureBlocked === false) !==
-        (updated.authoritativeCaptureBlocked === false)
+        (updated.authoritativeCaptureBlocked === false) ||
+      (existing?.numberedLedgerAuthoritative === true) !==
+        (updated.numberedLedgerAuthoritative === true)
     ) {
       await leaseAwait(
         lease,
@@ -508,6 +527,7 @@
           candidateCount: diagnostics.candidateCount,
           parsedCount: diagnostics.parsedCount,
           ledgerCandidateCount: diagnostics.ledgerCandidateCount,
+          picksPanelCandidateCount: diagnostics.picksPanelCandidateCount,
           recordedCount: diagnostics.recordedCount,
           syncStatus: diagnostics.syncStatus,
           hasCompletedScan: Boolean(diagnostics.lastScanAt),
