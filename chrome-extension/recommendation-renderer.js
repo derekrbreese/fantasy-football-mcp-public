@@ -28,6 +28,36 @@
     return section;
   }
 
+  function renderDecisionBrief(documentRef, brief) {
+    const tone = ['urgent', 'next', 'watch', 'unknown'].includes(brief?.turnTone)
+      ? brief.turnTone
+      : 'unknown';
+    const section = element(documentRef, 'section', `decision-brief decision-brief--${tone}`);
+    section.setAttribute('aria-label', 'At-a-glance draft decision');
+    section.appendChild(element(documentRef, 'p', 'turn-status', brief.turnLabel));
+
+    const primary = element(documentRef, 'div', 'decision-primary');
+    primary.appendChild(element(documentRef, 'span', 'decision-label', brief.primaryLabel));
+    primary.appendChild(element(documentRef, 'strong', 'decision-name', brief.primaryName));
+    primary.appendChild(element(documentRef, 'span', 'decision-meta', brief.primaryMeta));
+    section.appendChild(primary);
+
+    if (brief.fallbacks?.length) {
+      const fallback = element(documentRef, 'div', 'decision-fallbacks');
+      fallback.appendChild(element(documentRef, 'span', 'decision-label', 'If unavailable'));
+      const fallbackList = element(documentRef, 'div', 'fallback-list');
+      for (const candidate of brief.fallbacks) {
+        const item = element(documentRef, 'span', 'fallback-item');
+        item.appendChild(element(documentRef, 'strong', '', candidate.name));
+        item.appendChild(element(documentRef, 'small', '', candidate.meta));
+        fallbackList.appendChild(item);
+      }
+      fallback.appendChild(fallbackList);
+      section.appendChild(fallback);
+    }
+    return section;
+  }
+
   function renderRecommendation(documentRef, recommendation) {
     const card = element(documentRef, 'article', 'recommendation-card');
     const heading = element(documentRef, 'div', 'recommendation-heading');
@@ -134,6 +164,10 @@
     root.appendChild(status);
 
     if (model.draftContext.length) root.appendChild(renderDraftContext(documentRef, model.draftContext));
+
+    if (model.decisionBrief) {
+      root.appendChild(renderDecisionBrief(documentRef, model.decisionBrief));
+    }
 
     if (model.ledgerIssues.length) {
       const blockers = element(documentRef, 'section', 'notice notice--blocked');

@@ -14,6 +14,7 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Popup ledger diagnostics with exact missing, duplicate, and sanitized unnumbered-pick details, plus guarded authoritative full repair.
 - Per-league browser storage, durable repair/reset reconciliation, and a cross-browser extension-background lock broker with bounded heartbeats, expiring session fences, and cooperative lease cancellation instead of Firefox content-script Web Locks.
 - Persistent Firefox Draft Assistant sidebar with explicit league selection, shared fail-closed recommendation components, and no Yahoo-page injection or draft actions.
+- Clock-aware at-a-glance decision brief in the sidebar and dashboard with explicit on-clock/next/picks-away states, a primary pick, two immediate fallbacks, and a guarded plain-R refresh shortcut. It uses reliable pick distance and does not invent a countdown timer.
 - Packaged cross-browser football icons plus compact, overflow-safe FantasyPros source and recent-news presentation in the sidebar and dashboard.
 - Loopback-only local dashboard with a configurable recommendation board, roster and draft-history views, specialist comparisons, critic checks, and data-source diagnostics.
 - Exact-session local DraftSheets/JSON profile import with bounded parsing, private atomic storage, zero Yahoo API calls when a matching profile is available, and current-season per-sport defaults for future profileless recorder drafts without overwriting exact profiles or copying picks.

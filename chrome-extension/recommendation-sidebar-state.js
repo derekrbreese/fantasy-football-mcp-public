@@ -28,6 +28,21 @@
     return validSession(sessions?.[key]) ? key : null;
   }
 
+  function isRefreshShortcut(event) {
+    const tagName = typeof event?.target?.tagName === 'string'
+      ? event.target.tagName.toUpperCase()
+      : '';
+    const isEditable = event?.target?.isContentEditable === true ||
+      ['INPUT', 'SELECT', 'TEXTAREA'].includes(tagName);
+    return String(event?.key || '').toLowerCase() === 'r' &&
+      event?.repeat !== true &&
+      event?.altKey !== true &&
+      event?.ctrlKey !== true &&
+      event?.metaKey !== true &&
+      event?.shiftKey !== true &&
+      !isEditable;
+  }
+
   function recommendationStillMatchesSelection(
     requestedKey,
     selectedKey,
@@ -196,6 +211,7 @@
   const api = {
     createRecommendationAutoRefreshScheduler,
     createRecommendationRequestGuard,
+    isRefreshShortcut,
     leagueChoices,
     recommendationStillMatchesSelection,
     resolveExplicitSelection,

@@ -31,6 +31,7 @@ h1 { font-size: 22px; line-height: 1.15; }
 .controls,
 .assistant-status,
 .draft-context,
+.decision-brief,
 .notice,
 .recommendation-card,
 .contingency {
@@ -77,6 +78,22 @@ button:disabled { cursor: default; opacity: .5; }
 .context-item { min-width: 0; padding: 8px; border-radius: 8px; background: #f7f9f8; }
 dt { color: #6b7771; font-size: 9px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 dd { margin-top: 3px; font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+
+.decision-brief { padding: 12px; border-color: #c9d9cf; box-shadow: 0 5px 18px rgba(45, 8, 93, .07); }
+.decision-brief--urgent { border-color: #bd4a4a; box-shadow: 0 0 0 2px rgba(189, 74, 74, .12); }
+.decision-brief--next { border-color: #d29537; }
+.turn-status { color: #5f1a8b; font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+.decision-brief--urgent .turn-status { color: #a72e2e; }
+.decision-brief--next .turn-status { color: #8a5706; }
+.decision-primary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; margin-top: 8px; }
+.decision-label { grid-column: 1 / -1; color: #6b7771; font-size: 9px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+.decision-name { min-width: 0; font-size: 17px; overflow-wrap: anywhere; }
+.decision-meta { align-self: center; color: #526059; font-size: 10px; white-space: nowrap; }
+.decision-fallbacks { margin-top: 10px; padding-top: 9px; border-top: 1px solid #edf1ef; }
+.fallback-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 5px; }
+.fallback-item { display: grid; min-width: 0; padding: 7px; border-radius: 7px; background: #f7f9f8; }
+.fallback-item strong { font-size: 11px; overflow-wrap: anywhere; }
+.fallback-item small { margin-top: 2px; color: #6b7771; font-size: 9px; }
 
 .notice { padding: 12px; font-size: 12px; }
 .notice h2, .recommendations > h2, .contingency h2 { margin-bottom: 7px; font-size: 13px; }

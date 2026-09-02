@@ -43,6 +43,14 @@ test('renders all server-provided content as inert text with accessible structur
     draftContext: [{ label: 'On the clock', value: 'Overall pick 7 · Round 1' }],
     ledgerIssues: [],
     degradations: [malicious],
+    decisionBrief: {
+      turnLabel: 'You are next',
+      turnTone: 'next',
+      primaryLabel: 'Recommended now',
+      primaryName: malicious,
+      primaryMeta: 'WR · SEA',
+      fallbacks: [{ name: 'Safe fallback', meta: 'RB · DEN' }],
+    },
     recommendations: [{
       rankLabel: '1',
       name: malicious,
@@ -69,6 +77,9 @@ test('renders all server-provided content as inert text with accessible structur
   assert.equal(findAll(root, (node) => node.tagName === 'h2').length >= 2, true);
   assert.equal(root.attributes['aria-live'], 'polite');
   assert.equal(findAll(root, (node) => node.className === 'news-list').length, 1);
+  assert.equal(findAll(root, (node) => node.className.includes('decision-brief--next')).length, 1);
+  assert.match(root.textContent, /Recommended now/);
+  assert.match(root.textContent, /If unavailable/);
 });
 
 test('renders exact blocker details and an empty-state instead of player cards', () => {
@@ -82,6 +93,7 @@ test('renders exact blocker details and an empty-state instead of player cards',
     draftContext: [],
     ledgerIssues: ['Missing pick numbers: 3', 'Duplicate pick numbers: 5'],
     degradations: [],
+    decisionBrief: null,
     recommendations: [],
     contingency: [],
     emptyMessage: 'Open Results → Round by Round and use Full rescan & repair.',
@@ -91,6 +103,7 @@ test('renders exact blocker details and an empty-state instead of player cards',
   assert.match(root.textContent, /Duplicate pick numbers: 5/);
   assert.match(root.textContent, /Full rescan & repair/);
   assert.equal(findAll(root, (node) => node.className === 'recommendation-card').length, 0);
+  assert.equal(findAll(root, (node) => node.className.includes('decision-brief')).length, 0);
 });
 
 test('renders an available AI critic after deterministic recommendations as inert advisory text', () => {

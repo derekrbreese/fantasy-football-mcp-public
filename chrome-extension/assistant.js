@@ -230,6 +230,16 @@
     refreshRecommendations();
   });
 
+  document.addEventListener('keydown', (event) => {
+    if (
+      elements.refresh.disabled ||
+      !YahooDraftRecommendationSidebarState.isRefreshShortcut(event)
+    ) return;
+    event.preventDefault();
+    autoRefresh.cancelScheduled();
+    refreshRecommendations();
+  });
+
   webext.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !YahooDraftStorage.isRelevantStorageChange(changes)) return;
     if (

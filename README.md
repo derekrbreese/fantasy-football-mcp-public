@@ -139,8 +139,8 @@ A matching local profile provides rankings and league settings with zero Yahoo A
 The easiest interfaces are:
 
 - **Extension popup:** recorder status, ledger health, rescan/repair/reset controls, CSV export, and Agent JSON export. It does not show or make draft picks.
-- **Firefox Draft Assistant:** a persistent top-five recommendation sidebar next to Yahoo. Chrome users should use the dashboard.
-- **Full dashboard:** up to twenty candidates, roster construction, recent picks, specialist comparisons, critic checks, simulations, and data-source diagnostics.
+- **Firefox Draft Assistant:** a persistent top-five recommendation sidebar next to Yahoo. Its at-a-glance decision brief shows whether you are on the clock, next, or a known number of picks away, followed by the primary recommendation and two immediate fallbacks. Press plain **R** outside a form control to refresh manually. Chrome users should use the dashboard.
+- **Full dashboard:** the same clock-aware decision brief plus up to twenty candidates, roster construction, recent picks, specialist comparisons, critic checks, simulations, and data-source diagnostics.
 
 An MCP client can use the same state explicitly. The safe order is:
 
