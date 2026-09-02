@@ -6,6 +6,7 @@
   const operationLock = YahooDraftStorage.createSessionOperationLock(webext.runtime);
   const draftStorage = YahooDraftStorage.createDraftStorage(extensionApi, { operationLock });
   const requestGuard = YahooDraftRecommendationSidebarState.createRecommendationRequestGuard();
+  const cockpit = YahooDraftCockpit;
   const elements = {
     league: document.querySelector('#league-select'),
     strategy: document.querySelector('#strategy-select'),
@@ -13,12 +14,19 @@
     dashboard: document.querySelector('#open-dashboard'),
     controllerStatus: document.querySelector('#controller-status'),
     view: document.querySelector('#recommendation-view'),
+    cockpit: document.querySelector('#cockpit-controls'),
+    queueCandidate: document.querySelector('#queue-candidate'),
+    queueAdd: document.querySelector('#queue-add'),
+    watchlist: document.querySelector('#watchlist'),
+    notifications: document.querySelector('#turn-notifications'),
   };
 
   let sessions = {};
   let selectedSessionKey = null;
   let refreshing = false;
   let sessionLoadGeneration = 0;
+  let cockpitPreferences = cockpit.sanitizePreferences({});
+  let cockpitResponse = null;
   const autoRefresh = YahooDraftRecommendationSidebarState
     .createRecommendationAutoRefreshScheduler({
       delayMs: 350,
@@ -79,6 +87,123 @@
     updateDashboardLink(session);
   }
 
+  function cockpitCandidates(response) {
+    const candidates = new Map();
+    const boards = Array.isArray(response?.cockpit?.positionBoards)
+      ? response.cockpit.positionBoards
+      : [];
+    for (const board of boards) {
+      for (const raw of Array.isArray(board?.candidates) ? board.candidates : []) {
+        const candidate = cockpit.sanitizeCandidate(raw);
+        if (candidate) candidates.set(candidate.key, candidate);
+      }
+    }
+    for (const raw of Array.isArray(response?.recommendations) ? response.recommendations : []) {
+      const candidate = cockpit.sanitizeCandidate(raw);
+      if (candidate) candidates.set(candidate.key, candidate);
+    }
+    return candidates;
+  }
+
+  async function loadCockpitPreferences(session) {
+    cockpitResponse = null;
+    cockpitPreferences = cockpit.sanitizePreferences({});
+    elements.cockpit.hidden = !session?.leagueId;
+    if (!session?.leagueId) return;
+    const key = cockpit.storageKey(session.leagueId);
+    const stored = await extensionApi.storageGet(key);
+    if (selectedSessionKey !== session.sessionKey) return;
+    cockpitPreferences = cockpit.sanitizePreferences(stored?.[key]);
+    renderCockpit(session);
+  }
+
+  async function saveCockpitPreferences(session) {
+    if (!session?.leagueId) return;
+    const key = cockpit.storageKey(session.leagueId);
+    await extensionApi.storageSet({ [key]: cockpitPreferences });
+  }
+
+  function cockpitActionButton(label, action, key, title = '') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.dataset.cockpitAction = action;
+    button.dataset.playerKey = key;
+    if (title) button.title = title;
+    return button;
+  }
+
+  function renderCockpit(session) {
+    elements.cockpit.hidden = !session?.leagueId;
+    elements.notifications.checked = cockpitPreferences.notificationsEnabled;
+    const candidates = cockpitCandidates(cockpitResponse);
+    const selectable = [...candidates.values()].filter((candidate) => (
+      !cockpitPreferences.watchlist.some((item) => item.key === candidate.key)
+    ));
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = selectable.length ? 'Choose a player' : 'No additional players';
+    elements.queueCandidate.replaceChildren(placeholder);
+    for (const candidate of selectable) {
+      const option = document.createElement('option');
+      option.value = candidate.key;
+      option.textContent = `${candidate.name} · ${candidate.position}`;
+      elements.queueCandidate.appendChild(option);
+    }
+    elements.queueAdd.disabled = !selectable.length;
+
+    const reconciled = cockpit.reconcileWatchlist(
+      cockpitPreferences.watchlist,
+      session?.picks,
+    );
+    elements.watchlist.replaceChildren();
+    if (!reconciled.length) {
+      const empty = document.createElement('li');
+      empty.className = 'queue-help';
+      empty.textContent = 'Add players from the latest trustworthy position board.';
+      elements.watchlist.appendChild(empty);
+      return;
+    }
+    reconciled.forEach((candidate, index) => {
+      const item = document.createElement('li');
+      item.className = `watchlist-item${candidate.drafted ? ' watchlist-item--drafted' : ''}`;
+      const identity = document.createElement('span');
+      identity.className = 'watchlist-identity';
+      const name = document.createElement('strong');
+      name.textContent = candidate.name;
+      const meta = document.createElement('small');
+      meta.textContent = candidate.drafted
+        ? `${candidate.position} · drafted at pick ${candidate.pickNumber || 'unknown'}`
+        : `${candidate.position} · ${candidate.tier} tier`;
+      identity.append(name, meta);
+      const actions = document.createElement('span');
+      actions.className = 'watchlist-actions';
+      const up = cockpitActionButton('↑', 'up', candidate.key, 'Move up');
+      up.disabled = index === 0;
+      const down = cockpitActionButton('↓', 'down', candidate.key, 'Move down');
+      down.disabled = index === reconciled.length - 1;
+      actions.append(up, down, cockpitActionButton('×', 'remove', candidate.key, 'Remove'));
+      item.append(identity, actions);
+      elements.watchlist.appendChild(item);
+    });
+  }
+
+  async function maybeNotify(response, session) {
+    const decision = cockpit.shouldNotify(cockpitPreferences, response, session);
+    if (!decision.notify) return;
+    const iconUrl = webext.runtime?.getURL
+      ? webext.runtime.getURL('icons/football-128.png')
+      : 'icons/football-128.png';
+    await extensionApi.createNotification(`draft-turn-${session.leagueId}`, {
+      type: 'basic',
+      iconUrl,
+      title: decision.title,
+      message: decision.message,
+    });
+    cockpitPreferences = cockpit.markNotified(cockpitPreferences, decision.key);
+    await saveCockpitPreferences(session);
+  }
+
   async function activeYahooDiagnostics() {
     try {
       const tabs = await extensionApi.queryTabs({ active: true, currentWindow: true });
@@ -131,6 +256,7 @@
     }
     populateLeagueSelect(choices);
     updateControls();
+    await loadCockpitPreferences(selectedSessionKey ? sessions[selectedSessionKey] : null);
     if (!selectedSessionKey) {
       setControllerStatus(choices.length
         ? 'Choose a recorded league. No saved draft is selected implicitly.'
@@ -185,11 +311,23 @@
       }
       const model = YahooDraftRecommendationViewModel.createRecommendationViewModel(result, session);
       YahooDraftRecommendationRenderer.renderRecommendationView(elements.view, model);
+      cockpitResponse = result;
+      renderCockpit(currentSession || session);
+      let notificationWarning = '';
+      try {
+        await maybeNotify(result, currentSession || session);
+      } catch (notificationError) {
+        notificationWarning = String(notificationError?.message || notificationError);
+      }
       setControllerStatus(
-        model.mode === 'success'
+        notificationWarning
+          ? `Recommendations refreshed, but the turn alert could not be shown: ${notificationWarning}`
+          : model.mode === 'success'
           ? 'Recommendations refreshed from the latest synced draft state.'
           : 'Recommendations refreshed with the cautions shown below.',
-        model.mode === 'blocked' || model.mode === 'error' ? 'error' : model.mode,
+        notificationWarning
+          ? 'degraded'
+          : (model.mode === 'blocked' || model.mode === 'error' ? 'error' : model.mode),
       );
     } catch (error) {
       if (!requestGuard.requestStillMatchesSelection(token, selectedSessionKey)) return;
@@ -223,11 +361,55 @@
     const session = sessions[selectedSessionKey];
     setControllerStatus(`Selected League ${session.leagueId}. Refresh when you want a new recommendation.`);
     renderMessage('Refresh to request recommendations for this explicitly selected league.', session);
+    loadCockpitPreferences(session)
+      .catch((error) => setControllerStatus(String(error?.message || error), 'error'));
   });
 
   elements.refresh.addEventListener('click', () => {
     autoRefresh.cancelScheduled();
     refreshRecommendations();
+  });
+
+  elements.queueAdd.addEventListener('click', () => {
+    const session = selectedSessionKey ? sessions[selectedSessionKey] : null;
+    const candidate = cockpitCandidates(cockpitResponse).get(elements.queueCandidate.value);
+    if (!session || !candidate) return;
+    cockpitPreferences = cockpit.addToWatchlist(cockpitPreferences, candidate);
+    saveCockpitPreferences(session)
+      .then(() => renderCockpit(session))
+      .catch((error) => setControllerStatus(String(error?.message || error), 'error'));
+  });
+
+  elements.watchlist.addEventListener('click', (event) => {
+    const button = event.target.closest?.('[data-cockpit-action]');
+    const session = selectedSessionKey ? sessions[selectedSessionKey] : null;
+    if (!button || !session) return;
+    const key = button.dataset.playerKey;
+    if (button.dataset.cockpitAction === 'remove') {
+      cockpitPreferences = cockpit.removeFromWatchlist(cockpitPreferences, key);
+    } else if (button.dataset.cockpitAction === 'up' || button.dataset.cockpitAction === 'down') {
+      cockpitPreferences = cockpit.moveWatchlistEntry(
+        cockpitPreferences,
+        key,
+        button.dataset.cockpitAction === 'up' ? -1 : 1,
+      );
+    } else {
+      return;
+    }
+    saveCockpitPreferences(session)
+      .then(() => renderCockpit(session))
+      .catch((error) => setControllerStatus(String(error?.message || error), 'error'));
+  });
+
+  elements.notifications.addEventListener('change', () => {
+    const session = selectedSessionKey ? sessions[selectedSessionKey] : null;
+    if (!session) return;
+    cockpitPreferences = cockpit.sanitizePreferences({
+      ...cockpitPreferences,
+      notificationsEnabled: elements.notifications.checked,
+    });
+    saveCockpitPreferences(session)
+      .catch((error) => setControllerStatus(String(error?.message || error), 'error'));
   });
 
   document.addEventListener('keydown', (event) => {

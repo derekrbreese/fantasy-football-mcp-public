@@ -50,6 +50,27 @@
       </section>
 
       <div id="recommendation-view" class="recommendation-view"></div>
+
+      <section id="cockpit-controls" class="cockpit-controls" aria-labelledby="cockpit-title" hidden>
+        <div class="cockpit-heading">
+          <div>
+            <p class="eyebrow cockpit-eyebrow">LIVE DRAFT</p>
+            <h2 id="cockpit-title">Queue &amp; alerts</h2>
+          </div>
+          <label class="notification-toggle">
+            <input id="turn-notifications" type="checkbox">
+            Notify when next/on clock
+          </label>
+        </div>
+        <div class="queue-add-row">
+          <select id="queue-candidate" aria-label="Player to add to queue">
+            <option value="">Choose a player</option>
+          </select>
+          <button id="queue-add" type="button">Add</button>
+        </div>
+        <ol id="watchlist" class="watchlist"></ol>
+        <p class="queue-help">Your league-specific queue stays in extension storage. Picks are advisory only.</p>
+      </section>
     </main>
 
     <footer>
@@ -62,6 +83,7 @@
     <script src="recommendation-view-model.js"></script>
     <script src="recommendation-renderer.js"></script>
     <script src="recommendation-sidebar-state.js"></script>
+    <script src="draft-cockpit.js"></script>
     <script src="assistant.js"></script>
   </body>
 </html>

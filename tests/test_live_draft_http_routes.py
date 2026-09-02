@@ -1610,6 +1610,7 @@ def test_dashboard_uses_shared_ui_contract_without_inline_or_remote_code() -> No
         "/draft-dashboard/shared/recommendation-client.js",
         "/draft-dashboard/shared/recommendation-view-model.js",
         "/draft-dashboard/shared/recommendation-renderer.js",
+        "/draft-dashboard/shared/draft-cockpit.js",
     ]
 
     assert all(name in index for name in shared_scripts)
@@ -1634,8 +1635,9 @@ def test_dashboard_uses_shared_ui_contract_without_inline_or_remote_code() -> No
     assert "window.location.hash" in script
     assert "window.location.search" not in script
     assert "innerHTML" not in script
-    assert "function resetAnalysisPanels()" in script
-    assert script.count("resetAnalysisPanels();") >= 3
+    assert "function resetAnalysisPanels({ preserveCockpit = false } = {})" in script
+    assert "resetAnalysisPanels({ preserveCockpit: activeCockpitLeagueId === leagueId })" in script
+    assert script.count("resetAnalysisPanels();") >= 2
     assert "setControlsDisabled(true);" in script
     assert "leagueInput.value.trim() !== leagueId" in script
     assert "typeof value === 'number' && Number.isFinite(value)" in script

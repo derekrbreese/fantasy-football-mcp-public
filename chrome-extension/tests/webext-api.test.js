@@ -18,6 +18,9 @@ test('uses Firefox promise-based browser APIs', async () => {
       async query(query) { return [{ id: 9, query }]; },
       async sendMessage(tabId, message) { return { tabId, message }; },
     },
+    notifications: {
+      async create(id, options) { return { id, options }; },
+    },
   };
 
   const api = createWebExtensionApi({ browser });
@@ -28,6 +31,9 @@ test('uses Firefox promise-based browser APIs', async () => {
     message: { type: 'STATUS' },
   });
   assert.equal(await api.storageRemove('drafts'), 'drafts');
+  assert.deepEqual(await api.createNotification('turn', { title: 'Next' }), {
+    id: 'turn', options: { title: 'Next' },
+  });
   assert.equal(api.native, browser);
 });
 
@@ -46,6 +52,9 @@ test('uses Chromium callback-based chrome APIs', async () => {
       query(_query, callback) { callback([{ id: 3 }]); },
       sendMessage(_tabId, _message, callback) { callback({ ok: true }); },
     },
+    notifications: {
+      create(id, options, callback) { callback(`${id}:${options.title}`); },
+    },
   };
 
   const api = createWebExtensionApi({ chrome });
@@ -54,7 +63,21 @@ test('uses Chromium callback-based chrome APIs', async () => {
   assert.deepEqual(await api.sendTabMessage(3, { type: 'STATUS' }), { ok: true });
   await api.storageSet({ drafts: [] });
   await api.storageRemove('drafts');
+  assert.equal(await api.createNotification('turn', { title: 'Clock' }), 'turn:Clock');
   assert.equal(api.native, chrome);
+});
+
+test('rejects notification requests when the API is unavailable', async () => {
+  const browser = {
+    runtime: {},
+    storage: { local: {}, onChanged: {} },
+    tabs: {},
+  };
+  const api = createWebExtensionApi({ browser });
+  await assert.rejects(
+    api.createNotification('turn', { title: 'Clock' }),
+    /notifications are unavailable/,
+  );
 });
 
 test('rejects callback calls when Chromium reports runtime.lastError', async () => {

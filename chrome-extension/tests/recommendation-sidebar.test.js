@@ -289,6 +289,7 @@ test('manifest keeps the recorder UI and cross-browser background lock broker', 
     service_worker: 'lock-broker.js',
   });
   assert.equal(manifest.minimum_chrome_version, '121');
+  assert.ok(manifest.permissions.includes('notifications'));
   assert.equal(manifest.content_scripts[0].js.includes('assistant.js'), false);
   assert.match(html, /id="league-select"/);
   assert.match(html, /id="refresh-recommendations"/);
@@ -296,6 +297,9 @@ test('manifest keeps the recorder UI and cross-browser background lock broker', 
   assert.match(html, /recommendation-client\.js/);
   assert.match(html, /recommendation-view-model\.js/);
   assert.match(html, /recommendation-renderer\.js/);
+  assert.match(html, /draft-cockpit\.js/);
+  assert.match(html, /id="queue-candidate"/);
+  assert.match(html, /id="turn-notifications"/);
   assert.doesNotMatch(html, /<script[^>]*>[^<]+<\/script>/);
   assert.match(popupHtml, /id="open-assistant"/);
   assert.match(popupHtml, /id="open-dashboard"/);

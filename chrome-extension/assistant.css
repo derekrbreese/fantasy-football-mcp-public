@@ -29,6 +29,7 @@ h1 { font-size: 22px; line-height: 1.15; }
 .app-main { padding: 14px; }
 
 .controls,
+.cockpit-controls,
 .assistant-status,
 .draft-context,
 .decision-brief,
@@ -41,6 +42,22 @@ h1 { font-size: 22px; line-height: 1.15; }
 }
 
 .controls { display: grid; gap: 7px; padding: 12px; }
+.cockpit-controls { display: grid; gap: 9px; margin-top: 12px; padding: 12px; }
+.cockpit-heading { display: flex; gap: 10px; align-items: start; justify-content: space-between; }
+.cockpit-heading h2 { font-size: 14px; }
+.cockpit-eyebrow { color: #5f1a8b; }
+.notification-toggle { display: flex; max-width: 132px; gap: 6px; align-items: start; color: #45534c; line-height: 1.25; }
+.notification-toggle input { margin: 1px 0 0; accent-color: #5f1a8b; }
+.queue-add-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.watchlist { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.watchlist-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px; border-radius: 8px; background: #f7f9f8; }
+.watchlist-item--drafted { opacity: .58; text-decoration: line-through; }
+.watchlist-identity { display: grid; min-width: 0; }
+.watchlist-identity strong { font-size: 11px; overflow-wrap: anywhere; }
+.watchlist-identity small { color: #6b7771; font-size: 9px; }
+.watchlist-actions { display: flex; gap: 3px; }
+.watchlist-actions button { min-width: 27px; min-height: 27px; padding: 3px 6px; font-size: 10px; }
+.queue-help { color: #6b7771; font-size: 9px; line-height: 1.4; }
 label { color: #5d6963; font-size: 11px; font-weight: 750; }
 select, button, .dashboard-link {
   min-height: 36px;

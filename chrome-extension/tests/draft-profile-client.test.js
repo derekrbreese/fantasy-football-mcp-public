@@ -810,3 +810,33 @@ test('dashboard exposes a local import form while retaining recommendation contr
   assert.match(appSource, /\.textContent\s*=/);
   assert.doesNotMatch(appSource, /profile-source-status[^\n]*innerHTML/);
 });
+
+test('dashboard exposes the bounded live draft cockpit without unsafe HTML rendering', () => {
+  const html = fs.readFileSync(
+    path.join(__dirname, '../../src/dashboard/index.html'),
+    'utf8',
+  );
+  const appSource = fs.readFileSync(
+    path.join(__dirname, '../../src/dashboard/app.js'),
+    'utf8',
+  );
+
+  for (const id of [
+    'cockpit-panel',
+    'watchlist',
+    'position-board',
+    'strategy-comparison',
+    'position-runs',
+    'fallback-tiers',
+    'player-comparison',
+    'draft-recap',
+    'roster-slots',
+    'roster-warnings',
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(html, /shared\/draft-cockpit\.js/);
+  assert.match(appSource, /storageKey\(leagueId\)/);
+  assert.match(appSource, /preserveCockpit/);
+  assert.doesNotMatch(appSource, /\.innerHTML\s*=/);
+});

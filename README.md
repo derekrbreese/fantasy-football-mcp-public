@@ -139,8 +139,8 @@ A matching local profile provides rankings and league settings with zero Yahoo A
 The easiest interfaces are:
 
 - **Extension popup:** recorder status, ledger health, rescan/repair/reset controls, CSV export, and Agent JSON export. It does not show or make draft picks.
-- **Firefox Draft Assistant:** a persistent top-five recommendation sidebar next to Yahoo. Its at-a-glance decision brief shows whether you are on the clock, next, or a known number of picks away, followed by the primary recommendation and two immediate fallbacks. Press plain **R** outside a form control to refresh manually. Chrome users should use the dashboard.
-- **Full dashboard:** the same clock-aware decision brief plus up to twenty candidates, roster construction, recent picks, specialist comparisons, critic checks, simulations, and data-source diagnostics.
+- **Firefox Draft Assistant:** a persistent top-five recommendation sidebar next to Yahoo. Its at-a-glance decision brief shows whether you are on the clock, next, or a known number of picks away, followed by the primary recommendation and two immediate fallbacks. A league-specific personal queue stays in extension storage and can optionally send deduplicated browser notifications only when the authoritative ledger says you are next or on the clock. Press plain **R** outside a form control to refresh manually. Chrome users should use the dashboard.
+- **Full dashboard:** the same clock-aware decision brief plus a live draft cockpit: personal queue, position/tier board, conservative/balanced/aggressive sensitivity, position-run alerts, configured roster-slot gaps, fallback tiers, pre-draft readiness checks, two-to-three player comparison, and a value/reach recap. It also retains up to twenty detailed candidates, recent picks, specialist scores, critic checks, simulations, and source diagnostics. The prior cockpit remains visible while a refresh is computing.
 
 An MCP client can use the same state explicitly. The safe order is:
 
@@ -161,6 +161,8 @@ Each newly created Yahoo mock has a new identity. To reuse the same rankings wit
 4. Select **Use for this draft & refresh**.
 
 Only sanitized rankings, roster settings, and provenance are copied. Picks are never copied between mocks.
+
+Queue preferences are also isolated by the new mock's exact league ID. They are never copied from the source profile, so a repeated mock starts with an empty queue unless you add players for that exact mock.
 
 To remove that manual step for later mocks, use **Default for future drafts** in the dashboard. Choose **Yahoo Football**, select the saved source, and select **Set sport default**. On the first recommendation for a newly synced draft with no exact profile, the server atomically binds that default to the new identity and continues without a Yahoo API call. An already bound or imported exact profile always wins, and changing or clearing the default does not alter prior drafts. Default selection and automatic binding require a source profile for the current UTC year, so import a new sheet and replace or clear the pointer after a season rollover.
 
