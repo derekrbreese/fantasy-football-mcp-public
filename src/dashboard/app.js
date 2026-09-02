@@ -4,6 +4,7 @@
   const client = globalThis.YahooDraftRecommendationClient;
   const viewModels = globalThis.YahooDraftRecommendationViewModel;
   const renderer = globalThis.YahooDraftRecommendationRenderer;
+  const cockpit = globalThis.YahooDraftCockpit;
   const profileClient = globalThis.YahooDraftProfileClient;
   const form = document.getElementById('recommendation-form');
   const profileForm = document.getElementById('draft-profile-form');
@@ -25,6 +26,11 @@
   let savedProfilesLoadFailed = false;
   let savedProfileLoadGeneration = 0;
   let profileControlsBusy = false;
+  let latestCockpitData = null;
+  let cockpitPreferences = cockpit?.sanitizePreferences({}) || null;
+  let selectedPosition = 'OVERALL';
+  let activeCockpitLeagueId = null;
+  let activeCockpitSessionKey = null;
 
   function clear(node) {
     node.replaceChildren();
@@ -45,16 +51,18 @@
     document.getElementById(id).classList.remove('hidden');
   }
 
-  function resetAnalysisPanels() {
-    [
+  function resetAnalysisPanels({ preserveCockpit = false } = {}) {
+    const panelIds = [
       'quality-panel',
       'draft-summary',
       'recommendations-panel',
       'scenario-panel',
       'roster-panel',
       'history-panel',
-    ].forEach((id) => document.getElementById(id).classList.add('hidden'));
-    [
+    ];
+    if (!preserveCockpit) panelIds.push('cockpit-panel');
+    panelIds.forEach((id) => document.getElementById(id).classList.add('hidden'));
+    const contentIds = [
       'quality-summary',
       'diagnostic-details',
       'recommendation-view',
@@ -62,10 +70,29 @@
       'roster-counts',
       'roster-list',
       'draft-history',
-    ].forEach((id) => clear(document.getElementById(id)));
+      'roster-slots',
+      'roster-warnings',
+    ];
+    if (!preserveCockpit) contentIds.push(
+      'watchlist',
+      'position-filters',
+      'position-board',
+      'strategy-comparison',
+      'position-runs',
+      'fallback-tiers',
+      'player-comparison',
+      'draft-recap',
+    );
+    contentIds.forEach((id) => clear(document.getElementById(id)));
     ['current-pick', 'next-pick', 'pick-count', 'team-count'].forEach((id) => {
       document.getElementById(id).textContent = '—';
     });
+    if (!preserveCockpit) {
+      document.getElementById('queue-candidate').replaceChildren(
+        textElement('option', 'Choose a player'),
+      );
+      document.getElementById('tier-context').textContent = '';
+    }
   }
 
   function setControlsDisabled(disabled) {
@@ -432,6 +459,13 @@
       ? Object.entries(data.critic.checks).slice(0, 12).map(([name, passed]) => `${name}: ${passed === true ? 'pass' : 'needs caution'}`)
       : ['Critic checks unavailable.'];
     details.appendChild(diagnosticGroup('Deterministic critic', checks));
+
+    const readinessChecks = Array.isArray(data?.cockpit?.readiness?.checks)
+      ? data.cockpit.readiness.checks.slice(0, 10).map((check) => (
+        `${check.passed === true ? 'Ready' : 'Needs attention'}: ${String(check.label || 'Unknown check')}`
+      ))
+      : ['Draft cockpit readiness unavailable.'];
+    details.appendChild(diagnosticGroup('Draft readiness', readinessChecks));
   }
 
   function renderSummary(data) {
@@ -497,11 +531,16 @@
 
   function renderRoster(data) {
     const roster = Array.isArray(data?.state?.userRoster) ? data.state.userRoster : [];
+    const plan = data?.cockpit?.rosterPlan;
     const counts = document.getElementById('roster-counts');
     const list = document.getElementById('roster-list');
+    const slots = document.getElementById('roster-slots');
+    const warnings = document.getElementById('roster-warnings');
     clear(counts);
     clear(list);
-    if (roster.length === 0) {
+    clear(slots);
+    clear(warnings);
+    if (roster.length === 0 && !Array.isArray(plan?.slots)) {
       document.getElementById('roster-panel').classList.add('hidden');
       return;
     }
@@ -518,6 +557,22 @@
     [...totals.entries()].sort().forEach(([position, total]) => {
       counts.appendChild(textElement('span', `${position} ${total}`, 'position-chip'));
     });
+    if (Array.isArray(plan?.slots)) {
+      plan.slots.slice(0, 12).forEach((slot) => {
+        const node = textElement('div', '', 'roster-slot');
+        node.appendChild(textElement('strong', String(slot.position || 'Slot')));
+        node.appendChild(textElement(
+          'span',
+          `${finiteNumber(slot.current) ?? 0}/${finiteNumber(slot.required) ?? 0} filled · ${finiteNumber(slot.open) ?? 0} open`,
+        ));
+        slots.appendChild(node);
+      });
+    }
+    if (Array.isArray(plan?.warnings)) {
+      plan.warnings.slice(0, 6).forEach((warning) => {
+        warnings.appendChild(textElement('li', String(warning).slice(0, 240)));
+      });
+    }
   }
 
   function renderHistory(data) {
@@ -538,6 +593,323 @@
     });
   }
 
+  function cockpitCandidateMap(data) {
+    const result = new Map();
+    const add = (value) => {
+      const safe = cockpit.sanitizeCandidate(value);
+      if (!safe) return;
+      const existing = result.get(safe.key) || {};
+      result.set(safe.key, { ...existing, ...safe, raw: value?.raw || value });
+    };
+    const boards = Array.isArray(data?.cockpit?.positionBoards)
+      ? data.cockpit.positionBoards
+      : [];
+    boards.forEach((board) => {
+      if (Array.isArray(board?.candidates)) board.candidates.forEach(add);
+    });
+    if (Array.isArray(data?.recommendations)) {
+      data.recommendations.slice(0, 20).forEach((item) => add({
+        ...item,
+        name: item?.player?.name,
+        position: item?.player?.position,
+        team: item?.player?.team,
+        score: item?.overallScore,
+        tier: item?.specialistDetails?.value?.tier,
+        raw: item,
+      }));
+    }
+    return result;
+  }
+
+  function loadCockpitPreferences(sessionKey) {
+    if (activeCockpitSessionKey === sessionKey && cockpitPreferences) return;
+    activeCockpitSessionKey = sessionKey;
+    selectedPosition = 'OVERALL';
+    let stored = null;
+    try {
+      stored = JSON.parse(localStorage.getItem(cockpit.storageKey(sessionKey)) || 'null');
+    } catch (_error) {
+      stored = null;
+    }
+    cockpitPreferences = cockpit.sanitizePreferences(stored);
+  }
+
+  function saveCockpitPreferences() {
+    if (!activeCockpitSessionKey || !cockpitPreferences) return;
+    cockpitPreferences = cockpit.sanitizePreferences(cockpitPreferences);
+    try {
+      localStorage.setItem(
+        cockpit.storageKey(activeCockpitSessionKey),
+        JSON.stringify(cockpitPreferences),
+      );
+    } catch (_error) {
+      setStatus('Cockpit preferences could not be saved in this browser.', 'warning');
+    }
+  }
+
+  function cockpitButton(label, action, key, className = '') {
+    const button = textElement('button', label, `cockpit-action ${className}`.trim());
+    button.type = 'button';
+    button.dataset.cockpitAction = action;
+    if (key) button.dataset.playerKey = key;
+    return button;
+  }
+
+  function renderWatchlist(data, candidates) {
+    const list = document.getElementById('watchlist');
+    const select = document.getElementById('queue-candidate');
+    clear(list);
+    const placeholder = textElement('option', 'Choose a player');
+    placeholder.value = '';
+    select.replaceChildren(placeholder);
+
+    const reconciled = cockpit.reconcileWatchlist(
+      cockpitPreferences.watchlist,
+      data?.state?.picks,
+    );
+    const queuedKeys = new Set(reconciled.map((item) => item.key));
+    [...candidates.values()]
+      .filter((candidate) => !queuedKeys.has(candidate.key))
+      .sort((left, right) => (right.score || 0) - (left.score || 0))
+      .forEach((candidate) => {
+        const option = textElement(
+          'option',
+          `${candidate.name} · ${candidate.position}${candidate.team ? ` · ${candidate.team}` : ''}`,
+        );
+        option.value = candidate.key;
+        select.appendChild(option);
+      });
+
+    if (!reconciled.length) {
+      list.appendChild(textElement(
+        'li',
+        'Your queue is empty. Add players from the selector or position board.',
+        'watchlist-empty',
+      ));
+      return;
+    }
+    reconciled.forEach((item, index) => {
+      const node = textElement('li', '', `watchlist-item${item.drafted ? ' drafted' : ''}`);
+      const identity = textElement('div', '', 'watchlist-identity');
+      identity.appendChild(textElement('strong', `${index + 1}. ${item.name}`));
+      identity.appendChild(textElement(
+        'small',
+        item.drafted
+          ? `${item.position} · ${item.team || 'team unknown'} · drafted at #${item.pickNumber || '?'}`
+          : `${item.position} · ${item.team || 'team unknown'} · ${item.tier} tier`,
+      ));
+      node.appendChild(identity);
+      const actions = textElement('div', '', 'watchlist-actions');
+      actions.appendChild(cockpitButton('↑', 'up', item.key));
+      actions.appendChild(cockpitButton('↓', 'down', item.key));
+      const comparing = cockpitPreferences.comparisonKeys.includes(item.key);
+      actions.appendChild(cockpitButton(
+        comparing ? 'Comparing' : 'Compare',
+        'compare',
+        item.key,
+        `compare-toggle${comparing ? ' active' : ''}`,
+      ));
+      actions.appendChild(cockpitButton('Remove', 'remove', item.key));
+      node.appendChild(actions);
+      list.appendChild(node);
+    });
+  }
+
+  function renderPositionBoard(data) {
+    const filters = document.getElementById('position-filters');
+    const boardRoot = document.getElementById('position-board');
+    clear(filters);
+    clear(boardRoot);
+    const boards = Array.isArray(data?.cockpit?.positionBoards)
+      ? data.cockpit.positionBoards
+      : [];
+    if (!boards.some((board) => board.position === selectedPosition)) {
+      selectedPosition = boards[0]?.position || 'OVERALL';
+    }
+    boards.forEach((board) => {
+      const button = textElement(
+        'button',
+        board.position === 'OVERALL' ? 'Overall' : board.position,
+        `position-filter${board.position === selectedPosition ? ' active' : ''}`,
+      );
+      button.type = 'button';
+      button.dataset.position = board.position;
+      filters.appendChild(button);
+    });
+    const board = boards.find((item) => item.position === selectedPosition);
+    if (!board) {
+      document.getElementById('tier-context').textContent = 'Position availability is blocked until the ledger is trustworthy.';
+      boardRoot.appendChild(textElement('p', 'No trustworthy position board is available.', 'comparison-empty'));
+      return;
+    }
+    const drop = finiteNumber(board.nextTierDropAfter);
+    document.getElementById('tier-context').textContent =
+      `${board.tierRemaining} ${board.leadingTier} tier player(s) remain${drop === null ? '' : ` · visible tier drop after ${drop} option(s)`}.`;
+    board.candidates.slice(0, 5).forEach((candidate) => {
+      const safe = cockpit.sanitizeCandidate(candidate);
+      if (!safe) return;
+      const card = textElement('div', '', 'position-candidate');
+      const identity = textElement('div', '', 'watchlist-identity');
+      identity.appendChild(textElement('strong', safe.name));
+      identity.appendChild(textElement('small', `${safe.position} · ${safe.team || 'team unknown'} · ${safe.tier} tier`));
+      card.appendChild(identity);
+      card.appendChild(textElement('span', safe.score === null ? '—' : safe.score.toFixed(1), 'candidate-score'));
+      const actions = textElement('div', '', 'candidate-actions');
+      const queued = cockpitPreferences.watchlist.some((item) => item.key === safe.key);
+      const comparing = cockpitPreferences.comparisonKeys.includes(safe.key);
+      actions.appendChild(cockpitButton(queued ? 'Queued' : 'Add to queue', 'add', safe.key));
+      actions.lastChild.disabled = queued;
+      actions.appendChild(cockpitButton(
+        comparing ? 'Comparing' : 'Compare',
+        'compare-candidate',
+        safe.key,
+        `compare-toggle${comparing ? ' active' : ''}`,
+      ));
+      card.appendChild(actions);
+      boardRoot.appendChild(card);
+    });
+  }
+
+  function renderStrategyComparison(data) {
+    const root = document.getElementById('strategy-comparison');
+    clear(root);
+    const comparison = data?.cockpit?.strategyComparison;
+    root.appendChild(textElement(
+      'p',
+      String(comparison?.summary || 'Strategy comparison is unavailable.'),
+      'strategy-summary',
+    ));
+    if (!Array.isArray(comparison?.strategies)) return;
+    comparison.strategies.slice(0, 3).forEach((entry) => {
+      const row = textElement('div', '', 'strategy-row');
+      row.appendChild(textElement('span', String(entry.strategy || 'unknown')));
+      row.appendChild(textElement('strong', String(entry?.primary?.name || 'Unavailable')));
+      const score = finiteNumber(entry?.primary?.score);
+      row.appendChild(textElement('small', score === null ? '—' : score.toFixed(1)));
+      root.appendChild(row);
+    });
+  }
+
+  function renderRunsAndFallbacks(data) {
+    const runs = document.getElementById('position-runs');
+    const fallbacks = document.getElementById('fallback-tiers');
+    clear(runs);
+    clear(fallbacks);
+    const activeRuns = Array.isArray(data?.cockpit?.positionRuns) ? data.cockpit.positionRuns : [];
+    if (!activeRuns.length) runs.appendChild(textElement('li', 'No active three-pick position run in the last eight selections.'));
+    activeRuns.slice(0, 4).forEach((run) => runs.appendChild(textElement('li', String(run.message || '').slice(0, 180))));
+    const tiers = Array.isArray(data?.cockpit?.fallbackTiers) ? data.cockpit.fallbackTiers : [];
+    tiers.slice(0, 4).forEach((tier) => {
+      const group = textElement('div', '', 'fallback-tier');
+      group.appendChild(textElement('strong', `${tier.position} · ${tier.tier} tier`));
+      const names = Array.isArray(tier.candidates)
+        ? tier.candidates.slice(0, 3).map((item) => String(item.name || 'Unknown'))
+        : [];
+      group.appendChild(textElement('p', names.join(' → ') || 'No fallback candidates available.'));
+      fallbacks.appendChild(group);
+    });
+  }
+
+  function renderComparison(candidates) {
+    const root = document.getElementById('player-comparison');
+    clear(root);
+    const queueByKey = new Map(cockpitPreferences.watchlist.map((item) => [item.key, item]));
+    const selected = cockpitPreferences.comparisonKeys
+      .map((key) => candidates.get(key) || queueByKey.get(key))
+      .filter(Boolean)
+      .slice(0, 3);
+    if (selected.length < 2) {
+      root.appendChild(textElement('p', 'Choose at least two queued players to compare.', 'comparison-empty'));
+      return;
+    }
+    const table = textElement('table', '', 'comparison-table');
+    const head = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['Player', 'Pos', 'Score', 'Tier', 'Rank', 'ADP', 'Roster impact', 'Risk/news'].forEach((label) => {
+      headRow.appendChild(textElement('th', label));
+    });
+    head.appendChild(headRow);
+    table.appendChild(head);
+    const body = document.createElement('tbody');
+    selected.forEach((candidate) => {
+      const raw = candidate.raw || {};
+      const row = document.createElement('tr');
+      const values = [
+        candidate.name,
+        candidate.position,
+        candidate.score === null || candidate.score === undefined ? '—' : Number(candidate.score).toFixed(1),
+        candidate.tier,
+        raw?.player?.rank ?? raw?.rank ?? '—',
+        raw?.player?.adp ?? raw?.adp ?? '—',
+        raw?.rosterImpact || 'Unavailable',
+        raw?.risk?.status || 'unknown',
+      ];
+      values.forEach((value, index) => row.appendChild(textElement(index === 0 ? 'th' : 'td', String(value))));
+      body.appendChild(row);
+    });
+    table.appendChild(body);
+    root.appendChild(table);
+  }
+
+  function renderRecap(data) {
+    const root = document.getElementById('draft-recap');
+    clear(root);
+    const recap = data?.cockpit?.recap;
+    if (!recap) {
+      root.appendChild(textElement('p', 'Draft recap is unavailable.', 'comparison-empty'));
+      return;
+    }
+    const progress = document.createElement('progress');
+    progress.className = 'recap-progress';
+    progress.max = 1;
+    progress.value = finiteNumber(recap.progress) ?? 0;
+    progress.setAttribute('aria-label', 'Draft completion progress');
+    root.appendChild(progress);
+    root.appendChild(textElement(
+      'p',
+      `${recap.recordedPicks ?? 0}${recap.expectedPicks ? ` of ${recap.expectedPicks}` : ''} league picks recorded · ${recap.complete ? 'draft complete' : recap.status}`,
+      'recap-summary',
+    ));
+    root.appendChild(textElement('p', String(recap.summary || ''), 'recap-summary'));
+    const decisions = textElement('div', '', 'recap-decisions');
+    if (Array.isArray(recap.decisions)) recap.decisions.slice(-8).forEach((decision) => {
+      const item = textElement('div', '', 'recap-decision');
+      item.appendChild(textElement('strong', String(decision.player || 'Unknown')));
+      const labelClass = decision.label === 'value' ? 'recap-value' : (decision.label === 'reach' ? 'recap-reach' : '');
+      item.appendChild(textElement(
+        'span',
+        `Pick ${decision.pickNumber} · ADP ${decision.adp} · ${decision.label}`,
+        labelClass,
+      ));
+      decisions.appendChild(item);
+    });
+    root.appendChild(decisions);
+  }
+
+  function renderCockpit(data, leagueId) {
+    if (!cockpit || !data?.cockpit) return;
+    const sessionKey = typeof data?.state?.sessionKey === 'string'
+      ? data.state.sessionKey
+      : '';
+    if (sessionKey.split(':')[1] !== leagueId) return;
+    try {
+      cockpit.storageKey(sessionKey);
+    } catch (_error) {
+      return;
+    }
+    activeCockpitLeagueId = leagueId;
+    loadCockpitPreferences(sessionKey);
+    latestCockpitData = data;
+    show('cockpit-panel');
+    const candidates = cockpitCandidateMap(data);
+    renderWatchlist(data, candidates);
+    renderPositionBoard(data);
+    renderStrategyComparison(data);
+    renderRunsAndFallbacks(data);
+    renderComparison(candidates);
+    renderRecap(data);
+  }
+
   function render(data, leagueId) {
     resetAnalysisPanels();
     const model = renderSharedBoard(data, leagueId);
@@ -546,6 +918,7 @@
     renderScenarios(data, model);
     renderRoster(data);
     renderHistory(data);
+    renderCockpit(data, leagueId);
     return model;
   }
 
@@ -584,7 +957,7 @@
   }
 
   async function refreshAnalysis(leagueId) {
-    resetAnalysisPanels();
+    resetAnalysisPanels({ preserveCockpit: activeCockpitLeagueId === leagueId });
     setControlsDisabled(true);
     setProfileControlsDisabled(true);
     setStatus('Refreshing live context and running bounded specialist scoring…', 'loading');
@@ -825,6 +1198,51 @@
     }
   });
 
+  document.getElementById('queue-add').addEventListener('click', () => {
+    if (!latestCockpitData || !cockpitPreferences) return;
+    const key = document.getElementById('queue-candidate').value;
+    const candidate = cockpitCandidateMap(latestCockpitData).get(key);
+    if (!candidate) return;
+    cockpitPreferences = cockpit.addToWatchlist(cockpitPreferences, candidate);
+    saveCockpitPreferences();
+    renderCockpit(latestCockpitData, activeCockpitLeagueId);
+  });
+
+  document.getElementById('cockpit-panel').addEventListener('click', (event) => {
+    const button = event.target.closest?.('[data-cockpit-action]');
+    if (!button || !latestCockpitData || !cockpitPreferences) return;
+    const action = button.dataset.cockpitAction;
+    const key = button.dataset.playerKey;
+    const candidates = cockpitCandidateMap(latestCockpitData);
+    if (action === 'add') {
+      cockpitPreferences = cockpit.addToWatchlist(cockpitPreferences, candidates.get(key));
+    } else if (action === 'remove') {
+      cockpitPreferences = cockpit.removeFromWatchlist(cockpitPreferences, key);
+    } else if (action === 'up' || action === 'down') {
+      cockpitPreferences = cockpit.moveWatchlistEntry(
+        cockpitPreferences,
+        key,
+        action === 'up' ? -1 : 1,
+      );
+    } else if (action === 'compare') {
+      cockpitPreferences = cockpit.toggleComparison(cockpitPreferences, key);
+    } else if (action === 'compare-candidate') {
+      cockpitPreferences = cockpit.addToWatchlist(cockpitPreferences, candidates.get(key));
+      cockpitPreferences = cockpit.toggleComparison(cockpitPreferences, key);
+    } else {
+      return;
+    }
+    saveCockpitPreferences();
+    renderCockpit(latestCockpitData, activeCockpitLeagueId);
+  });
+
+  document.getElementById('position-filters').addEventListener('click', (event) => {
+    const button = event.target.closest?.('[data-position]');
+    if (!button || !latestCockpitData) return;
+    selectedPosition = String(button.dataset.position || 'OVERALL');
+    renderPositionBoard(latestCockpitData);
+  });
+
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!form.reportValidity()) return;
@@ -844,7 +1262,7 @@
   });
   prefillLeagueFromFragment();
 
-  if (!client || !viewModels || !renderer) {
+  if (!client || !viewModels || !renderer || !cockpit) {
     setStatus('Shared recommendation UI modules are unavailable.', 'error');
     setControlsDisabled(true);
     return;

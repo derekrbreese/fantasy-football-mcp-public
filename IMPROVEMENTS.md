@@ -14,6 +14,10 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Popup ledger diagnostics with exact missing, duplicate, and sanitized unnumbered-pick details, plus guarded authoritative full repair that distinguishes strictly numbered pre-rendered future rows using stable current-pick evidence. Unsafe or ambiguous capture persists a privacy-safe per-league server blocker until a verified coherent scan or accepted repair clears it.
 - Per-league browser storage, durable repair/reset reconciliation, and a cross-browser extension-background lock broker with bounded heartbeats, expiring session fences, and cooperative lease cancellation instead of Firefox content-script Web Locks.
 - Persistent Firefox Draft Assistant sidebar with explicit league selection, shared fail-closed recommendation components, and no Yahoo-page injection or draft actions.
+- Clock-aware at-a-glance decision brief in the sidebar and dashboard with explicit on-clock/next/picks-away states, a primary pick, two immediate fallbacks, and a guarded plain-R refresh shortcut. It uses reliable pick distance and does not invent a countdown timer.
+- Exact-session-scoped personal queues in the dashboard and Firefox sidebar, with bounded reorder/removal controls, conservative drafted-player reconciliation, and no profile-to-mock copying.
+- Full live draft cockpit with position/tier filtering, three-strategy sensitivity, recent position-run alerts, roster-slot gap warnings, position-aware fallback tiers, readiness checks, bounded quick comparison, and value/reach recap.
+- Explicit opt-in, authoritative-ledger-only, deduplicated browser alerts when the user is next or on the clock; notifications remain advisory and never initiate a draft action.
 - Packaged cross-browser football icons plus compact, overflow-safe FantasyPros source and recent-news presentation in the sidebar and dashboard.
 - Loopback-only local dashboard with a configurable recommendation board, roster and draft-history views, specialist comparisons, critic checks, and data-source diagnostics.
 - Exact-session local DraftSheets/JSON profile import with bounded parsing, private atomic storage, zero Yahoo API calls when a matching profile is available, and current-season per-sport defaults for future profileless recorder drafts without overwriting exact profiles or copying picks.
@@ -55,11 +59,12 @@ This list separates the delivered live-draft baseline from prioritized follow-up
    - Add a draft-clock latency benchmark and enforce p50/p95 budgets for maximum supported inputs.
 
 4. **Sensitivity reporting**
-   - Report when the primary pick changes across conservative, balanced, and aggressive weights.
-   - Make critic checks actionable rather than merely descriptive.
+   - Delivered deterministic conservative, balanced, and aggressive primary-pick comparison in the live cockpit.
+   - Next, make critic checks actionable rather than merely descriptive.
 
 5. **Contingency depth**
-   - Generate position-aware fallback tiers for each pick before the user's next turn, not only one alternate sentence.
+   - Delivered bounded position-aware fallback tiers from the current trustworthy ranking pool.
+   - Next, evaluate fallback usefulness in draft replays and model opponent-specific depletion before the user's next turn.
 
 ## P2 — operations and usability
 

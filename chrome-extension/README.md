@@ -89,7 +89,9 @@ The popup displays picks and recorder health, not recommendations, and it cannot
 
 ### Firefox Draft Assistant
 
-The sidebar shows up to five recommendations beside Yahoo. It selects a league only from the active draft tab or an explicit saved-league choice; it never silently chooses the newest saved session. After the initial request, a newer pick for that exact league cancels stale work, debounces duplicate events, and refreshes automatically. Another league's storage updates do not affect it.
+The sidebar shows up to five recommendations beside Yahoo. Above the detailed cards, an at-a-glance decision brief shows whether you are on the clock, next, a known number of picks away, or missing reliable turn timing; it also keeps the primary recommendation and two immediate fallbacks visible together. Its queue and alert preference are stored only for the exact Yahoo session identity (sport plus league ID) in extension storage. Numeric-league-only preference keys from earlier development builds are intentionally not migrated because their sport provenance cannot be proven. Optional browser alerts fire only for a complete, current ledger when you are next or on the clock, and are deduplicated per recorded revision. Press plain **R** outside a form control for a manual refresh. The sidebar does not invent a countdown clock from pick distance.
+
+It selects a league only from the active draft tab or an explicit saved-league choice; it never silently chooses the newest saved session. After the initial request, a newer pick for that exact league cancels stale work, debounces duplicate events, and refreshes automatically. Another league's storage updates do not affect it.
 
 Cards show roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, and explicitly uncalibrated confidence and return/simulation probabilities. Stale state, inferred team counts, unresolved player identities, unavailable roster settings, and unknown injury/news data are visibly degraded. FantasyPros coverage markers are described as bounded snapshots; when its feed works but no fresh injury record matches the player pool, the UI says that missing status does not mean healthy instead of calling the feed unavailable. When the server's optional Databricks critic is enabled and available, a separate advisory-only summary appears after the unchanged deterministic recommendations.
 
@@ -97,7 +99,7 @@ Cards show roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, a
 
 Open it from the popup or visit `http://127.0.0.1:8765/draft-dashboard` while the server is running. Opening it from the popup carries the exact league ID in a browser fragment, which is not sent in the initial dashboard GET.
 
-The dashboard can show up to twenty candidates, roster construction, recent draft history, specialist comparisons, critic checks, simulations, and source/quality diagnostics. It and the sidebar share the same safe text-only renderer and never inject controls into Yahoo.
+The dashboard shows the same clock-aware decision brief and a broader live cockpit: personal queue, position/tier filters, three-strategy sensitivity, recent position-run alerts, configured roster-slot gaps, fallback tiers, readiness checks, quick comparison, and a value/reach recap. The prior cockpit remains available while a refresh is computing. It also includes up to twenty detailed candidates, recent draft history, specialist scores, critic checks, simulations, and source/quality diagnostics. It and the sidebar use text-only DOM rendering and never inject controls into Yahoo.
 
 ## Import a local rankings profile
 
@@ -243,7 +245,7 @@ Yahoo may have changed its layout. Select **Save diagnostics**. The report conta
 
 ## Store preparation
 
-`manifest.json` declares a stable Firefox add-on ID, Firefox 142 and Chrome 121 minimum versions, no Firefox data collection, the `storage` permission, narrowly scoped Yahoo draft-page access, and loopback access. Transparent football icons are packaged at the browser toolbar, sidebar, add-on manager, and 128-pixel store sizes. [CHROMEWEBSTORE.md](CHROMEWEBSTORE.md) tracks listing copy, permission justifications, disclosures, and the remaining Chrome submission checklist.
+`manifest.json` declares a stable Firefox add-on ID, Firefox 142 and Chrome 121 minimum versions, no Firefox data collection, the `storage` and `notifications` permissions, narrowly scoped Yahoo draft-page access, and loopback access. Notifications are disabled until the user opts in from the sidebar and contain only turn status plus the current advisory recommendation. Transparent football icons are packaged at the browser toolbar, sidebar, add-on manager, and 128-pixel store sizes. [CHROMEWEBSTORE.md](CHROMEWEBSTORE.md) tracks listing copy, permission justifications, disclosures, and the remaining Chrome submission checklist.
 
 ## Tests
 

@@ -46,6 +46,12 @@
       sendTabMessage(tabId, message) {
         return call(native.tabs.sendMessage, native.tabs, [tabId, message]);
       },
+      createNotification(notificationId, options) {
+        if (!native.notifications?.create) {
+          return Promise.reject(new Error('WebExtension notifications are unavailable'));
+        }
+        return call(native.notifications.create, native.notifications, [notificationId, options]);
+      },
     };
   }
 

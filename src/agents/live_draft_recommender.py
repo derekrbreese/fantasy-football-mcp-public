@@ -67,6 +67,7 @@ _STRATEGY_WEIGHTS = {
         "scenario": 0.05,
     },
 }
+_COCKPIT_POSITIONS = ("OVERALL", "QB", "RB", "WR", "TE", "FLEX", "K", "DST")
 
 
 def _rounded_normalized_weights(weights: Mapping[str, float]) -> dict[str, float]:
@@ -81,6 +82,32 @@ def _rounded_normalized_weights(weights: Mapping[str, float]) -> dict[str, float
         target = max(active, key=lambda key: rounded[key])
         rounded[target] = round(rounded[target] + residual, 6)
     return rounded
+
+
+def _strategy_weights(strategy: str, *, risk_available: bool) -> dict[str, float]:
+    weights = dict(_STRATEGY_WEIGHTS.get(strategy, _STRATEGY_WEIGHTS["balanced"]))
+    if not risk_available:
+        weights["riskNews"] = 0.0
+    total = sum(weights.values())
+    if total <= 0:
+        return weights
+    return {key: value / total for key, value in weights.items()}
+
+
+def _strategy_score(
+    scores: Mapping[str, float | None], strategy: str, *, risk_available: bool
+) -> tuple[float, dict[str, float]]:
+    weights = _strategy_weights(strategy, risk_available=risk_available)
+    if scores.get("riskNews") is None and weights.get("riskNews", 0) > 0:
+        weights["riskNews"] = 0.0
+        total = sum(weights.values())
+        weights = {key: value / total for key, value in weights.items()}
+    score = sum(
+        value * weights[key]
+        for key, value in scores.items()
+        if value is not None and key in weights
+    )
+    return score, weights
 
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
@@ -437,6 +464,67 @@ class RosterConstructionAgent:
             "impact": impact,
         }
 
+    def summary(self) -> dict[str, Any]:
+        slots: list[dict[str, Any]] = []
+        for position, required in self.required.items():
+            current = min(self.counts[position], required)
+            slots.append(
+                {
+                    "position": position,
+                    "current": current,
+                    "required": required,
+                    "open": max(0, required - current),
+                }
+            )
+
+        eligible_surplus = sum(
+            max(0, self.counts[position] - self.required[position])
+            for position in ("RB", "WR", "TE")
+        )
+        if self.flex_count:
+            current = min(self.flex_count, eligible_surplus)
+            eligible_surplus -= current
+            slots.append(
+                {
+                    "position": "FLEX",
+                    "current": current,
+                    "required": self.flex_count,
+                    "open": self.flex_count - current,
+                }
+            )
+
+        if self.superflex_count:
+            superflex_surplus = eligible_surplus + max(
+                0, self.counts["QB"] - self.required["QB"]
+            )
+            current = min(self.superflex_count, superflex_surplus)
+            slots.append(
+                {
+                    "position": "SUPERFLEX",
+                    "current": current,
+                    "required": self.superflex_count,
+                    "open": self.superflex_count - current,
+                }
+            )
+
+        open_starters = sum(slot["open"] for slot in slots)
+        draftable_slots = sum(
+            max(0, int(slot.get("count", 0)))
+            for slot in self.slots
+            if _position(slot.get("position")) not in {"IR", "TAXI"}
+        )
+        return {
+            "slots": slots,
+            "openStarterSlots": open_starters,
+            "starterComplete": open_starters == 0,
+            "draftableRosterSlots": draftable_slots,
+            "positionCounts": {
+                position: count
+                for position, count in sorted(self.counts.items())
+                if position
+            },
+        }
+
 
 class DraftDynamicsAgent:
     name = "draftDynamics"
@@ -703,6 +791,7 @@ class LiveDraftRecommendationEngine:
             for index, item in enumerate(rankings, start=1)
             if isinstance(item, Mapping)
         ]
+        roster_agent = RosterConstructionAgent(state["userRoster"], _roster_positions(league))
         injury_available = any(
             risk_agent.injury_available(candidate)
             for candidate in ranking_candidates
@@ -731,6 +820,15 @@ class LiveDraftRecommendationEngine:
                 "llmOnRequestPath": False,
             },
             "warnings": warnings,
+            "cockpit": self._cockpit(
+                state,
+                rankings,
+                league,
+                roster_agent,
+                [],
+                risk_available=risk_available,
+                blocked=not state["health"]["complete"],
+            ),
         }
         if not state["health"]["complete"]:
             if state["health"]["authoritativeCaptureBlocked"]:
@@ -772,16 +870,11 @@ class LiveDraftRecommendationEngine:
             warnings.append("Every ranking entry was drafted or invalid")
             return self._empty_result(base, "degraded", self._draft_advice(state), started)
 
-        roster_agent = RosterConstructionAgent(state["userRoster"], _roster_positions(league))
         dynamics_agent = DraftDynamicsAgent(state["picks"])
         value_agent = PlayerValueAgent()
         opponent_agent = OpponentModelAgent()
         scenario_agent = ScenarioSimulatorAgent(self.simulations, self.random_seed)
-        weights = dict(_STRATEGY_WEIGHTS[base["strategy"]])
-        if not risk_available:
-            weights["riskNews"] = 0.0
-            active_total = sum(weights.values())
-            weights = {key: value / active_total for key, value in weights.items()}
+        weights = _strategy_weights(base["strategy"], risk_available=risk_available)
         pool_size = max(len(rankings), 100)
         evaluated = []
 
@@ -804,17 +897,10 @@ class LiveDraftRecommendationEngine:
                 "riskNews": risk,
                 "scenario": scenario,
             }
-            effective_weights = dict(weights)
-            if risk is None:
-                effective_weights["riskNews"] = 0.0
-                active_total = sum(effective_weights.values())
-                effective_weights = {
-                    key: value / active_total for key, value in effective_weights.items()
-                }
-            overall = sum(
-                score * effective_weights[key]
-                for key, score in scores.items()
-                if score is not None
+            overall, effective_weights = _strategy_score(
+                scores,
+                base["strategy"],
+                risk_available=risk_available,
             )
             reasoning = self._reasoning(
                 candidate,
@@ -903,6 +989,15 @@ class LiveDraftRecommendationEngine:
             },
             "critic": critic,
             "draftAdvice": self._draft_advice(state),
+            "cockpit": self._cockpit(
+                state,
+                rankings,
+                league,
+                roster_agent,
+                evaluated,
+                risk_available=risk_available,
+                blocked=False,
+            ),
             "latencyMs": round((time.perf_counter() - started) * 1000.0, 3),
         }
         return result
@@ -943,6 +1038,373 @@ class LiveDraftRecommendationEngine:
             reasons.append("injury/news status is unknown, not assumed healthy")
         reasons.append(f"heuristic chance to return is {opponent['returnProbability']:.0%}")
         return reasons
+
+    @staticmethod
+    def _candidate_brief(item: Mapping[str, Any], score: float | None = None) -> dict[str, Any]:
+        player = item.get("player") if isinstance(item.get("player"), Mapping) else {}
+        value = item.get("specialistDetails")
+        value = value.get("value") if isinstance(value, Mapping) else {}
+        raw_score = item.get("overallScore") if score is None else score
+        return {
+            "name": str(player.get("name") or "Unknown player")[:120],
+            "position": _position(player.get("position"))[:16],
+            "team": str(player.get("team") or "")[:16],
+            "score": round(_number(raw_score, 0.0), 2),
+            "rank": round(_number(player.get("rank"), 0.0), 2),
+            "adp": round(_number(player.get("adp"), 0.0), 2),
+            "tier": str(value.get("tier") or "unknown")[:24],
+        }
+
+    @staticmethod
+    def _strategy_comparison(
+        evaluated: Sequence[Mapping[str, Any]], *, risk_available: bool
+    ) -> dict[str, Any]:
+        strategies = []
+        for strategy in ("conservative", "balanced", "aggressive"):
+            scored = []
+            for item in evaluated:
+                raw_scores = item.get("scores")
+                if not isinstance(raw_scores, Mapping):
+                    continue
+                score, _weights = _strategy_score(
+                    raw_scores,
+                    strategy,
+                    risk_available=risk_available,
+                )
+                scored.append((score, item))
+            scored.sort(
+                key=lambda entry: (
+                    -entry[0],
+                    _number(entry[1].get("player", {}).get("rank"), 10_000),
+                    str(entry[1].get("player", {}).get("name") or ""),
+                )
+            )
+            if scored:
+                strategies.append(
+                    {
+                        "strategy": strategy,
+                        "primary": LiveDraftRecommendationEngine._candidate_brief(
+                            scored[0][1], scored[0][0]
+                        ),
+                    }
+                )
+        primary_names = [entry["primary"]["name"] for entry in strategies]
+        consensus = bool(primary_names) and len(set(primary_names)) == 1
+        return {
+            "consensus": consensus,
+            "strategies": strategies,
+            "summary": (
+                f"All strategies prefer {primary_names[0]}."
+                if consensus
+                else "The primary changes with strategy; compare the trade-offs below."
+            )
+            if primary_names
+            else "Strategy comparison is unavailable until candidates are trustworthy.",
+        }
+
+    @staticmethod
+    def _position_boards(evaluated: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        boards = []
+        for position in _COCKPIT_POSITIONS:
+            if position == "OVERALL":
+                pool = list(evaluated)
+            elif position == "FLEX":
+                pool = [
+                    item
+                    for item in evaluated
+                    if _position(item.get("player", {}).get("position")) in {"RB", "WR", "TE"}
+                ]
+            else:
+                pool = [
+                    item
+                    for item in evaluated
+                    if _position(item.get("player", {}).get("position")) == position
+                ]
+            if not pool:
+                continue
+            pool.sort(
+                key=lambda item: (
+                    -_number(item.get("overallScore"), 0.0),
+                    _number(item.get("player", {}).get("rank"), 10_000),
+                    str(item.get("player", {}).get("name") or ""),
+                )
+            )
+            candidates = [
+                LiveDraftRecommendationEngine._candidate_brief(item) for item in pool[:5]
+            ]
+            leading_tier = candidates[0]["tier"]
+            tier_remaining = sum(
+                1
+                for item in pool
+                if str(
+                    item.get("specialistDetails", {}).get("value", {}).get("tier")
+                    or "unknown"
+                )
+                == leading_tier
+            )
+            next_drop = next(
+                (
+                    index
+                    for index, candidate in enumerate(candidates[1:], start=1)
+                    if candidate["tier"] != leading_tier
+                ),
+                None,
+            )
+            boards.append(
+                {
+                    "position": position,
+                    "leadingTier": leading_tier,
+                    "tierRemaining": min(tier_remaining, 500),
+                    "nextTierDropAfter": next_drop,
+                    "candidates": candidates,
+                }
+            )
+        return boards
+
+    @staticmethod
+    def _position_runs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+        recent = list(state.get("picks", []))[-8:]
+        counts = Counter(
+            _position(pick.get("position"))
+            for pick in recent
+            if isinstance(pick, Mapping) and _position(pick.get("position"))
+        )
+        return [
+            {
+                "position": position,
+                "recentPicks": count,
+                "window": len(recent),
+                "message": f"{count} {position} selections in the last {len(recent)} picks.",
+            }
+            for position, count in sorted(
+                counts.items(), key=lambda entry: (-entry[1], entry[0])
+            )
+            if count >= 3
+        ][:4]
+
+    @staticmethod
+    def _roster_plan(
+        state: Mapping[str, Any],
+        rankings: Sequence[Mapping[str, Any]],
+        league: Mapping[str, Any],
+        roster_agent: RosterConstructionAgent,
+    ) -> dict[str, Any]:
+        plan = roster_agent.summary()
+        configured = league.get("roster_positions")
+        if not isinstance(configured, list):
+            configured = league.get("rosterPositions")
+        plan["source"] = "configured" if isinstance(configured, list) and configured else "default"
+        warnings = []
+        open_slots = [
+            f"{slot['position']} {slot['open']}"
+            for slot in plan["slots"]
+            if slot["open"] > 0
+        ]
+        if open_slots:
+            warnings.append(f"Open starter slots: {', '.join(open_slots)}.")
+
+        team_count = int(_number(state.get("teamCount"), 0))
+        current_pick = int(_number(state.get("currentOverallPick"), 0))
+        current_round = (
+            ((current_pick - 1) // team_count) + 1
+            if team_count > 0 and current_pick > 0
+            else None
+        )
+        special_teams = [
+            position
+            for position in ("K", "DST")
+            if roster_agent.counts[position] > 0
+        ]
+        if current_round is not None and current_round <= 10 and special_teams:
+            warnings.append(
+                f"Early {'/'.join(special_teams)} selection reduced earlier skill-position depth."
+            )
+
+        bye_counts: Counter[int] = Counter()
+        for pick in state.get("userRoster", []):
+            if not isinstance(pick, Mapping):
+                continue
+            match = next(
+                (
+                    ranking
+                    for ranking in rankings
+                    if isinstance(ranking, Mapping) and _same_player(pick, ranking)
+                ),
+                None,
+            )
+            if not isinstance(match, Mapping):
+                continue
+            raw_bye = match.get("bye") or match.get("bye_week")
+            if isinstance(raw_bye, int) and not isinstance(raw_bye, bool) and 1 <= raw_bye <= 18:
+                bye_counts[raw_bye] += 1
+        concentrated = sorted(week for week, count in bye_counts.items() if count >= 3)
+        if concentrated:
+            warnings.append(
+                f"Bye-week concentration: three or more players in week(s) {', '.join(map(str, concentrated))}."
+            )
+        plan["warnings"] = warnings[:6]
+        return plan
+
+    @staticmethod
+    def _fallback_tiers(position_boards: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        groups = []
+        for board in position_boards:
+            if board.get("position") not in {"QB", "RB", "WR", "TE"}:
+                continue
+            candidates = board.get("candidates")
+            if not isinstance(candidates, list) or not candidates:
+                continue
+            groups.append(
+                {
+                    "position": board["position"],
+                    "tier": str(board.get("leadingTier") or "unknown")[:24],
+                    "candidates": [dict(item) for item in candidates[:3] if isinstance(item, Mapping)],
+                }
+            )
+        return groups[:4]
+
+    @staticmethod
+    def _readiness(
+        state: Mapping[str, Any],
+        rankings: Sequence[Mapping[str, Any]],
+        league: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        configured = league.get("roster_positions")
+        if not isinstance(configured, list):
+            configured = league.get("rosterPositions")
+        checks = [
+            {"key": "server", "label": "Local recommendation server connected", "passed": True},
+            {
+                "key": "ledger",
+                "label": "Authoritative numbered ledger complete",
+                "passed": state.get("health", {}).get("complete") is True,
+            },
+            {
+                "key": "freshness",
+                "label": "Draft state fresh",
+                "passed": state.get("health", {}).get("fresh") is True,
+            },
+            {
+                "key": "slot",
+                "label": "Your snake-draft slot identified",
+                "passed": isinstance(state.get("userDraftSlot"), int),
+            },
+            {
+                "key": "teams",
+                "label": "League team count confirmed",
+                "passed": state.get("health", {}).get("teamCountSource") == "league",
+            },
+            {
+                "key": "roster",
+                "label": "Roster slots configured",
+                "passed": isinstance(configured, list) and bool(configured),
+            },
+            {"key": "rankings", "label": "Ranking pool ready", "passed": bool(rankings)},
+        ]
+        ready = all(check["passed"] for check in checks)
+        return {
+            "ready": ready,
+            "checks": checks,
+            "summary": (
+                "Draft cockpit is ready."
+                if ready
+                else f"{sum(not check['passed'] for check in checks)} readiness check(s) need attention."
+            ),
+        }
+
+    @staticmethod
+    def _recap(
+        state: Mapping[str, Any],
+        rankings: Sequence[Mapping[str, Any]],
+        roster_plan: Mapping[str, Any],
+        *,
+        blocked: bool,
+    ) -> dict[str, Any]:
+        recorded = len(state.get("picks", []))
+        expected = int(_number(state.get("teamCount"), 0)) * int(
+            _number(roster_plan.get("draftableRosterSlots"), 0)
+        )
+        complete = expected > 0 and recorded >= expected and not blocked
+        decisions = []
+        for pick in state.get("userRoster", [])[:30]:
+            if not isinstance(pick, Mapping) or not isinstance(pick.get("pickNumber"), int):
+                continue
+            match = next(
+                (
+                    ranking
+                    for ranking in rankings
+                    if isinstance(ranking, Mapping) and _same_player(pick, ranking)
+                ),
+                None,
+            )
+            if not isinstance(match, Mapping):
+                continue
+            raw_adp = match.get("average_draft_position")
+            if raw_adp is None:
+                raw_adp = match.get("adp")
+            adp = _number(raw_adp, math.nan)
+            if not math.isfinite(adp):
+                continue
+            delta = pick["pickNumber"] - adp
+            label = "value" if delta >= 8 else ("reach" if delta <= -8 else "near ADP")
+            decisions.append(
+                {
+                    "player": str(pick.get("player") or "Unknown player")[:120],
+                    "position": _position(pick.get("position"))[:16],
+                    "pickNumber": pick["pickNumber"],
+                    "adp": round(adp, 2),
+                    "adpDelta": round(delta, 2),
+                    "label": label,
+                    "basis": "uncalibrated ADP heuristic",
+                }
+            )
+        value_count = sum(item["label"] == "value" for item in decisions)
+        reach_count = sum(item["label"] == "reach" for item in decisions)
+        status = "blocked" if blocked else ("complete" if complete else "in-progress")
+        return {
+            "status": status,
+            "complete": complete,
+            "recordedPicks": recorded,
+            "expectedPicks": expected or None,
+            "progress": round(min(1.0, recorded / expected), 4) if expected else None,
+            "userPickCount": len(state.get("userRoster", [])),
+            "valueCount": value_count,
+            "reachCount": reach_count,
+            "decisions": decisions[:20],
+            "summary": (
+                "Ledger repair is required before the recap is trustworthy."
+                if blocked
+                else f"{value_count} value pick(s), {reach_count} reach(es), and {len(decisions) - value_count - reach_count} near-ADP decision(s)."
+            ),
+        }
+
+    @classmethod
+    def _cockpit(
+        cls,
+        state: Mapping[str, Any],
+        rankings: Sequence[Mapping[str, Any]],
+        league: Mapping[str, Any],
+        roster_agent: RosterConstructionAgent,
+        evaluated: Sequence[Mapping[str, Any]],
+        *,
+        risk_available: bool,
+        blocked: bool,
+    ) -> dict[str, Any]:
+        roster_plan = cls._roster_plan(state, rankings, league, roster_agent)
+        position_boards = [] if blocked else cls._position_boards(evaluated)
+        return {
+            "strategyComparison": (
+                {"consensus": False, "strategies": [], "summary": "Strategy comparison is blocked until the ledger is repaired."}
+                if blocked
+                else cls._strategy_comparison(evaluated, risk_available=risk_available)
+            ),
+            "positionBoards": position_boards,
+            "positionRuns": [] if blocked else cls._position_runs(state),
+            "rosterPlan": roster_plan,
+            "fallbackTiers": [] if blocked else cls._fallback_tiers(position_boards),
+            "readiness": cls._readiness(state, rankings, league),
+            "recap": cls._recap(state, rankings, roster_plan, blocked=blocked),
+        }
 
     @staticmethod
     def _draft_advice(state: Mapping[str, Any]) -> list[str]:

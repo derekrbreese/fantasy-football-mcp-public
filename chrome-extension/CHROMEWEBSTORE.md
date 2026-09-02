@@ -22,7 +22,11 @@ When the user's fantasy-football MCP server is running locally, the extension se
 
 ### `storage`
 
-Required to save recorded draft picks in `chrome.storage.local` so history remains available when the popup closes or the Yahoo draft page reloads. The extension stores draft metadata and picks only. It does not store cookies, credentials, or Yahoo URL authentication parameters.
+Required to save recorded draft picks and bounded queue preferences keyed by exact Yahoo sport-and-league session identity in `chrome.storage.local` so they remain available when the popup/sidebar closes or the Yahoo draft page reloads. It does not store cookies, credentials, or Yahoo URL authentication parameters.
+
+### `notifications`
+
+Required for the Firefox Draft Assistant's explicit opt-in turn alerts. An alert is considered only after a current recommendation confirms a complete authoritative ledger and says the user is next or on the clock. Alerts are deduplicated per draft revision, contain only turn status and the current advisory player name, and never select or draft a player. Notifications remain disabled until the user enables them in the sidebar.
 
 ### Host access: `https://football.fantasysports.yahoo.com/draftclient/*`
 
@@ -34,8 +38,8 @@ Required to send sanitized draft context to the user's optional fantasy-football
 
 ## Data-use disclosure
 
-- **Data handled:** Fantasy sports draft selections, fantasy team names displayed in the draft, and local recording timestamps.
-- **Storage:** Local Chrome extension storage in the user's browser profile and, if enabled by running the local MCP server, a user-owned state file on the same computer.
+- **Data handled:** Fantasy sports draft selections, fantasy team names displayed in the draft, local recording timestamps, and bounded per-session player queue/notification preferences chosen by the user.
+- **Storage:** Local browser extension storage for draft state and bounded per-session queue/alert preferences keyed by exact Yahoo sport-and-league identity and, if enabled by running the local MCP server, a user-owned state file on the same computer.
 - **Transmission:** Sanitized draft context and allowlisted recommendation settings are sent only to `127.0.0.1`, the loopback interface. There are no developer-operated endpoints, analytics, advertising, or third-party requests.
 - **Sale or sharing:** None.
 - **Authentication data:** Not collected or stored.
@@ -51,7 +55,7 @@ None. All JavaScript used by the extension is packaged with it. There are no rem
 - CSV export neutralizes formula-leading characters to reduce spreadsheet injection risk.
 - The draft URL parser keeps only the sport, league ID, and team ID path segments; query parameters are discarded.
 - Picks-tab scanning requires a rendered active Picks panel semantically paired with Queue, emits only allowlisted pick fields, ignores Queue entries and injury badges, and does not retain links, images, attributes, or arbitrary panel text.
-- The extension requests only `storage`, narrowly scoped Yahoo draft-client host access, and loopback host access for local sync and recommendation UI routes.
+- The extension requests only `storage`, `notifications`, narrowly scoped Yahoo draft-client host access, and loopback host access for local sync and recommendation UI routes. Notifications are opt-in and advisory.
 - The packaged background script is a private lock broker. It receives only the allowlisted Yahoo session key needed to serialize same-session extension work, and keeps only an opaque nonce plus expiry in browser-session storage to fence a background restart. It receives no page URL, query parameters, cookies, credentials, player data, or arbitrary DOM fields.
 
 ## Submission checklist

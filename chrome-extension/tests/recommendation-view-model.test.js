@@ -81,6 +81,17 @@ test('builds a bounded recommendation view with roster, round, degradation, and 
   assert.match(model.recommendations[0].returnProbabilityLabel, /uncalibrated heuristic/);
   assert.match(model.recommendations[0].scenarioProbabilityLabel, /uncalibrated simulation/);
   assert.equal(model.recommendations[0].riskLabel, 'Injury/news: unknown — not assumed healthy');
+  assert.deepEqual(model.decisionBrief, {
+    turnLabel: '6 picks away',
+    turnTone: 'watch',
+    primaryLabel: 'Recommended now',
+    primaryName: 'Player 1',
+    primaryMeta: 'WR · SEA',
+    fallbacks: [
+      { name: 'Player 2', meta: 'RB · SEA' },
+      { name: 'Player 3', meta: 'WR · SEA' },
+    ],
+  });
   assert.deepEqual(model.degradations, [
     'Draft state is stale by about 181 seconds.',
     'Team count was inferred from the recorded ledger.',
@@ -90,6 +101,25 @@ test('builds a bounded recommendation view with roster, round, degradation, and 
     'Yahoo league roster positions are unavailable; using 1QB defaults',
   ]);
   assert.equal(model.actionNotice, 'Recommendations only — this assistant never drafts players.');
+});
+
+test('makes turn urgency explicit without inventing a draft clock', () => {
+  const cases = [
+    { picksUntilUserTurn: 0, turnLabel: 'You are on the clock', turnTone: 'urgent' },
+    { picksUntilUserTurn: 1, turnLabel: 'You are next', turnTone: 'next' },
+    { picksUntilUserTurn: 3, turnLabel: '3 picks away', turnTone: 'watch' },
+    { picksUntilUserTurn: null, turnLabel: 'Turn timing unknown', turnTone: 'unknown' },
+  ];
+
+  for (const expected of cases) {
+    const base = response();
+    const model = createRecommendationViewModel({
+      ...base,
+      state: { ...base.state, picksUntilUserTurn: expected.picksUntilUserTurn },
+    }, { leagueId: '10462193' });
+    assert.equal(model.decisionBrief.turnLabel, expected.turnLabel);
+    assert.equal(model.decisionBrief.turnTone, expected.turnTone);
+  }
 });
 
 test('groups repeated FantasyPros public coverage warnings into one readable disclosure', () => {
@@ -409,6 +439,7 @@ test('structured ledger anomalies override contradictory success candidates', ()
 
     assert.equal(model.mode, 'blocked', name);
     assert.deepEqual(model.recommendations, [], name);
+    assert.equal(model.decisionBrief, null, name);
     assert.deepEqual(model.contingency, [], name);
     assert.match(model.emptyMessage, /Full rescan & repair/, name);
   }

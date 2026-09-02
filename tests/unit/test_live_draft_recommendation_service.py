@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -114,6 +115,7 @@ def available_advisory_result() -> dict:
 
 
 def fantasypros_result(profile: dict, *, status: str = "success") -> dict:
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     updates = []
     for index, ranking in enumerate(profile["rankings"], start=1):
         update = {
@@ -130,14 +132,14 @@ def fantasypros_result(profile: dict, *, status: str = "success") -> dict:
             "news_updated_at": None,
             "news_fresh": False,
             "recentNews": [],
-            "retrievedAt": "2026-09-01T17:00:00Z",
+            "retrievedAt": observed_at,
         }
         if ranking["name"] == "De'Von Achane":
             update.update(
                 {
                     "injury_status": "questionable",
                     "injury_source": "FantasyPros",
-                    "injury_updated_at": "2026-09-01T16:30:00Z",
+                    "injury_updated_at": observed_at,
                     "injury_fresh": True,
                 }
             )
@@ -145,13 +147,13 @@ def fantasypros_result(profile: dict, *, status: str = "success") -> dict:
             update.update(
                 {
                     "news_source": "FantasyPros",
-                    "news_updated_at": "2026-09-01T16:45:00Z",
+                    "news_updated_at": observed_at,
                     "news_fresh": True,
                     "recentNews": [
                         {
                             "headline": "Returns to full team drills",
                             "category": "injury",
-                            "publishedAt": "2026-09-01T16:45:00Z",
+                            "publishedAt": observed_at,
                         }
                     ],
                 }
@@ -160,7 +162,7 @@ def fantasypros_result(profile: dict, *, status: str = "success") -> dict:
     return {
         "status": status,
         "provider": "FantasyPros",
-        "retrievedAt": "2026-09-01T17:00:00Z",
+        "retrievedAt": observed_at,
         "players": updates,
         "warnings": [],
     }

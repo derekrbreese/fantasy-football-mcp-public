@@ -1634,6 +1634,15 @@ async def serve_draft_recommendation_renderer(request: Request) -> Response:
     return _serve_shared_draft_ui_script(request, "recommendation-renderer.js")
 
 
+@server.custom_route(
+    "/draft-dashboard/shared/draft-cockpit.js",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def serve_draft_cockpit_state(request: Request) -> Response:
+    return _serve_shared_draft_ui_script(request, "draft-cockpit.js")
+
+
 @server.tool(
     name="ff_get_waiver_wire",
     description=(

@@ -155,6 +155,31 @@
     return context;
   }
 
+  function turnStatus(picksUntilUserTurn) {
+    const picks = finiteNumber(picksUntilUserTurn);
+    if (!Number.isInteger(picks) || picks < 0) {
+      return { turnLabel: 'Turn timing unknown', turnTone: 'unknown' };
+    }
+    if (picks === 0) return { turnLabel: 'You are on the clock', turnTone: 'urgent' };
+    if (picks === 1) return { turnLabel: 'You are next', turnTone: 'next' };
+    return { turnLabel: `${picks} picks away`, turnTone: 'watch' };
+  }
+
+  function decisionBrief(state, recommendations) {
+    if (!recommendations.length) return null;
+    const primary = recommendations[0];
+    return {
+      ...turnStatus(state?.picksUntilUserTurn),
+      primaryLabel: 'Recommended now',
+      primaryName: primary.name,
+      primaryMeta: primary.playerMeta,
+      fallbacks: recommendations.slice(1, 3).map((candidate) => ({
+        name: candidate.name,
+        meta: candidate.playerMeta,
+      })),
+    };
+  }
+
   function ledgerIssues(health) {
     const missing = positiveIntegers(health?.missingPickNumbers);
     const duplicates = positiveIntegers(health?.duplicatePickNumbers);
@@ -318,6 +343,7 @@
       draftContext: [],
       ledgerIssues: [],
       degradations: [],
+      decisionBrief: null,
       recommendations: [],
       advisoryCritic: null,
       contingency: [],
@@ -372,6 +398,7 @@
           externalNewsAvailable: response?.capabilities?.externalNews === true,
         }))
       : [];
+    model.decisionBrief = decisionBrief(response.state, model.recommendations);
     const normalizedAdvisoryCritic = mode === 'success' || mode === 'degraded'
       ? advisoryCritic(response.advisoryCritic)
       : null;

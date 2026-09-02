@@ -8,6 +8,7 @@
     <script src="/draft-dashboard/shared/recommendation-client.js" defer></script>
     <script src="/draft-dashboard/shared/recommendation-view-model.js" defer></script>
     <script src="/draft-dashboard/shared/recommendation-renderer.js" defer></script>
+    <script src="/draft-dashboard/shared/draft-cockpit.js" defer></script>
     <script src="/draft-dashboard/draft-profile-client.js" defer></script>
     <script src="/draft-dashboard/app.js" defer></script>
   </head>
@@ -184,6 +185,68 @@
         <article><span>Team count</span><strong id="team-count">—</strong></article>
       </section>
 
+      <section id="cockpit-panel" class="cockpit-grid hidden" aria-label="Live draft cockpit">
+        <article class="cockpit-card watchlist-card">
+          <div class="section-heading compact-heading">
+            <div>
+              <p class="eyebrow">Personal queue</p>
+              <h2>Watchlist</h2>
+            </div>
+            <p class="hint">Stored only in this browser for the selected league.</p>
+          </div>
+          <div class="queue-add-row">
+            <label>
+              <span>Add available player</span>
+              <select id="queue-candidate"><option value="">Choose a player</option></select>
+            </label>
+            <button id="queue-add" type="button">Add to queue</button>
+          </div>
+          <ol id="watchlist" class="watchlist"></ol>
+        </article>
+
+        <article class="cockpit-card position-board-card">
+          <div class="section-heading compact-heading">
+            <div>
+              <p class="eyebrow">Availability by position</p>
+              <h2>Position &amp; tier board</h2>
+            </div>
+            <p id="tier-context" class="hint"></p>
+          </div>
+          <div id="position-filters" class="position-filters" role="group" aria-label="Position filter"></div>
+          <div id="position-board" class="position-board"></div>
+        </article>
+
+        <article class="cockpit-card">
+          <p class="eyebrow">Sensitivity</p>
+          <h2>Strategy comparison</h2>
+          <div id="strategy-comparison" class="strategy-comparison"></div>
+        </article>
+
+        <article class="cockpit-card">
+          <p class="eyebrow">Draft dynamics</p>
+          <h2>Runs &amp; fallback tiers</h2>
+          <ul id="position-runs" class="compact-list"></ul>
+          <div id="fallback-tiers" class="fallback-tiers"></div>
+        </article>
+
+        <article class="cockpit-card comparison-card">
+          <div class="section-heading compact-heading">
+            <div>
+              <p class="eyebrow">Decision support</p>
+              <h2>Quick comparison</h2>
+            </div>
+            <p class="hint">Select up to three queued players.</p>
+          </div>
+          <div id="player-comparison" class="table-scroll"></div>
+        </article>
+
+        <article class="cockpit-card recap-card">
+          <p class="eyebrow">Draft review</p>
+          <h2>Progress &amp; recap</h2>
+          <div id="draft-recap"></div>
+        </article>
+      </section>
+
       <section id="recommendations-panel" class="content-section hidden" aria-labelledby="recommendations-title">
         <div class="section-heading">
           <div>
@@ -222,6 +285,8 @@
             </div>
           </div>
           <div id="roster-counts" class="roster-counts"></div>
+          <div id="roster-slots" class="roster-slots"></div>
+          <ul id="roster-warnings" class="compact-list"></ul>
           <ol id="roster-list" class="compact-list"></ol>
         </section>
       </div>

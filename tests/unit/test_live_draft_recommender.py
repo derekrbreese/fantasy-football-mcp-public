@@ -296,6 +296,95 @@ def test_full_suite_returns_specialists_scenario_critic_and_contingency() -> Non
     assert first["critic"]["passed"] is True
 
 
+def test_cockpit_returns_bounded_strategy_tiers_runs_fallbacks_and_readiness() -> None:
+    result = LiveDraftRecommendationEngine(simulations=32, random_seed=17).recommend(
+        live_context(),
+        rankings(),
+        {
+            "teams": 4,
+            "roster_positions": [
+                {"position": "QB", "count": 1},
+                {"position": "RB", "count": 2},
+                {"position": "WR", "count": 2},
+                {"position": "TE", "count": 1},
+                {"position": "FLEX", "count": 1},
+                {"position": "BN", "count": 6},
+            ],
+        },
+        count=3,
+    )
+
+    cockpit = result["cockpit"]
+    assert set(cockpit) == {
+        "strategyComparison",
+        "positionBoards",
+        "positionRuns",
+        "rosterPlan",
+        "fallbackTiers",
+        "readiness",
+        "recap",
+    }
+    assert [entry["strategy"] for entry in cockpit["strategyComparison"]["strategies"]] == [
+        "conservative",
+        "balanced",
+        "aggressive",
+    ]
+    assert all(entry["primary"]["name"] for entry in cockpit["strategyComparison"]["strategies"])
+    assert len(cockpit["positionBoards"]) <= 8
+    assert all(len(board["candidates"]) <= 5 for board in cockpit["positionBoards"])
+    assert {run["position"] for run in cockpit["positionRuns"]} == {"RB", "WR"}
+    assert cockpit["fallbackTiers"]
+    assert all(len(tier["candidates"]) <= 3 for tier in cockpit["fallbackTiers"])
+    assert cockpit["readiness"]["ready"] is True
+    assert all(isinstance(check["passed"], bool) for check in cockpit["readiness"]["checks"])
+
+
+def test_cockpit_roster_plan_and_recap_use_configured_slots_and_adp_only() -> None:
+    result = LiveDraftRecommendationEngine(simulations=0).recommend(
+        live_context(),
+        rankings(),
+        {
+            "teams": 4,
+            "roster_positions": [
+                {"position": "RB", "count": 1},
+                {"position": "WR", "count": 1},
+            ],
+        },
+        count=3,
+    )
+
+    roster = result["cockpit"]["rosterPlan"]
+    assert roster["starterComplete"] is True
+    assert roster["openStarterSlots"] == 0
+    assert roster["slots"] == [
+        {"position": "RB", "current": 1, "required": 1, "open": 0},
+        {"position": "WR", "current": 1, "required": 1, "open": 0},
+    ]
+
+    recap = result["cockpit"]["recap"]
+    assert recap["complete"] is False
+    assert recap["expectedPicks"] == 8
+    assert recap["recordedPicks"] == 6
+    assert recap["userPickCount"] == 2
+    assert len(recap["decisions"]) == 2
+    assert all(decision["basis"] == "uncalibrated ADP heuristic" for decision in recap["decisions"])
+
+
+def test_blocked_cockpit_explains_readiness_without_candidate_availability() -> None:
+    context = live_context()
+    context["picks"] = [pick for pick in context["picks"] if pick["pickNumber"] != 4]
+
+    result = LiveDraftRecommendationEngine().recommend(context, rankings(), {"teams": 4})
+
+    cockpit = result["cockpit"]
+    assert cockpit["readiness"]["ready"] is False
+    assert cockpit["strategyComparison"]["strategies"] == []
+    assert cockpit["positionBoards"] == []
+    assert cockpit["positionRuns"] == []
+    assert cockpit["fallbackTiers"] == []
+    assert cockpit["recap"]["status"] == "blocked"
+
+
 def test_gap_in_numbered_ledger_blocks_player_recommendations() -> None:
     context = live_context()
     context["picks"] = [pick for pick in context["picks"] if pick["pickNumber"] != 4]

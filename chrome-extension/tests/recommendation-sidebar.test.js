@@ -7,10 +7,19 @@ const {
   createRecommendationAutoRefreshScheduler,
   leagueChoices,
   createRecommendationRequestGuard,
+  isRefreshShortcut,
   recommendationStillMatchesSelection,
   resolveExplicitSelection,
   storageChangeAffectsSession,
 } = require('../recommendation-sidebar-state.js');
+
+test('accepts a plain R shortcut but ignores typing and modified keystrokes', () => {
+  assert.equal(isRefreshShortcut({ key: 'r', target: { tagName: 'BODY' } }), true);
+  assert.equal(isRefreshShortcut({ key: 'R', target: { tagName: 'DIV' } }), true);
+  assert.equal(isRefreshShortcut({ key: 'r', ctrlKey: true, target: { tagName: 'BODY' } }), false);
+  assert.equal(isRefreshShortcut({ key: 'r', target: { tagName: 'SELECT' } }), false);
+  assert.equal(isRefreshShortcut({ key: 'r', target: { isContentEditable: true, tagName: 'DIV' } }), false);
+});
 
 test('selects only a validated active Yahoo league and never falls back to latest saved state', () => {
   const sessions = {
@@ -280,12 +289,25 @@ test('manifest keeps the recorder UI and cross-browser background lock broker', 
     service_worker: 'lock-broker.js',
   });
   assert.equal(manifest.minimum_chrome_version, '121');
+  assert.ok(manifest.permissions.includes('notifications'));
   assert.equal(manifest.content_scripts[0].js.includes('assistant.js'), false);
   assert.match(html, /id="league-select"/);
   assert.match(html, /id="refresh-recommendations"/);
+  assert.match(html, /aria-keyshortcuts="R"/);
   assert.match(html, /recommendation-client\.js/);
   assert.match(html, /recommendation-view-model\.js/);
   assert.match(html, /recommendation-renderer\.js/);
+  assert.match(html, /draft-cockpit\.js/);
+  assert.match(html, /id="queue-candidate"/);
+  assert.match(html, /id="turn-notifications"/);
+  assert.match(
+    fs.readFileSync(path.join(extensionRoot, 'assistant.js'), 'utf8'),
+    /storageKey\(session\.sessionKey\)/,
+  );
+  assert.match(
+    fs.readFileSync(path.join(extensionRoot, 'assistant.js'), 'utf8'),
+    /notificationId\(session\.sessionKey\)/,
+  );
   assert.doesNotMatch(html, /<script[^>]*>[^<]+<\/script>/);
   assert.match(popupHtml, /id="open-assistant"/);
   assert.match(popupHtml, /id="open-dashboard"/);

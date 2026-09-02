@@ -29,8 +29,10 @@ h1 { font-size: 22px; line-height: 1.15; }
 .app-main { padding: 14px; }
 
 .controls,
+.cockpit-controls,
 .assistant-status,
 .draft-context,
+.decision-brief,
 .notice,
 .recommendation-card,
 .contingency {
@@ -40,6 +42,22 @@ h1 { font-size: 22px; line-height: 1.15; }
 }
 
 .controls { display: grid; gap: 7px; padding: 12px; }
+.cockpit-controls { display: grid; gap: 9px; margin-top: 12px; padding: 12px; }
+.cockpit-heading { display: flex; gap: 10px; align-items: start; justify-content: space-between; }
+.cockpit-heading h2 { font-size: 14px; }
+.cockpit-eyebrow { color: #5f1a8b; }
+.notification-toggle { display: flex; max-width: 132px; gap: 6px; align-items: start; color: #45534c; line-height: 1.25; }
+.notification-toggle input { margin: 1px 0 0; accent-color: #5f1a8b; }
+.queue-add-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.watchlist { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.watchlist-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px; border-radius: 8px; background: #f7f9f8; }
+.watchlist-item--drafted { opacity: .58; text-decoration: line-through; }
+.watchlist-identity { display: grid; min-width: 0; }
+.watchlist-identity strong { font-size: 11px; overflow-wrap: anywhere; }
+.watchlist-identity small { color: #6b7771; font-size: 9px; }
+.watchlist-actions { display: flex; gap: 3px; }
+.watchlist-actions button { min-width: 27px; min-height: 27px; padding: 3px 6px; font-size: 10px; }
+.queue-help { color: #6b7771; font-size: 9px; line-height: 1.4; }
 label { color: #5d6963; font-size: 11px; font-weight: 750; }
 select, button, .dashboard-link {
   min-height: 36px;
@@ -77,6 +95,22 @@ button:disabled { cursor: default; opacity: .5; }
 .context-item { min-width: 0; padding: 8px; border-radius: 8px; background: #f7f9f8; }
 dt { color: #6b7771; font-size: 9px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 dd { margin-top: 3px; font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+
+.decision-brief { padding: 12px; border-color: #c9d9cf; box-shadow: 0 5px 18px rgba(45, 8, 93, .07); }
+.decision-brief--urgent { border-color: #bd4a4a; box-shadow: 0 0 0 2px rgba(189, 74, 74, .12); }
+.decision-brief--next { border-color: #d29537; }
+.turn-status { color: #5f1a8b; font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+.decision-brief--urgent .turn-status { color: #a72e2e; }
+.decision-brief--next .turn-status { color: #8a5706; }
+.decision-primary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; margin-top: 8px; }
+.decision-label { grid-column: 1 / -1; color: #6b7771; font-size: 9px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+.decision-name { min-width: 0; font-size: 17px; overflow-wrap: anywhere; }
+.decision-meta { align-self: center; color: #526059; font-size: 10px; white-space: nowrap; }
+.decision-fallbacks { margin-top: 10px; padding-top: 9px; border-top: 1px solid #edf1ef; }
+.fallback-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 5px; }
+.fallback-item { display: grid; min-width: 0; padding: 7px; border-radius: 7px; background: #f7f9f8; }
+.fallback-item strong { font-size: 11px; overflow-wrap: anywhere; }
+.fallback-item small { margin-top: 2px; color: #6b7771; font-size: 9px; }
 
 .notice { padding: 12px; font-size: 12px; }
 .notice h2, .recommendations > h2, .contingency h2 { margin-bottom: 7px; font-size: 13px; }
