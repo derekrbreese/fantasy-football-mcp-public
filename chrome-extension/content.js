@@ -117,7 +117,7 @@
       diagnostics.syncError = 'A durable repair is pending reconciliation; ordinary sync is blocked.';
       return null;
     }
-    const signature = JSON.stringify([session.sessionKey, session.picks, isRepair]);
+    const signature = JSON.stringify([session.sessionKey, session.picks, isRepair, session.authoritativeCaptureBlocked]);
     const now = Date.now();
     if (!options.requireSuccess && signature === lastSyncedSignature && diagnostics.syncStatus === 'connected') return;
     if (!options.requireSuccess && signature === lastSyncedSignature && now - lastSyncAttemptAt < 10000) return;
@@ -179,6 +179,42 @@
     });
   }
 
+  function evaluateVisibleAuthoritativeLedger() {
+    const currentPickBeforeScan = YahooDraftDomScanner.findCurrentPickNumber(document);
+    const scan = YahooDraftDomScanner.scanAuthoritativeRoundByRoundTables(document);
+    const parsedResults = scan.ok
+      ? scan.snapshots.map((snapshot) => YahooDraftParser.parseRoundByRoundSnapshot(snapshot))
+      : [];
+    const currentPickAfterScan = YahooDraftDomScanner.findCurrentPickNumber(document);
+    const currentPickStability = YahooDraftLedgerHealth.validateStableCurrentPick(
+      currentPickBeforeScan,
+      currentPickAfterScan,
+    );
+    if (scan.ok && !currentPickStability.ok) {
+      return {
+        scan,
+        parsedResults,
+        currentPickNumber: null,
+        evaluation: {
+          authoritativePicks: null,
+          health: null,
+          error: currentPickStability.error,
+        },
+      };
+    }
+    const currentPickNumber = currentPickStability.currentPickNumber;
+    return {
+      scan,
+      parsedResults,
+      currentPickNumber,
+      evaluation: YahooDraftLedgerHealth.evaluateAuthoritativeLedgerScan(
+        scan,
+        parsedResults,
+        currentPickNumber,
+      ),
+    };
+  }
+
   async function performScan(lease) {
     lease?.throwIfLost?.();
     const resetBlock = await blockForPendingReset(lease);
@@ -195,16 +231,8 @@
     const now = new Date().toISOString();
     const snapshots = YahooDraftDomScanner.findPickSnapshots(document);
     const ledgerSnapshots = YahooDraftDomScanner.findRoundByRoundSnapshots(document);
-    const authoritativeScan = YahooDraftDomScanner.scanAuthoritativeRoundByRoundTables(document);
-    const parsedAuthoritativePicks = authoritativeScan.ok
-      ? authoritativeScan.snapshots
-        .map((snapshot) => YahooDraftParser.parseRoundByRoundSnapshot(snapshot))
-        .filter(Boolean)
-      : [];
-    const authoritativeEvaluation = YahooDraftLedgerHealth.evaluateAuthoritativeLedgerScan(
-      authoritativeScan,
-      parsedAuthoritativePicks,
-    );
+    const authoritativeResult = evaluateVisibleAuthoritativeLedger();
+    const authoritativeEvaluation = authoritativeResult.evaluation;
     diagnostics.authoritativeLedgerHealth = authoritativeEvaluation.health;
     diagnostics.authoritativeLedgerError = authoritativeEvaluation.error;
 
@@ -232,6 +260,7 @@
       () => draftStorage.getSession(metadata.sessionKey),
     );
     let updated;
+    let automaticBlockError = null;
     if (authoritativeEvaluation.authoritativePicks) {
       const automaticUpdate = YahooDraftSessionStore.prepareAutomaticAuthoritativeUpdate(
         existing,
@@ -239,24 +268,46 @@
         authoritativeEvaluation.authoritativePicks,
         nonLedgerPicks,
         now,
-        { currentPickNumber: YahooDraftDomScanner.findCurrentPickNumber(document) },
+        { currentPickNumber: authoritativeResult.currentPickNumber },
       );
       if (!automaticUpdate.ok) {
         diagnostics.recordedCount = existing?.picks?.length || 0;
         diagnostics.authoritativeLedgerError = automaticUpdate.error;
-        diagnostics.syncStatus = 'blocked-authoritative-prefix';
         diagnostics.syncError = automaticUpdate.error;
-        return { ...diagnostics, error: automaticUpdate.error };
+        if (automaticUpdate.reason === 'downward-prefix') {
+          diagnostics.syncStatus = 'blocked-authoritative-prefix';
+          automaticBlockError = automaticUpdate.error;
+          updated = YahooDraftSessionStore.setAuthoritativeCaptureBlocked(
+            existing,
+            true,
+            now,
+          );
+        } else {
+          updated = YahooDraftSessionStore.setAuthoritativeCaptureBlocked(
+            YahooDraftSessionStore.updateDraftSession(existing, metadata, picks, now),
+            true,
+          );
+        }
+      } else {
+        updated = automaticUpdate.session;
       }
-      updated = automaticUpdate.session;
     } else {
       updated = YahooDraftSessionStore.updateDraftSession(existing, metadata, picks, now);
+      if (authoritativeEvaluation.error) {
+        updated = YahooDraftSessionStore.setAuthoritativeCaptureBlocked(updated, true);
+      }
     }
     diagnostics.recordedCount = updated.picks.length;
 
     const resetBeforeWrite = await blockForPendingReset(lease);
     if (resetBeforeWrite) return resetBeforeWrite;
-    if (JSON.stringify(existing?.picks || []) !== JSON.stringify(updated.picks)) {
+    if (
+      JSON.stringify(existing?.picks || []) !== JSON.stringify(updated.picks) ||
+      (existing?.authoritativeCaptureBlocked === true) !==
+        (updated.authoritativeCaptureBlocked === true) ||
+      (existing?.authoritativeCaptureBlocked === false) !==
+        (updated.authoritativeCaptureBlocked === false)
+    ) {
       await leaseAwait(
         lease,
         () => draftStorage.setSession(metadata.sessionKey, updated),
@@ -265,7 +316,9 @@
 
     await syncSession(updated, {}, lease);
     lease?.throwIfLost?.();
-    return { ...diagnostics };
+    return automaticBlockError
+      ? { ...diagnostics, error: automaticBlockError }
+      : { ...diagnostics };
   }
 
   async function performRepair(lease) {
@@ -278,17 +331,21 @@
     const reconciliation = await leaseAwait(lease, () => repairCoordinator.reconcile());
     if (!reconciliation.ok) return reconciliation;
     const now = new Date().toISOString();
-    const ledgerScan = YahooDraftDomScanner.scanAuthoritativeRoundByRoundTables(document);
+    const authoritativeResult = evaluateVisibleAuthoritativeLedger();
+    const { scan: ledgerScan, evaluation, currentPickNumber } = authoritativeResult;
     if (!ledgerScan.ok) return ledgerScan;
-    const authoritativePicks = ledgerScan.snapshots
-      .map((snapshot) => YahooDraftParser.parseRoundByRoundSnapshot(snapshot))
-      .filter(Boolean);
-    if (authoritativePicks.length !== ledgerScan.apparentRowCount) {
-      return { ok: false, error: `Yahoo showed ${ledgerScan.apparentRowCount} apparent completed ledger rows, but only ${authoritativePicks.length} parsed safely. Saved picks were not changed.` };
+    if (evaluation.error || !evaluation.authoritativePicks) {
+      return {
+        ok: false,
+        error: evaluation.error || 'Yahoo’s Round-by-Round ledger could not be evaluated safely.',
+        unparsedCompletedPickNumbers: evaluation.unparsedCompletedPickNumbers || [],
+        unparsedStructuralRowCount: evaluation.unparsedStructuralRowCount || 0,
+        ignoredFutureRowCount: evaluation.ignoredFutureRowCount || 0,
+      };
     }
 
+    const authoritativePicks = evaluation.authoritativePicks;
     const health = YahooDraftLedgerHealth.analyzeLedger(authoritativePicks);
-    const currentPickNumber = YahooDraftDomScanner.findCurrentPickNumber(document);
     const currentPickValidation = YahooDraftLedgerHealth.validateLedgerAgainstCurrentPick(
       health,
       currentPickNumber,

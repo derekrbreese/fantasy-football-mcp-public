@@ -59,6 +59,50 @@ test('adds a top-level repair marker only for explicit repair sync', () => {
   );
 });
 
+test('sends only the allowlisted authoritative-capture blocker', () => {
+  const session = {
+    sport: 'f1',
+    leagueId: '123',
+    teamId: '6',
+    sessionKey: 'f1:123',
+    authoritativeCaptureBlocked: true,
+    authoritativeCaptureError: 'private page text https://example.test/?auth=secret',
+    picks: [],
+  };
+
+  const blocked = sessionToAgentContext(session, '2026-08-31T22:45:00.000Z');
+  assert.equal(blocked.captureBlocked, true);
+  assert.equal(JSON.stringify(blocked).includes('private page text'), false);
+  assert.equal(JSON.stringify(blocked).includes('secret'), false);
+
+  const repaired = sessionToAgentContext(
+    session,
+    '2026-08-31T22:45:00.000Z',
+    { repair: true },
+  );
+  assert.equal(repaired.captureBlocked, undefined);
+});
+
+test('emits only literal boolean capture states and preserves tri-state semantics', () => {
+  const session = {
+    sport: 'f1',
+    leagueId: '123',
+    teamId: '6',
+    sessionKey: 'f1:123',
+    picks: [],
+  };
+
+  assert.equal(sessionToAgentContext(session).captureBlocked, undefined);
+  assert.equal(
+    sessionToAgentContext({ ...session, authoritativeCaptureBlocked: false }).captureBlocked,
+    false,
+  );
+  assert.equal(
+    sessionToAgentContext({ ...session, authoritativeCaptureBlocked: { error: 'raw' } }).captureBlocked,
+    undefined,
+  );
+});
+
 test('defaults generatedAt to the validated session snapshot time', () => {
   const session = {
     sport: 'f1',

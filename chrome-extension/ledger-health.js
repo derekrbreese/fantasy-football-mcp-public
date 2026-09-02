@@ -97,7 +97,7 @@
     };
   }
 
-  function evaluateAuthoritativeLedgerScan(scan, parsedPicks) {
+  function evaluateAuthoritativeLedgerScan(scan, parsedResults, currentPickNumber = null) {
     if (!scan || scan.tableCount === 0) {
       return { authoritativePicks: null, health: null, error: null };
     }
@@ -111,17 +111,78 @@
         error: 'Yahoo’s Round-by-Round table has no completed rows. Wait for it to load before repairing.',
       };
     }
-    if (parsedPicks.length !== scan.apparentRowCount) {
+    const trustworthyCurrentPick = positiveInteger(currentPickNumber);
+    const snapshots = Array.isArray(scan.snapshots) ? scan.snapshots : [];
+    const authoritativePicks = [];
+    const unparsedCompletedPickNumbers = [];
+    let unparsedStructuralRowCount = 0;
+    let ignoredFutureRowCount = 0;
+
+    for (let index = 0; index < scan.apparentRowCount; index += 1) {
+      const parsedPick = parsedResults[index] || null;
+      const snapshot = snapshots[index] || (
+        parsedPick?.pickNumber ? { pickText: String(parsedPick.pickNumber) } : {}
+      );
+      const pickText = String(snapshot.pickText ?? '').trim();
+      const hasNormalNumberedShape = !snapshot.cellShape && /^\d+$/.test(pickText);
+      const snapshotPickNumber = hasNormalNumberedShape ? positiveInteger(pickText) : null;
+
+      if (!hasNormalNumberedShape || !snapshotPickNumber) {
+        unparsedStructuralRowCount += 1;
+        continue;
+      }
+      if (parsedPick) {
+        authoritativePicks.push(parsedPick);
+        continue;
+      }
+      if (trustworthyCurrentPick && snapshotPickNumber >= trustworthyCurrentPick) {
+        ignoredFutureRowCount += 1;
+        continue;
+      }
+      unparsedCompletedPickNumbers.push(snapshotPickNumber);
+    }
+
+    const unparsedRowCount = unparsedCompletedPickNumbers.length + unparsedStructuralRowCount;
+    if (unparsedRowCount > 0) {
+      const details = [];
+      if (unparsedCompletedPickNumbers.length) {
+        details.push(`completed picks ${unparsedCompletedPickNumbers.join(', ')} did not parse safely`);
+      }
+      if (unparsedStructuralRowCount) {
+        const noun = unparsedStructuralRowCount === 1 ? 'row' : 'rows';
+        details.push(`${unparsedStructuralRowCount} ${noun} had no safe positive pick number or normal three-cell shape`);
+      }
       return {
         authoritativePicks: null,
         health: null,
-        error: `Yahoo showed ${scan.apparentRowCount} apparent completed ledger rows, but only ${parsedPicks.length} parsed safely. Reload Results → Round by Round before repairing.`,
+        unparsedCompletedPickNumbers,
+        unparsedStructuralRowCount,
+        ignoredFutureRowCount,
+        error: `Yahoo showed ${scan.apparentRowCount} Round-by-Round candidate rows, but ${details.join('; ')}. Reload Results → Round by Round before repairing.`,
       };
     }
+    const completedPicks = ignoredFutureRowCount === 0
+      && authoritativePicks.length === parsedResults.length
+      ? parsedResults
+      : authoritativePicks;
     return {
-      authoritativePicks: parsedPicks,
-      health: summarizeNumberedLedgerHealth(analyzeLedger(parsedPicks)),
+      authoritativePicks: completedPicks,
+      health: summarizeNumberedLedgerHealth(analyzeLedger(completedPicks)),
+      unparsedCompletedPickNumbers,
+      unparsedStructuralRowCount,
+      ignoredFutureRowCount,
       error: null,
+    };
+  }
+
+  function validateStableCurrentPick(beforeScan, afterScan) {
+    const before = positiveInteger(beforeScan);
+    const after = positiveInteger(afterScan);
+    if (before === after) return { ok: true, currentPickNumber: before };
+    return {
+      ok: false,
+      currentPickNumber: null,
+      error: `Yahoo’s current pick changed from ${before || 'unavailable'} to ${after || 'unavailable'} while the Round-by-Round ledger was scanned. Saved picks were not changed.`,
     };
   }
 
@@ -157,6 +218,7 @@
     summarizeNumberedLedgerHealth,
     validateDownwardRepairEvidence,
     validateLedgerAgainstCurrentPick,
+    validateStableCurrentPick,
   };
   globalScope.YahooDraftLedgerHealth = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

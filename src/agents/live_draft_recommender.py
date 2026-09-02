@@ -248,6 +248,7 @@ def reconcile_live_draft(
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=timezone.utc)
     age_seconds = max(0.0, (reference - generated).total_seconds()) if generated else None
+    authoritative_capture_blocked = context.get("captureBlocked") is True
     warnings: list[str] = []
     if team_count_source.endswith("-clamped"):
         warnings.append(
@@ -264,6 +265,11 @@ def reconcile_live_draft(
         warnings.append(f"Numbered pick ledger has gaps: {missing}")
     if duplicate_numbers:
         warnings.append(f"Numbered pick ledger has duplicates: {duplicate_numbers}")
+    if authoritative_capture_blocked:
+        warnings.append(
+            "Authoritative Yahoo ledger capture integrity is unresolved; "
+            "recommendations remain blocked until a coherent Round-by-Round scan or repair"
+        )
     if not user_picks:
         warnings.append("No user picks have been identified yet")
     if generated is None:
@@ -288,7 +294,13 @@ def reconcile_live_draft(
         "userRoster": user_picks,
         "picks": picks,
         "health": {
-            "complete": not missing and not duplicate_numbers and unnumbered_count == 0,
+            "complete": (
+                not missing
+                and not duplicate_numbers
+                and unnumbered_count == 0
+                and not authoritative_capture_blocked
+            ),
+            "authoritativeCaptureBlocked": authoritative_capture_blocked,
             "fresh": generated is not None and age_seconds is not None and age_seconds <= 120,
             "teamCountSource": team_count_source,
             "missingPickNumbers": missing,
@@ -721,10 +733,16 @@ class LiveDraftRecommendationEngine:
             "warnings": warnings,
         }
         if not state["health"]["complete"]:
-            warnings.append(
-                "Recommendation blocked because gaps, duplicate pick numbers, or unnumbered "
-                "picks make availability uncertain"
-            )
+            if state["health"]["authoritativeCaptureBlocked"]:
+                warnings.append(
+                    "Recommendation blocked because authoritative ledger capture integrity "
+                    "is unresolved and drafted-player availability is uncertain"
+                )
+            else:
+                warnings.append(
+                    "Recommendation blocked because gaps, duplicate pick numbers, or unnumbered "
+                    "picks make availability uncertain"
+                )
             return self._empty_result(base, "blocked", self._draft_advice(state), started)
         if not rankings:
             warnings.append(

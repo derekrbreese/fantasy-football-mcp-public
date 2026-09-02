@@ -308,6 +308,24 @@ def test_gap_in_numbered_ledger_blocks_player_recommendations() -> None:
     assert any("gap" in warning.lower() for warning in result["warnings"])
 
 
+def test_authoritative_capture_integrity_blocks_complete_ledger_recommendations() -> None:
+    context = live_context()
+    context["captureBlocked"] = True
+
+    state = reconcile_live_draft(context, team_count=4)
+    result = LiveDraftRecommendationEngine().recommend(
+        context, rankings(), {"teams": 4}
+    )
+
+    assert state["health"]["complete"] is False
+    assert state["health"]["authoritativeCaptureBlocked"] is True
+    assert result["status"] == "blocked"
+    assert result["recommendations"] == []
+    assert any(
+        "capture integrity" in warning.lower() for warning in result["warnings"]
+    )
+
+
 def test_no_rankings_returns_state_advice_without_inventing_players() -> None:
     result = LiveDraftRecommendationEngine().recommend(live_context(), [], {"teams": 4})
 

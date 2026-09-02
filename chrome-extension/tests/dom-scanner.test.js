@@ -11,6 +11,7 @@ const {
   snapshotPickElement,
 } = require('../dom-scanner.js');
 const { parseRoundByRoundSnapshot } = require('../draft-parser.js');
+const { evaluateAuthoritativeLedgerScan } = require('../ledger-health.js');
 
 function node(textContent) {
   return { textContent };
@@ -170,6 +171,20 @@ test('collapses identical responsive copies into one authoritative ledger', () =
   assert.deepEqual(result.snapshots.map((snapshot) => snapshot.pickText), ['1', '2']);
 });
 
+test('classifies numbered unfilled fixture rows as future only with current-pick evidence', () => {
+  const scan = scanAuthoritativeRoundByRoundTables(
+    loadDomFixture('yahoo-round-by-round-future-rows.html'),
+  );
+  const parsedResults = scan.snapshots.map(parseRoundByRoundSnapshot);
+  const evaluation = evaluateAuthoritativeLedgerScan(scan, parsedResults, 3);
+
+  assert.equal(scan.apparentRowCount, 6);
+  assert.equal(parsedResults.filter(Boolean).length, 2);
+  assert.equal(evaluation.error, null);
+  assert.deepEqual(evaluation.authoritativePicks.map((pick) => pick.pickNumber), [1, 2]);
+  assert.equal(evaluation.ignoredFutureRowCount, 4);
+});
+
 test('retains every apparent row so malformed Yahoo markup cannot pass repair', () => {
   const result = scanAuthoritativeRoundByRoundTables(
     loadDomFixture('yahoo-round-by-round-malformed.html'),
@@ -218,6 +233,40 @@ test('finds the live current pick even when no last-pick banner is present', () 
   };
 
   assert.equal(findCurrentPickNumber(root), 37);
+});
+
+test('ignores a hidden stale current-pick marker', () => {
+  const root = {
+    querySelectorAll: () => [
+      { innerText: '', textContent: 'ROUND 14, PICK 159' },
+      { innerText: 'ROUND 14, PICK 160', hidden: true },
+      { innerText: 'ROUND 14, PICK 163' },
+    ],
+  };
+
+  assert.equal(findCurrentPickNumber(root), 163);
+});
+
+test('rejects conflicting visible current-pick markers as ambiguous', () => {
+  const root = {
+    querySelectorAll: () => [
+      { innerText: 'ROUND 14, PICK 159' },
+      { innerText: 'ROUND 14, PICK 163' },
+    ],
+  };
+
+  assert.equal(findCurrentPickNumber(root), null);
+});
+
+test('accepts duplicate visible markers only when their pick numbers agree', () => {
+  const root = {
+    querySelectorAll: () => [
+      { innerText: 'Draft status ROUND 14, PICK 163' },
+      { innerText: 'ROUND 14, PICK 163' },
+    ],
+  };
+
+  assert.equal(findCurrentPickNumber(root), 163);
 });
 
 test('collects only structural diagnostic counters from adversarial DOM', () => {

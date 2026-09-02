@@ -132,6 +132,85 @@ def reset_payload() -> dict:
 
 
 @pytest.mark.asyncio
+async def test_draft_sync_capture_blocker_is_allowlisted_and_tri_state(
+    tmp_path, monkeypatch
+) -> None:
+    live_path = tmp_path / "private" / "live-drafts.json"
+    monkeypatch.setenv("FANTASY_FOOTBALL_LIVE_DRAFT_PATH", str(live_path))
+    blocked = live_state_for_profile()
+    blocked["captureBlocked"] = True
+    blocked["captureMetadata"] = {
+        "error": "private page text",
+        "url": "https://example.test/?auth=secret",
+    }
+
+    blocked_response = await fastmcp_server.receive_live_draft(
+        request_for(
+            "POST",
+            "/draft-sync",
+            payload=blocked,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+    unknown = live_state_for_profile()
+    unknown["generatedAt"] = "2026-09-01T16:01:00Z"
+    unknown_response = await fastmcp_server.receive_live_draft(
+        request_for(
+            "POST",
+            "/draft-sync",
+            payload=unknown,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+    preserved = fastmcp_server.load_live_draft("498589")
+    safe = live_state_for_profile()
+    safe["generatedAt"] = "2026-09-01T16:02:00Z"
+    safe["captureBlocked"] = False
+    safe_response = await fastmcp_server.receive_live_draft(
+        request_for(
+            "POST",
+            "/draft-sync",
+            payload=safe,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+
+    assert blocked_response.status_code == 200
+    assert unknown_response.status_code == 200
+    assert preserved["captureBlocked"] is True
+    assert safe_response.status_code == 200
+    stored = fastmcp_server.load_live_draft("498589")
+    assert stored["captureBlocked"] is False
+    serialized = live_path.read_text()
+    assert "private page text" not in serialized
+    assert "secret" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_draft_sync_rejects_non_boolean_capture_blocker_without_details(
+    tmp_path, monkeypatch
+) -> None:
+    live_path = tmp_path / "private" / "live-drafts.json"
+    monkeypatch.setenv("FANTASY_FOOTBALL_LIVE_DRAFT_PATH", str(live_path))
+    invalid = live_state_for_profile()
+    invalid["captureBlocked"] = {"error": "private secret page text"}
+
+    response = await fastmcp_server.receive_live_draft(
+        request_for(
+            "POST",
+            "/draft-sync",
+            payload=invalid,
+            extra_headers={"x-yahoo-draft-recorder": "1"},
+        )
+    )
+
+    assert response.status_code == 400
+    assert response_json(response)["message"] == "captureBlocked must be a boolean"
+    assert "private secret" not in response.body.decode()
+    assert not live_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_reset_route_clears_exact_session_and_reports_profile_preserved(
     monkeypatch,
 ) -> None:

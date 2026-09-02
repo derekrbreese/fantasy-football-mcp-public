@@ -45,6 +45,17 @@
     return Number.isInteger(number) && number > 0;
   }
 
+  function setAuthoritativeCaptureBlocked(session, blocked, timestamp) {
+    const updated = { ...(session || {}) };
+    if (typeof blocked === 'boolean') {
+      updated.authoritativeCaptureBlocked = blocked;
+    } else {
+      delete updated.authoritativeCaptureBlocked;
+    }
+    if (timestamp) updated.updatedAt = timestamp;
+    return updated;
+  }
+
   function identityKey(sessionKey, pick) {
     const baseKey = parser.buildPickKey(sessionKey, { ...pick, pickNumber: undefined });
     if (/(?:^|\s)\p{L}\./u.test(String(pick?.player || ''))) {
@@ -111,27 +122,48 @@
     authoritativePicks,
     observedNonLedgerPicks,
     timestamp,
-    _options = {},
+    options = {},
   ) {
     const savedHealth = ledgerHealth.analyzeLedger(existing?.picks || []);
     const visibleHealth = ledgerHealth.analyzeLedger(authoritativePicks || []);
     if (visibleHealth.highestPickNumber < savedHealth.highestPickNumber) {
       return {
         ok: false,
+        reason: 'downward-prefix',
         session: existing,
         health: visibleHealth,
         error: `Saved Round-by-Round state reaches pick ${savedHealth.highestPickNumber}, but Yahoo’s visible ledger ends at pick ${visibleHealth.highestPickNumber}. Automatic replacement was blocked. Open the complete current ledger and use Full rescan & repair if a downward correction is intended.`,
       };
     }
+    const currentPickValidation = ledgerHealth.validateLedgerAgainstCurrentPick(
+      visibleHealth,
+      options.currentPickNumber,
+    );
+    if (!currentPickValidation.ok) {
+      return {
+        ...currentPickValidation,
+        reason: 'current-pick-mismatch',
+        session: existing,
+        health: visibleHealth,
+      };
+    }
+    const hasPositiveCurrentPickEvidence = Number.isInteger(options.currentPickNumber) &&
+      options.currentPickNumber > 0;
+    const nextCaptureState = hasPositiveCurrentPickEvidence
+      ? false
+      : existing?.authoritativeCaptureBlocked;
     return {
       ok: true,
       health: visibleHealth,
-      session: updateDraftSessionFromAuthoritativeLedger(
-        existing,
-        metadata,
-        authoritativePicks,
-        observedNonLedgerPicks,
-        timestamp,
+      session: setAuthoritativeCaptureBlocked(
+        updateDraftSessionFromAuthoritativeLedger(
+          existing,
+          metadata,
+          authoritativePicks,
+          observedNonLedgerPicks,
+          timestamp,
+        ),
+        nextCaptureState,
       ),
     };
   }
@@ -140,11 +172,14 @@
     const health = ledgerHealth.analyzeLedger(authoritativePicks);
     if (!health.isComplete) return { ok: false, session: existing, health };
 
-    const session = updateDraftSession(
-      { ...(existing || {}), picks: [] },
-      metadata,
-      authoritativePicks,
-      timestamp,
+    const session = setAuthoritativeCaptureBlocked(
+      updateDraftSession(
+        { ...(existing || {}), picks: [] },
+        metadata,
+        authoritativePicks,
+        timestamp,
+      ),
+      false,
     );
     return { ok: true, session, health };
   }
@@ -489,6 +524,7 @@
     prepareDraftRepair,
     repairDraftSession,
     sameDraftIdentity,
+    setAuthoritativeCaptureBlocked,
     updateDraftSession,
     updateDraftSessionFromAuthoritativeLedger,
   };

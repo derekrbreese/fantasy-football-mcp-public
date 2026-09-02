@@ -148,6 +148,213 @@ def test_strips_unknown_fields_including_credentials(tmp_path: Path) -> None:
     assert "cookie" not in saved["picks"][0]
 
 
+def test_persists_only_literal_authoritative_capture_blocker(tmp_path: Path) -> None:
+    context = draft_context()
+    context["captureBlocked"] = True
+    context["captureMetadata"] = {
+        "error": "private page text",
+        "url": "https://example.test/?auth=secret",
+    }
+
+    saved = save_live_draft(context, tmp_path / "live-drafts.json")
+
+    assert saved["captureBlocked"] is True
+    assert "captureMetadata" not in saved
+    assert "private page text" not in json.dumps(saved)
+    assert "secret" not in json.dumps(saved)
+
+
+@pytest.mark.parametrize(
+    "capture_blocked",
+    [
+        None,
+        "true",
+        1,
+        {"blocked": True},
+        {},
+    ],
+)
+def test_rejects_malformed_capture_integrity_marker(
+    tmp_path: Path, capture_blocked: object
+) -> None:
+    context = draft_context()
+    context["captureBlocked"] = capture_blocked
+
+    with pytest.raises(LiveDraftValidationError, match="captureBlocked"):
+        save_live_draft(context, tmp_path / "live-drafts.json")
+
+
+def test_safe_newer_snapshot_clears_capture_integrity_marker(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    blocked = draft_context()
+    blocked["captureBlocked"] = True
+    safe = draft_context()
+    safe["generatedAt"] = "2026-08-31T22:46:00.000Z"
+    safe["captureBlocked"] = False
+
+    save_live_draft(blocked, path)
+    saved = save_live_draft(safe, path)
+
+    assert saved["captureBlocked"] is False
+    assert load_live_draft(path=path)["captureBlocked"] is False
+
+
+@pytest.mark.parametrize(
+    "generated_at",
+    ["2026-08-31T22:45:00.000Z", "2026-08-31T22:44:00.000Z", "invalid"],
+)
+def test_equal_older_or_invalid_safe_replay_cannot_clear_capture_blocker(
+    tmp_path: Path, generated_at: str
+) -> None:
+    path = tmp_path / "live-drafts.json"
+    blocked = draft_context()
+    blocked["captureBlocked"] = True
+    replay = draft_context()
+    replay["generatedAt"] = generated_at
+    replay["captureBlocked"] = False
+
+    save_live_draft(blocked, path)
+    with pytest.raises(LiveDraftValidationError, match="strictly newer"):
+        save_live_draft(replay, path)
+
+    assert load_live_draft(path=path)["captureBlocked"] is True
+
+
+def test_absent_capture_marker_preserves_existing_blocker(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    blocked = draft_context()
+    blocked["captureBlocked"] = True
+    unknown = draft_context()
+    unknown["generatedAt"] = "2026-08-31T22:46:00.000Z"
+
+    save_live_draft(blocked, path)
+    saved = save_live_draft(unknown, path)
+
+    assert saved["captureBlocked"] is True
+
+
+def test_absent_marker_rejects_malformed_stored_capture_state(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    malformed = draft_context()
+    malformed["captureBlocked"] = "true"
+    path.write_text(json.dumps({"f1:10462193": malformed}))
+    incoming = draft_context()
+    incoming["generatedAt"] = "2026-08-31T22:46:00.000Z"
+
+    with pytest.raises(LiveDraftValidationError, match="stored captureBlocked"):
+        save_live_draft(incoming, path)
+
+
+def test_repair_rejects_capture_integrity_blocker(tmp_path: Path) -> None:
+    context = draft_context()
+    context["repair"] = True
+    context["captureBlocked"] = True
+    context["picks"] = [context["picks"][0]]
+
+    with pytest.raises(
+        LiveDraftValidationError,
+        match="repair cannot retain an authoritative capture blocker",
+    ):
+        save_live_draft(context, tmp_path / "live-drafts.json")
+
+
+def test_verified_repair_implicitly_clears_existing_capture_blocker(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "live-drafts.json"
+    blocked = draft_context()
+    blocked["captureBlocked"] = True
+    repair = draft_context()
+    repair["repair"] = True
+    repair["generatedAt"] = "2026-08-31T22:46:00.000Z"
+    repair["picks"] = [repair["picks"][0]]
+
+    save_live_draft(blocked, path)
+    saved = save_live_draft(repair, path)
+
+    assert "captureBlocked" not in saved
+    assert "captureBlocked" not in load_live_draft(path=path)
+    assert save_live_draft(repair, path) == saved
+
+
+def test_invalid_repair_leaves_existing_capture_blocker_unchanged(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "live-drafts.json"
+    blocked = draft_context()
+    blocked["captureBlocked"] = True
+    invalid_repair = draft_context()
+    invalid_repair["repair"] = True
+    invalid_repair["generatedAt"] = "2026-08-31T22:46:00.000Z"
+
+    save_live_draft(blocked, path)
+    with pytest.raises(LiveDraftValidationError, match="contiguous"):
+        save_live_draft(invalid_repair, path)
+
+    assert load_live_draft(path=path)["captureBlocked"] is True
+
+
+def test_blocked_lower_snapshot_cannot_roll_back_saved_picks(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    existing = draft_context()
+    existing["picks"].append(
+        {
+            "pickNumber": 20,
+            "player": "C. Lamb",
+            "position": "WR",
+            "nflTeam": "DAL",
+            "fantasyTeam": "Team 2",
+            "isUserPick": False,
+        }
+    )
+    blocked_prefix = draft_context()
+    blocked_prefix["generatedAt"] = "2026-08-31T22:46:00.000Z"
+    blocked_prefix["captureBlocked"] = True
+
+    save_live_draft(existing, path)
+    with pytest.raises(LiveDraftValidationError, match="stale"):
+        save_live_draft(blocked_prefix, path)
+
+    saved = load_live_draft(path=path)
+    assert saved["summary"]["latestOverallPick"] == 20
+    assert "captureBlocked" not in saved
+
+
+def test_capture_update_requires_exact_saved_team_identity(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    existing = draft_context()
+    existing["captureBlocked"] = True
+    different_team = draft_context()
+    different_team["generatedAt"] = "2026-08-31T22:46:00.000Z"
+    different_team["draft"]["teamId"] = "7"
+    different_team["captureBlocked"] = False
+
+    save_live_draft(existing, path)
+    with pytest.raises(LiveDraftValidationError, match="identity"):
+        save_live_draft(different_team, path)
+
+    assert load_live_draft(path=path)["draft"]["teamId"] == "6"
+    assert load_live_draft(path=path)["captureBlocked"] is True
+
+
+def test_capture_update_does_not_change_another_league(tmp_path: Path) -> None:
+    path = tmp_path / "live-drafts.json"
+    target = draft_context("111")
+    target["captureBlocked"] = True
+    other = draft_context("222")
+    other["generatedAt"] = "2026-08-31T22:45:30.000Z"
+    safe_target = draft_context("111")
+    safe_target["generatedAt"] = "2026-08-31T22:46:00.000Z"
+    safe_target["captureBlocked"] = False
+
+    save_live_draft(target, path)
+    save_live_draft(other, path)
+    save_live_draft(safe_target, path)
+
+    assert load_live_draft("111", path=path)["captureBlocked"] is False
+    assert "captureBlocked" not in load_live_draft("222", path=path)
+
+
 def test_rejects_invalid_or_oversized_context(tmp_path: Path) -> None:
     with pytest.raises(LiveDraftValidationError):
         save_live_draft({"draft": {}, "picks": []}, tmp_path / "live-drafts.json")

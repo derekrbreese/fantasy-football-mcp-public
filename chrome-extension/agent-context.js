@@ -51,6 +51,11 @@
       schemaVersion: 1,
       source: 'yahoo-draft-recorder',
       ...(options.repair === true ? { repair: true } : {}),
+      ...(
+        options.repair !== true && typeof session?.authoritativeCaptureBlocked === 'boolean'
+          ? { captureBlocked: session.authoritativeCaptureBlocked }
+          : {}
+      ),
       generatedAt: contextTimestamp,
       draft: {
         sport: session?.sport,

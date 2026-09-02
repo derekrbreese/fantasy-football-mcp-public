@@ -3,12 +3,176 @@ const assert = require('node:assert/strict');
 
 const {
   analyzeLedger,
+  evaluateAuthoritativeLedgerScan,
   formatLedgerIssues,
   formatRepairFailure,
   mergeVisibleLedgerHealth,
+  validateStableCurrentPick,
   validateDownwardRepairEvidence,
   validateLedgerAgainstCurrentPick,
 } = require('../ledger-health.js');
+
+function numberedSnapshots(count) {
+  return Array.from({ length: count }, (_unused, index) => ({
+    pickText: String(index + 1),
+  }));
+}
+
+function parsedPrefix(completedCount, apparentCount) {
+  return Array.from({ length: apparentCount }, (_unused, index) => (
+    index < completedCount ? { pickNumber: index + 1 } : null
+  ));
+}
+
+test('ignores aligned pre-rendered future rows at Yahoo current pick and beyond', () => {
+  const result = evaluateAuthoritativeLedgerScan(
+    {
+      ok: true,
+      tableCount: 1,
+      apparentRowCount: 162,
+      snapshots: numberedSnapshots(162),
+    },
+    parsedPrefix(158, 162),
+    159,
+  );
+
+  assert.equal(result.error, null);
+  assert.equal(result.authoritativePicks.length, 158);
+  assert.equal(result.health.highestPickNumber, 158);
+  assert.deepEqual(result.unparsedCompletedPickNumbers, []);
+  assert.equal(result.unparsedStructuralRowCount, 0);
+  assert.equal(result.ignoredFutureRowCount, 4);
+});
+
+test('blocks the same unparsed rows when Yahoo says they are completed', () => {
+  const result = evaluateAuthoritativeLedgerScan(
+    {
+      ok: true,
+      tableCount: 1,
+      apparentRowCount: 162,
+      snapshots: numberedSnapshots(162),
+    },
+    parsedPrefix(158, 162),
+    163,
+  );
+
+  assert.equal(result.authoritativePicks, null);
+  assert.deepEqual(result.unparsedCompletedPickNumbers, [159, 160, 161, 162]);
+  assert.equal(result.unparsedStructuralRowCount, 0);
+  assert.equal(result.ignoredFutureRowCount, 0);
+  assert.match(result.error, /159, 160, 161, 162/);
+});
+
+test('blocks unparsed numbered rows when Yahoo current pick is unavailable', () => {
+  const result = evaluateAuthoritativeLedgerScan(
+    {
+      ok: true,
+      tableCount: 1,
+      apparentRowCount: 162,
+      snapshots: numberedSnapshots(162),
+    },
+    parsedPrefix(158, 162),
+    null,
+  );
+
+  assert.equal(result.authoritativePicks, null);
+  assert.deepEqual(result.unparsedCompletedPickNumbers, [159, 160, 161, 162]);
+  assert.equal(result.ignoredFutureRowCount, 0);
+});
+
+test('never ignores an unnumbered malformed row alongside numbered future rows', () => {
+  const snapshots = [
+    { pickText: '1' },
+    { cellShape: 'td:4' },
+    { pickText: '3' },
+    { pickText: '4' },
+  ];
+  const result = evaluateAuthoritativeLedgerScan(
+    { ok: true, tableCount: 1, apparentRowCount: 4, snapshots },
+    [{ pickNumber: 1 }, null, null, null],
+    2,
+  );
+
+  assert.equal(result.authoritativePicks, null);
+  assert.deepEqual(result.unparsedCompletedPickNumbers, []);
+  assert.equal(result.unparsedStructuralRowCount, 1);
+  assert.equal(result.ignoredFutureRowCount, 2);
+  assert.match(result.error, /1 row had no safe positive pick number/);
+});
+
+test('future-row exemption requires normal shape and digits-only positive pick text', () => {
+  const result = evaluateAuthoritativeLedgerScan(
+    {
+      ok: true,
+      tableCount: 1,
+      apparentRowCount: 3,
+      snapshots: [
+        { pickText: '1' },
+        { pickText: '2', cellShape: 'role-cell:3' },
+        { pickText: '3rd' },
+      ],
+    },
+    [{ pickNumber: 1 }, null, null],
+    2,
+  );
+
+  assert.equal(result.authoritativePicks, null);
+  assert.deepEqual(result.unparsedCompletedPickNumbers, []);
+  assert.equal(result.unparsedStructuralRowCount, 2);
+  assert.equal(result.ignoredFutureRowCount, 0);
+});
+
+test('retains parsed rows at or beyond current pick so current-pick validation fails closed', () => {
+  const picks = [{ pickNumber: 1 }, { pickNumber: 2 }];
+  const result = evaluateAuthoritativeLedgerScan(
+    {
+      ok: true,
+      tableCount: 1,
+      apparentRowCount: 2,
+      snapshots: numberedSnapshots(2),
+    },
+    picks,
+    2,
+  );
+
+  assert.equal(result.authoritativePicks, picks);
+  assert.equal(result.ignoredFutureRowCount, 0);
+  assert.equal(validateLedgerAgainstCurrentPick(result.health, 2).ok, false);
+});
+
+test('requires a stable Yahoo current pick across an authoritative DOM scan', () => {
+  assert.deepEqual(validateStableCurrentPick(159, 159), {
+    ok: true,
+    currentPickNumber: 159,
+  });
+  assert.deepEqual(validateStableCurrentPick(null, null), {
+    ok: true,
+    currentPickNumber: null,
+  });
+  assert.deepEqual(validateStableCurrentPick(159, 160), {
+    ok: false,
+    currentPickNumber: null,
+    error: 'Yahoo’s current pick changed from 159 to 160 while the Round-by-Round ledger was scanned. Saved picks were not changed.',
+  });
+});
+
+test('keeps a fully parsed completed ledger unchanged', () => {
+  const picks = [{ pickNumber: 1 }, { pickNumber: 2 }, { pickNumber: 3 }];
+  const result = evaluateAuthoritativeLedgerScan(
+    {
+      ok: true,
+      tableCount: 1,
+      apparentRowCount: 3,
+      snapshots: numberedSnapshots(3),
+    },
+    picks,
+    4,
+  );
+
+  assert.equal(result.authoritativePicks, picks);
+  assert.equal(result.health.highestPickNumber, 3);
+  assert.equal(result.ignoredFutureRowCount, 0);
+});
 
 test('reports exact missing and duplicate pick numbers', () => {
   const health = analyzeLedger([

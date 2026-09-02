@@ -206,18 +206,46 @@
     };
   }
 
+  function isRenderedElement(element) {
+    if (!element || element.hidden === true) return false;
+    if (clean(element.getAttribute?.('aria-hidden')).toLowerCase() === 'true') return false;
+    if (element.closest?.('[hidden], [aria-hidden="true"]')) return false;
+    if (typeof element.checkVisibility === 'function' && !element.checkVisibility()) return false;
+    if (typeof element.getClientRects === 'function' && element.getClientRects().length === 0) {
+      return false;
+    }
+    const view = element.ownerDocument?.defaultView;
+    if (typeof view?.getComputedStyle === 'function') {
+      const style = view.getComputedStyle(element);
+      if (
+        style?.display === 'none'
+        || ['hidden', 'collapse'].includes(style?.visibility)
+        || style?.contentVisibility === 'hidden'
+      ) return false;
+    }
+    return true;
+  }
+
+  function renderedElementText(element) {
+    const source = typeof element?.innerText === 'string'
+      ? element.innerText
+      : element?.textContent;
+    const text = clean(source);
+    return text && isRenderedElement(element) ? text : '';
+  }
+
   function findCurrentPickNumber(root) {
     const elements = root?.querySelectorAll?.('body *') || [];
-    let shortestMatch;
+    const pickNumbers = new Set();
     for (const element of elements) {
-      const text = clean(element?.innerText || element?.textContent);
+      const text = renderedElementText(element);
       if (!text || text.length > 300) continue;
       const match = text.replace(/\s+/g, ' ').match(/\bROUND\s+\d+\s*[,•·-]?\s*PICK\s*#?\s*(\d+)\b/i);
-      if (match && (!shortestMatch || text.length < shortestMatch.text.length)) {
-        shortestMatch = { text, pickNumber: Number.parseInt(match[1], 10) };
-      }
+      const pickNumber = match ? Number.parseInt(match[1], 10) : 0;
+      if (pickNumber > 0) pickNumbers.add(pickNumber);
+      if (pickNumbers.size > 1) return null;
     }
-    return shortestMatch?.pickNumber || null;
+    return pickNumbers.values().next().value || null;
   }
 
   function findLiveDraftSnapshot(root) {

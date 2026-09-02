@@ -118,7 +118,7 @@ Follow this order for each live draft or Yahoo mock:
 7. Import or explicitly reuse a rankings profile for this exact draft if it does not already have one.
 8. Open the Firefox **Draft Assistant** sidebar or use the full dashboard, then refresh recommendations.
 
-The recorder continues watching new picks when other Yahoo draft panels are visible, but return to **Results → Round by Round** and rescan whenever the saved ledger is questionable. Recommendations are deliberately blocked for missing, duplicate, or unnumbered picks.
+The recorder continues watching new picks when other Yahoo draft panels are visible, but return to **Results → Round by Round** and rescan whenever the saved ledger is questionable. Recommendations are deliberately blocked for missing, duplicate, or unnumbered picks, and whenever the recorder cannot verify authoritative ledger capture integrity.
 
 ### 6. Import rankings and league settings
 
@@ -169,7 +169,9 @@ Yahoo's draft-client URL does not reliably distinguish a mock from a real draft,
 Use the two popup recovery controls for different jobs:
 
 - **Reset mock draft:** start over within the same exact mock/session. Keep the server running, close older tabs for that same mock, open the active tab, rescan, and confirm Reset. The imported profile is preserved.
-- **Full rescan & repair:** keep the current draft but replace a defective saved ledger. First show the complete current **Results → Round by Round** table. Repair is accepted only when the table is coherent, contiguous, unique, and current.
+- **Full rescan & repair:** keep the current draft but replace a defective saved ledger. First show the complete current **Results → Round by Round** table. Repair is accepted only when the completed ledger is coherent, contiguous, unique, and current. Yahoo's pre-rendered unfilled future rows are excluded only when they have an unambiguous positive pick number at or beyond one stable, visible, non-conflicting live current-pick marker; malformed, earlier, or unverifiable rows still block repair and authoritative replacement.
+
+An unsafe, ambiguous, or truncated authoritative scan preserves the prior numbered picks and syncs only a private boolean capture blocker for that exact league. The local recommender then stays blocked even if the older ledger looks contiguous. Only a later coherent Round-by-Round scan with a stable positive current-pick marker matching the ledger maximum, or a server-accepted repair, clears that blocker. A coherent scan without current-pick evidence may update picks but preserves the prior capture decision; ordinary scans with no authoritative table cannot clear it.
 
 If the server says the draft changed during reset, rescan and confirm Reset again. Neither operation can target a merely “latest” draft; the exact active identity is required.
 

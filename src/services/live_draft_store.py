@@ -95,6 +95,15 @@ def _repair_requested(value: Any) -> bool:
     return repair
 
 
+def _capture_blocked_requested(value: Any) -> Optional[bool]:
+    if not isinstance(value, dict) or "captureBlocked" not in value:
+        return None
+    capture_blocked = value["captureBlocked"]
+    if not isinstance(capture_blocked, bool):
+        raise LiveDraftValidationError("captureBlocked must be a boolean")
+    return capture_blocked
+
+
 def sanitize_live_draft_context(value: Any) -> Dict[str, Any]:
     """Validate and whitelist the extension payload before writing it to disk."""
 
@@ -130,6 +139,11 @@ def sanitize_live_draft_context(value: Any) -> Dict[str, Any]:
         clean_draft["updatedAt"] = updated_at
 
     repair = _repair_requested(value)
+    capture_blocked = _capture_blocked_requested(value)
+    if repair and capture_blocked is True:
+        raise LiveDraftValidationError(
+            "repair cannot retain an authoritative capture blocker"
+        )
 
     picks = [_sanitize_pick(pick) for pick in picks_value]
     picks.sort(key=lambda pick: pick.get("pickNumber", MAX_PICKS + 1))
@@ -155,7 +169,7 @@ def sanitize_live_draft_context(value: Any) -> Dict[str, Any]:
     latest_pick = max(numbered_picks, default=0)
 
     generated_at = _safe_optional_string(value.get("generatedAt"), "generatedAt")
-    return {
+    context = {
         "schemaVersion": 1,
         "source": "yahoo-draft-recorder",
         "generatedAt": generated_at,
@@ -170,6 +184,9 @@ def sanitize_live_draft_context(value: Any) -> Dict[str, Any]:
         "teamRosters": team_rosters,
         "picks": picks,
     }
+    if capture_blocked is not None:
+        context["captureBlocked"] = capture_blocked
+    return context
 
 
 def _timestamp(value: Any) -> Optional[datetime]:
@@ -302,6 +319,7 @@ def save_live_draft(value: Any, path: Optional[Union[str, Path]] = None) -> Dict
     """Atomically save one sanitized draft session and return it."""
 
     repair = _repair_requested(value)
+    capture_blocked = _capture_blocked_requested(value)
     context = sanitize_live_draft_context(value)
     custom_store_configured = path is not None or bool(
         os.getenv("FANTASY_FOOTBALL_LIVE_DRAFT_PATH")
@@ -328,19 +346,45 @@ def save_live_draft(value: Any, path: Optional[Union[str, Path]] = None) -> Dict
                 )
         existing = sessions.get(session_key)
         if existing:
+            existing_draft = existing.get("draft", {})
+            if any(
+                context["draft"].get(field) != existing_draft.get(field)
+                for field in ("sport", "leagueId", "teamId", "sessionKey")
+            ):
+                message = (
+                    "repair draft identity does not match the saved session"
+                    if repair
+                    else "live draft identity does not match the saved session"
+                )
+                raise LiveDraftValidationError(message)
+            existing_capture_blocked = existing.get("captureBlocked")
+            if (
+                "captureBlocked" in existing
+                and not isinstance(existing_capture_blocked, bool)
+            ):
+                raise LiveDraftValidationError(
+                    "stored captureBlocked value must be a boolean"
+                )
             existing_time = _timestamp(existing.get("generatedAt"))
             incoming_time = _timestamp(context.get("generatedAt"))
             existing_pick = existing.get("summary", {}).get("latestOverallPick", 0)
             incoming_pick = context.get("summary", {}).get("latestOverallPick", 0)
+            if (
+                not repair
+                and existing_capture_blocked is True
+                and capture_blocked is False
+                and (
+                    existing_time is None
+                    or incoming_time is None
+                    or incoming_time <= existing_time
+                )
+            ):
+                raise LiveDraftValidationError(
+                    "capture unblock snapshot must be strictly newer than saved state"
+                )
+            if not repair and capture_blocked is None and "captureBlocked" in existing:
+                context["captureBlocked"] = existing_capture_blocked
             if repair:
-                existing_draft = existing.get("draft", {})
-                if any(
-                    context["draft"].get(field) != existing_draft.get(field)
-                    for field in ("sport", "leagueId", "teamId", "sessionKey")
-                ):
-                    raise LiveDraftValidationError(
-                        "repair draft identity does not match the saved session"
-                    )
                 if (
                     context.get("generatedAt") == existing.get("generatedAt")
                     and context == existing

@@ -11,7 +11,7 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Deterministic value, roster, dynamics, opponent, risk/news, scenario, and critic specialists.
 - Yahoo roster-slot support, including Superflex aliases.
 - Conservative player resolution with explicit equivalent NFL team-code aliases, stale-state warnings, and incomplete-ledger blocking.
-- Popup ledger diagnostics with exact missing, duplicate, and sanitized unnumbered-pick details, plus guarded authoritative full repair.
+- Popup ledger diagnostics with exact missing, duplicate, and sanitized unnumbered-pick details, plus guarded authoritative full repair that distinguishes strictly numbered pre-rendered future rows using stable current-pick evidence. Unsafe or ambiguous capture persists a privacy-safe per-league server blocker until a verified coherent scan or accepted repair clears it.
 - Per-league browser storage, durable repair/reset reconciliation, and a cross-browser extension-background lock broker with bounded heartbeats, expiring session fences, and cooperative lease cancellation instead of Firefox content-script Web Locks.
 - Persistent Firefox Draft Assistant sidebar with explicit league selection, shared fail-closed recommendation components, and no Yahoo-page injection or draft actions.
 - Packaged cross-browser football icons plus compact, overflow-safe FantasyPros source and recent-news presentation in the sidebar and dashboard.

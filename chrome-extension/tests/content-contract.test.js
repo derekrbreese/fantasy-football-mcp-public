@@ -52,15 +52,92 @@ test('server-bound context uses the session snapshot timestamp, not POST time', 
   assert.doesNotMatch(contentSource, /sessionToAgentContext\(\s*session,\s*new Date\(\)\.toISOString\(\)/);
 });
 
-test('automatic authoritative rollback exits before persistence and sync', () => {
+test('automatic authoritative rollback preserves picks while syncing a capture blocker', () => {
+  const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+  const guardStart = contentSource.indexOf('if (!automaticUpdate.ok)');
+  const acceptedUpdate = contentSource.indexOf('updated = automaticUpdate.session;', guardStart);
+  const guardedBranch = contentSource.slice(guardStart, acceptedUpdate);
+  const downwardStart = guardedBranch.indexOf("if (automaticUpdate.reason === 'downward-prefix')");
+  const mismatchStart = guardedBranch.indexOf('} else {', downwardStart);
+  const downwardBranch = guardedBranch.slice(downwardStart, mismatchStart);
+
+  assert.ok(guardStart > 0);
+  assert.match(
+    downwardBranch,
+    /setAuthoritativeCaptureBlocked\(\s*existing,\s*true,\s*now,/,
+  );
+  assert.doesNotMatch(downwardBranch, /updateDraftSession\(existing, metadata, picks, now\)/);
+  assert.match(contentSource.slice(acceptedUpdate), /await syncSession\(updated, \{\}, lease\);/);
+});
+
+test('current-pick mismatch falls back to conservative merge and sync', () => {
   const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
   const guardStart = contentSource.indexOf('if (!automaticUpdate.ok)');
   const acceptedUpdate = contentSource.indexOf('updated = automaticUpdate.session;', guardStart);
   const guardedBranch = contentSource.slice(guardStart, acceptedUpdate);
 
   assert.ok(guardStart > 0);
-  assert.match(guardedBranch, /return \{ \.\.\.diagnostics, error: automaticUpdate\.error \};/);
-  assert.doesNotMatch(guardedBranch, /setSession|syncSession/);
+  assert.match(guardedBranch, /automaticUpdate\.reason === 'downward-prefix'/);
+  assert.match(guardedBranch, /updateDraftSession\(existing, metadata, picks, now\)/);
+  assert.match(guardedBranch, /setAuthoritativeCaptureBlocked/);
+});
+
+test('unsafe authoritative rows still sync conservatively parsed observations', () => {
+  const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+  const scanStart = contentSource.indexOf('async function performScan(lease)');
+  const scanSource = contentSource.slice(
+    scanStart,
+    contentSource.indexOf('async function performRepair(lease)', scanStart),
+  );
+
+  assert.ok(scanStart > 0);
+  assert.match(
+    scanSource,
+    /if \(authoritativeEvaluation\.authoritativePicks\)[\s\S]*else \{\s*updated = YahooDraftSessionStore\.updateDraftSession\(existing, metadata, picks, now\);/,
+  );
+  assert.match(scanSource, /await syncSession\(updated, \{\}, lease\);/);
+  assert.match(
+    scanSource,
+    /if \(authoritativeEvaluation\.error\)[\s\S]*setAuthoritativeCaptureBlocked\(updated, true\)/,
+  );
+});
+
+test('capture-only changes participate in sync deduplication and browser persistence', () => {
+  const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+
+  assert.match(
+    contentSource,
+    /JSON\.stringify\(\[session\.sessionKey, session\.picks, isRepair, session\.authoritativeCaptureBlocked\]\)/,
+  );
+  assert.match(
+    contentSource,
+    /existing\?\.authoritativeCaptureBlocked === true[\s\S]*updated\.authoritativeCaptureBlocked === true/,
+  );
+});
+
+test('automatic scans and repairs share one stable-current-pick ledger evaluation', () => {
+  const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+  const helperStart = contentSource.indexOf('function evaluateVisibleAuthoritativeLedger()');
+  const scanStart = contentSource.indexOf('async function performScan(lease)', helperStart);
+  const helperSource = contentSource.slice(helperStart, scanStart);
+  const performScanSource = contentSource.slice(
+    scanStart,
+    contentSource.indexOf('async function performRepair(lease)', scanStart),
+  );
+  const performRepairSource = contentSource.slice(
+    contentSource.indexOf('async function performRepair(lease)', scanStart),
+    contentSource.indexOf('function scanNow(', scanStart),
+  );
+
+  assert.ok(helperStart > 0);
+  assert.equal((helperSource.match(/findCurrentPickNumber\(document\)/g) || []).length, 2);
+  assert.match(helperSource, /validateStableCurrentPick/);
+  assert.match(helperSource, /snapshots\.map\(.*parseRoundByRoundSnapshot/s);
+  assert.match(helperSource, /evaluateAuthoritativeLedgerScan/);
+  assert.match(performScanSource, /evaluateVisibleAuthoritativeLedger\(\)/);
+  assert.match(performRepairSource, /evaluateVisibleAuthoritativeLedger\(\)/);
+  assert.doesNotMatch(performScanSource, /findCurrentPickNumber\(document\)/);
+  assert.doesNotMatch(performRepairSource, /findCurrentPickNumber\(document\)/);
 });
 
 test('popup resets only the exact active Yahoo session and never a latest-session fallback', () => {

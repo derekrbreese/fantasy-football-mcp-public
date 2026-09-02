@@ -299,6 +299,7 @@ for (const currentPickNumber of [null, 21]) {
     );
 
     assert.equal(result.ok, false);
+    assert.equal(result.reason, 'downward-prefix');
     assert.equal(result.session, existing);
     assert.match(result.error, /pick 50.*pick 20/i);
     assert.match(result.error, /Full rescan & repair/);
@@ -324,6 +325,165 @@ test('automatic authoritative scan may advance the saved ledger', () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.session.picks.at(-1).pickNumber, 21);
+});
+
+test('safe authoritative scan clears a durable capture-integrity blocker', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    authoritativeCaptureBlocked: true,
+    picks: [{ pickNumber: 1, player: 'Player 1' }],
+  };
+
+  const result = prepareAutomaticAuthoritativeUpdate(
+    existing,
+    metadata,
+    [{ pickNumber: 1, player: 'Player 1' }],
+    [],
+    '2026-08-01T00:01:00.000Z',
+    { currentPickNumber: 2 },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.session.authoritativeCaptureBlocked, false);
+});
+
+test('coherent scan without current-pick evidence preserves an existing capture blocker', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const picks = Array.from({ length: 158 }, (_unused, index) => ({
+    pickNumber: index + 1,
+    player: `Player ${index + 1}`,
+  }));
+  const existing = {
+    ...metadata,
+    authoritativeCaptureBlocked: true,
+    picks,
+  };
+
+  const result = prepareAutomaticAuthoritativeUpdate(
+    existing,
+    metadata,
+    picks,
+    [],
+    '2026-08-01T00:01:00.000Z',
+    { currentPickNumber: null },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.session.authoritativeCaptureBlocked, true);
+});
+
+test('coherent scan without current-pick evidence preserves an absent capture state', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    picks: [{ pickNumber: 1, player: 'Player 1' }],
+  };
+
+  const result = prepareAutomaticAuthoritativeUpdate(
+    existing,
+    metadata,
+    existing.picks,
+    [],
+    '2026-08-01T00:01:00.000Z',
+    { currentPickNumber: null },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(Object.hasOwn(result.session, 'authoritativeCaptureBlocked'), false);
+});
+
+test('positive matching current-pick evidence clears an existing capture blocker', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    authoritativeCaptureBlocked: true,
+    picks: [{ pickNumber: 1, player: 'Player 1' }],
+  };
+
+  const result = prepareAutomaticAuthoritativeUpdate(
+    existing,
+    metadata,
+    existing.picks,
+    [],
+    '2026-08-01T00:01:00.000Z',
+    { currentPickNumber: 2 },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.session.authoritativeCaptureBlocked, false);
+});
+
+test('explicit repair clears a durable capture-integrity blocker', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    authoritativeCaptureBlocked: true,
+    picks: [{ pickNumber: 1, player: 'Old Player' }],
+  };
+
+  const result = repairDraftSession(
+    existing,
+    metadata,
+    [{ pickNumber: 1, player: 'Correct Player' }],
+    '2026-08-01T00:01:00.000Z',
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.session.authoritativeCaptureBlocked, false);
+});
+
+test('automatic authoritative scan blocks parsed picks at or beyond Yahoo current pick', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = { ...metadata, picks: [{ pickNumber: 1 }] };
+
+  const result = prepareAutomaticAuthoritativeUpdate(
+    existing,
+    metadata,
+    [{ pickNumber: 1 }, { pickNumber: 2 }],
+    [],
+    '2026-08-01T00:01:00.000Z',
+    { currentPickNumber: 2 },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'current-pick-mismatch');
+  assert.equal(result.session, existing);
+  assert.match(result.error, /ends at pick 2.*currently on pick 2/i);
+});
+
+test('current-pick mismatch can conservatively merge newly observed rows', () => {
+  const metadata = { sport: 'f1', leagueId: 'league-a', teamId: '1', sessionKey: 'f1:league-a' };
+  const existing = {
+    ...metadata,
+    picks: Array.from({ length: 158 }, (_unused, index) => ({
+      pickNumber: index + 1,
+      player: `Player ${index + 1}`,
+    })),
+  };
+  const visible = Array.from({ length: 160 }, (_unused, index) => ({
+    pickNumber: index + 1,
+    player: `Player ${index + 1}`,
+  }));
+  const guarded = prepareAutomaticAuthoritativeUpdate(
+    existing,
+    metadata,
+    visible,
+    [],
+    '2026-08-01T00:01:00.000Z',
+    { currentPickNumber: 160 },
+  );
+
+  assert.equal(guarded.ok, false);
+  assert.equal(guarded.reason, 'current-pick-mismatch');
+  const merged = updateDraftSession(
+    existing,
+    metadata,
+    visible.slice(158),
+    '2026-08-01T00:01:00.000Z',
+  );
+  assert.equal(merged.picks.length, 160);
+  assert.equal(merged.picks.at(-1).pickNumber, 160);
 });
 
 test('creates a draft session and timestamps newly observed picks', () => {
