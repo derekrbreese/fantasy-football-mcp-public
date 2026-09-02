@@ -56,7 +56,8 @@ None. All JavaScript used by the extension is packaged with it. There are no rem
 ## Submission checklist
 
 - [ ] Replace or confirm the suggested listing text.
-- [ ] Add store icon and promotional images in the required sizes.
+- [x] Package the football extension/store icon through 128×128.
+- [ ] Add promotional images in the required sizes.
 - [ ] Capture screenshots without private league or manager information.
 - [ ] Publish a privacy policy URL if required by the Developer Dashboard.
 - [ ] Run `npm --prefix chrome-extension test`.

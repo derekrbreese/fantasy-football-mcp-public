@@ -39,7 +39,7 @@ footer {
   padding: 46px 0 30px;
 }
 
-h1, h2, h3, p { margin-top: 0; }
+h1, h2, h3, h4, p { margin-top: 0; }
 h1 { margin-bottom: 8px; font-size: clamp(2rem, 4vw, 3.75rem); letter-spacing: -0.055em; }
 h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -0.025em; }
 h3 { margin: 8px 0 2px; font-size: 1.25rem; }
@@ -237,6 +237,11 @@ button:disabled { cursor: wait; opacity: 0.58; }
 .roster-impact { margin: 10px 0 0; font-size: 0.85rem; font-weight: 750; }
 .reason-list { min-height: 7em; padding-left: 18px; color: #cfdbd4; font-size: 0.82rem; line-height: 1.45; }
 .risk-label { margin: 7px 0 0; color: var(--amber); font-size: 0.76rem; }
+.risk-source { margin: 4px 0 0; color: var(--muted); font-size: 0.68rem; line-height: 1.4; overflow-wrap: anywhere; }
+.recent-news { margin-top: 11px; padding-top: 9px; border-top: 1px solid var(--line); }
+.recent-news h4 { margin: 0 0 5px; color: var(--text); font-size: 0.76rem; line-height: 1.35; }
+.news-list { margin: 0; padding-left: 18px; color: #cfdbd4; font-size: 0.74rem; line-height: 1.45; overflow-wrap: anywhere; }
+.news-list li + li { margin-top: 4px; }
 .reasoning-list { margin-top: 8px; color: #cfdbd4; }
 .contingency { margin-top: 14px; padding: 16px; border-left: 3px solid var(--mint); border-radius: 0 10px 10px 0; background: var(--panel-raised); }
 .contingency p { margin: 5px 0 0; color: var(--muted); font-size: 0.85rem; }

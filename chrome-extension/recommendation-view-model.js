@@ -193,13 +193,35 @@
       messages.push('External news is unavailable; treat it as unknown.');
     }
     if (Array.isArray(response?.warnings)) {
-      messages.push(...response.warnings.filter((warning) => {
-        const text = safeText(warning).toLowerCase();
+      const limitedFantasyProsCoverage = new Set();
+      for (const warning of response.warnings) {
+        const safeWarning = safeText(warning);
+        const text = safeWarning.toLowerCase();
         const structuredLedgerWarning =
           (text.includes('ledger') || text.includes('pick-number')) &&
           /(gap|duplicate|unnumbered|availability uncertain)/.test(text);
-        return !structuredLedgerWarning;
-      }));
+        if (structuredLedgerWarning || !safeWarning) continue;
+        const coverage = safeWarning.match(
+          /^FantasyPros (player catalog|injuries|news) coverage is limited by the public API$/,
+        );
+        if (coverage) {
+          limitedFantasyProsCoverage.add(coverage[1]);
+          continue;
+        }
+        messages.push(safeWarning);
+      }
+      const coverageLabels = [
+        ['player catalog', 'the player catalog'],
+        ['injuries', 'injuries'],
+        ['news', 'news'],
+      ].filter(([key]) => limitedFantasyProsCoverage.has(key)).map(([, label]) => label);
+      if (coverageLabels.length) {
+        const finalLabel = coverageLabels.pop();
+        const joined = coverageLabels.length
+          ? `${coverageLabels.join(', ')}${coverageLabels.length > 1 ? ',' : ''} and ${finalLabel}`
+          : finalLabel;
+        messages.push(`FantasyPros public API coverage is limited for ${joined}.`);
+      }
     }
     return uniqueStrings(messages);
   }

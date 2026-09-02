@@ -242,7 +242,7 @@ Yahoo may have changed its layout. Select **Save diagnostics**. The report conta
 
 ## Store preparation
 
-`manifest.json` declares a stable Firefox add-on ID, Firefox 142 and Chrome 121 minimum versions, no Firefox data collection, the `storage` permission, narrowly scoped Yahoo draft-page access, and loopback access. [CHROMEWEBSTORE.md](CHROMEWEBSTORE.md) tracks listing copy, permission justifications, disclosures, and the Chrome submission checklist.
+`manifest.json` declares a stable Firefox add-on ID, Firefox 142 and Chrome 121 minimum versions, no Firefox data collection, the `storage` permission, narrowly scoped Yahoo draft-page access, and loopback access. Transparent football icons are packaged at the browser toolbar, sidebar, add-on manager, and 128-pixel store sizes. [CHROMEWEBSTORE.md](CHROMEWEBSTORE.md) tracks listing copy, permission justifications, disclosures, and the remaining Chrome submission checklist.
 
 ## Tests
 
@@ -252,4 +252,4 @@ No package installation is required for extension tests; they use Node's built-i
 npm --prefix chrome-extension test
 ```
 
-Tests cover authoritative parsing, duplicate/gap persistence, privacy-minimal diagnostics, guarded repair/reset, cross-league storage, background-broker serialization/recovery, loopback sync and recommendation requests, explicit league selection, profile import/reuse, inert text rendering, Firefox/Chrome compatibility, and export safety.
+Tests cover authoritative parsing, duplicate/gap persistence, privacy-minimal diagnostics, guarded repair/reset, cross-league storage, background-broker serialization/recovery, loopback sync and recommendation requests, explicit league selection, profile import/reuse, inert text rendering, compact risk/news presentation, packaged icon dimensions, Firefox/Chrome compatibility, and export safety.

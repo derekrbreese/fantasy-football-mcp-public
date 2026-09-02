@@ -92,6 +92,25 @@ test('builds a bounded recommendation view with roster, round, degradation, and 
   assert.equal(model.actionNotice, 'Recommendations only — this assistant never drafts players.');
 });
 
+test('groups repeated FantasyPros public coverage warnings into one readable disclosure', () => {
+  const model = createRecommendationViewModel(response({
+    capabilities: { injuryStatus: false, externalNews: true },
+    warnings: [
+      'FantasyPros player catalog coverage is limited by the public API',
+      'FantasyPros injuries coverage is limited by the public API',
+      'FantasyPros news coverage is limited by the public API',
+    ],
+  }), { leagueId: '10462193' });
+
+  assert.deepEqual(model.degradations, [
+    'Draft state is stale by about 181 seconds.',
+    'Team count was inferred from the recorded ledger.',
+    'Some drafted player identities are unresolved.',
+    'Injury status is unavailable; treat it as unknown.',
+    'FantasyPros public API coverage is limited for the player catalog, injuries, and news.',
+  ]);
+});
+
 test('lets the shared dashboard request a bounded twenty-card board', () => {
   const many = Array.from({ length: 30 }, (_, index) => candidate(index + 1));
   const model = createRecommendationViewModel(

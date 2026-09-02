@@ -1153,6 +1153,62 @@ async def test_limited_catalog_bounds_and_caches_targeted_news_identity_lookups(
 
 
 @pytest.mark.asyncio
+async def test_resolved_candidates_skip_irrelevant_news_identity_lookups() -> None:
+    now = datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+    unrelated_news = [
+        {
+            "player_id": player_id,
+            "title": f"Unrelated player {player_id} update",
+            "created": "2026-09-01 12:00:00",
+            "categories": ["News"],
+        }
+        for player_id in range(200, 210)
+    ]
+    transport = FakeTransport(
+        {
+            "players": {
+                "sport": "NFL",
+                "count": 500,
+                "public_api_limited": True,
+                "players": [
+                    {
+                        "player_id": 101,
+                        "player_name": "Resolved Candidate",
+                        "position_id": "WR",
+                        "team_id": "SF",
+                    }
+                ],
+            },
+            "injuries": {"sport": "NFL", "count": 0, "injuries": []},
+            "news": {
+                "sport": "NFL",
+                "count": len(unrelated_news),
+                "public_api_limited": True,
+                "items": unrelated_news,
+            },
+        }
+    )
+    provider = _provider(api_key="secret", transport=transport, clock=lambda: now)
+
+    result = await provider.get_player_updates(
+        [{"name": "Resolved Candidate", "position": "WR", "team": "SF"}],
+        year=2026,
+    )
+
+    assert len(transport.calls) == 3
+    assert result["players"][0]["identityResolved"] is True
+    assert result["coverage"]["targetedPlayerLookups"] == {
+        "attempted": 0,
+        "resolved": 0,
+        "capped": False,
+    }
+    assert result["warnings"] == [
+        "FantasyPros player catalog coverage is limited by the public API",
+        "FantasyPros news coverage is limited by the public API",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_targeted_news_identity_failure_is_generic_and_remains_unknown() -> None:
     secret = "targeted-secret-must-not-escape"
     transport = FakeTransport(

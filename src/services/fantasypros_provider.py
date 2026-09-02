@@ -463,11 +463,19 @@ class FantasyProsProvider:
             injuries = [record for record in injury_result.records if isinstance(record, _Injury)]
             news = [record for record in news_result.records if isinstance(record, _News)]
             injury_players = self._injury_players(injuries)
+            base_catalog = list(dict.fromkeys((*catalog, *injury_players)))
+            base_resolved = self._resolve_identities(identities, base_catalog)
+            needs_targeted_identity = any(player is None for player in base_resolved)
             known_ids = {
-                player.fantasypros_id for player in (*catalog, *injury_players)
+                player.fantasypros_id
+                for player in (*base_catalog, *(player for player in base_resolved if player))
             }
             unresolved_news_ids: list[int] = []
-            for item in sorted(news, key=lambda value: value.published_at, reverse=True):
+            for item in (
+                sorted(news, key=lambda value: value.published_at, reverse=True)
+                if needs_targeted_identity
+                else ()
+            ):
                 if news_result.stale:
                     break
                 if not _fresh(item.published_at, now, self._news_max_age_seconds):
@@ -529,7 +537,7 @@ class FantasyProsProvider:
         elif targeted_incomplete:
             warnings.append("FantasyPros recent-news player identity coverage is incomplete")
 
-        combined_catalog = list(dict.fromkeys((*catalog, *injury_players, *targeted_players)))
+        combined_catalog = list(dict.fromkeys((*base_catalog, *targeted_players)))
         resolved = self._resolve_identities(identities, combined_catalog)
         injuries_by_id = self._latest_injuries(injuries)
         news_by_id = self._news_by_id(news)

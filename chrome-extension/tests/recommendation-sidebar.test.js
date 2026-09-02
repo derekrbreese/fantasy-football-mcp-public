@@ -292,3 +292,45 @@ test('manifest keeps the recorder UI and cross-browser background lock broker', 
   assert.match(popupSource, /sidebarAction\?\.open/);
   assert.match(popupSource, /draft-dashboard#leagueId=/);
 });
+
+test('manifest packages correctly sized football icons for browser surfaces', () => {
+  const extensionRoot = path.join(__dirname, '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(extensionRoot, 'manifest.json'), 'utf8'));
+  const packageMetadata = JSON.parse(fs.readFileSync(path.join(extensionRoot, 'package.json'), 'utf8'));
+  const expectedIcons = {
+    16: 'icons/football-16.png',
+    32: 'icons/football-32.png',
+    48: 'icons/football-48.png',
+    64: 'icons/football-64.png',
+    96: 'icons/football-96.png',
+    128: 'icons/football-128.png',
+  };
+
+  assert.deepEqual(manifest.icons, expectedIcons);
+  assert.deepEqual(manifest.action.default_icon, {
+    16: 'icons/football-16.png',
+    24: 'icons/football-24.png',
+    32: 'icons/football-32.png',
+    48: 'icons/football-48.png',
+    64: 'icons/football-64.png',
+  });
+  assert.deepEqual(manifest.sidebar_action.default_icon, {
+    16: 'icons/football-16.png',
+    32: 'icons/football-32.png',
+    64: 'icons/football-64.png',
+  });
+  assert.equal(packageMetadata.version, manifest.version);
+
+  const iconPaths = new Set([
+    ...Object.values(manifest.icons),
+    ...Object.values(manifest.action.default_icon),
+    ...Object.values(manifest.sidebar_action.default_icon),
+  ]);
+  for (const relativePath of iconPaths) {
+    const icon = fs.readFileSync(path.join(extensionRoot, relativePath));
+    const expectedSize = Number(relativePath.match(/-(\d+)\.png$/)?.[1]);
+    assert.deepEqual(icon.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    assert.equal(icon.readUInt32BE(16), expectedSize, relativePath);
+    assert.equal(icon.readUInt32BE(20), expectedSize, relativePath);
+  }
+});
