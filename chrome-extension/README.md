@@ -63,12 +63,13 @@ When Yahoo exposes each field, a pick contains:
 - Overall pick number
 - Round and pick within the round
 - Player name
+- Extracted numeric Yahoo player key, when Yahoo exposes one
 - NFL position and team
 - Fantasy team/manager label
 - Whether Yahoo labeled it **Your Team**
 - Local recording timestamp
 
-The extension records only sanitized draft context. It does not record Yahoo credentials, cookies, chat, arbitrary page text, or the draft's page location.
+The extension records only sanitized draft context. A Yahoo player link may be inspected ephemerally only on the expected Yahoo host and a recognized player path; only its validated `game_key.p.player_id` value is retained. The link, query parameters, and other attributes are discarded. The extension does not record Yahoo credentials, cookies, chat, arbitrary page text, or the draft's page location.
 
 ## Popup, sidebar, and dashboard
 
@@ -93,13 +94,17 @@ The sidebar shows up to five recommendations beside Yahoo. Above the detailed ca
 
 It selects a league only from the active draft tab or an explicit saved-league choice; it never silently chooses the newest saved session. After the initial request, a newer pick for that exact league cancels stale work, debounces duplicate events, and refreshes automatically. Another league's storage updates do not affect it.
 
-Cards show roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, and explicitly uncalibrated confidence and return/simulation probabilities. Stale state, inferred team counts, unresolved player identities, unavailable roster settings, and unknown injury/news data are visibly degraded. FantasyPros coverage markers are described as bounded snapshots; when its feed works but no fresh injury record matches the player pool, the UI says that missing status does not mean healthy instead of calling the feed unavailable. When the server's optional Databricks critic is enabled and available, a separate advisory-only summary appears after the unchanged deterministic recommendations.
+Cards show roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, and explicitly uncalibrated confidence and return/simulation probabilities. They also show compact **Value**, **Sleeper Watch**, and **Fade** market badges plus **Take now**, **Can wait**, or **Timing unknown** reasoning. Value is at least one league round past real ADP; Sleeper Watch is real ADP in Round 7 or later with source rank at least one league round ahead; Fade is source rank at least one league round behind real ADP. Sleeper Watch is a market discount, not a breakout or performance prediction, and Fade is a caution rather than a command. Take now uses an uncalibrated below-50% return estimate; Can wait uses 50% or above. Raw rank, ADP, discount, and return metrics remain visible.
+
+Market labels fail closed unless ADP was explicitly supplied, the ranking source has a same-season source date (or Yahoo retrieval date), the authoritative ledger is complete, and drafted identities resolve conservatively. A local import timestamp is shown for diagnostics but cannot certify an undated sheet's ADP. Missing ADP may use rank only inside legacy scoring; the UI says ADP is unavailable and never relabels rank as market data. The bounded Sleeper Watch shows at most five deterministically ordered players from the supplied ranking frontier and discloses known drafted, unresolved-identity, no-real-ADP, and hidden-qualifier counts. Fresh attributed risk evidence adds a caution; stale or missing evidence remains unknown. Stale state, inferred team counts, unavailable roster settings, and unknown injury/news data are also visibly degraded. FantasyPros coverage markers are described as bounded snapshots; when its feed works but no fresh injury record matches the player pool, the UI says that missing status does not mean healthy instead of calling the feed unavailable. When the server's optional Databricks critic is enabled and available, a separate advisory-only summary appears after the unchanged deterministic recommendations.
+
+Cards may also show an evidence-backed **Breakout Watch** label. A bounded **Next two selections** section keeps the deterministic primary, adds up to two immediate fallbacks, and—when snake order is known—shows up to three position-aware next-turn combinations. Its availability percentages are uncalibrated actual-ADP heuristics, not promises; missing ADP is unknown, opponent-specific rosters/tendencies are not yet modeled, and users should refresh after every recorded pick. An incomplete ledger blocks planning. Breakout Watch requires fresh, explicitly attributed projected points plus position-appropriate opportunities and experience evidence; it is never inferred from ADP or news. Missing breakout evidence does not degrade ordinary recommendations.
 
 ### Full dashboard
 
 Open it from the popup or visit `http://127.0.0.1:8765/draft-dashboard` while the server is running. Opening it from the popup carries the exact league ID in a browser fragment, which is not sent in the initial dashboard GET.
 
-The dashboard shows the same clock-aware decision brief and a broader live cockpit: personal queue, position/tier filters, three-strategy sensitivity, recent position-run alerts, configured roster-slot gaps, fallback tiers, readiness checks, quick comparison, and a value/reach recap. The prior cockpit remains available while a refresh is computing. It also includes up to twenty detailed candidates, recent draft history, specialist scores, critic checks, simulations, and source/quality diagnostics. It and the sidebar use text-only DOM rendering and never inject controls into Yahoo.
+The dashboard shows the same clock-aware decision brief, market badges, take-now/can-wait reasoning, and bounded Sleeper Watch, plus a broader live cockpit: personal queue, position/tier filters, three-strategy sensitivity, recent position-run alerts, configured roster-slot gaps, fallback tiers, readiness checks, quick comparison, and a value/reach recap. The prior cockpit remains available while a refresh is computing. It also includes up to twenty detailed candidates, recent draft history, specialist scores, critic checks, simulations, and source/quality diagnostics. Expand the market definitions, trust checks, and bounded-exclusion details when auditing a label. It and the sidebar use text-only DOM rendering and never inject controls into Yahoo.
 
 ## Import a local rankings profile
 
@@ -115,6 +120,10 @@ Importing a profile is the recommended live-draft path when Yahoo has not approv
 5. Select **Import profile**, then refresh recommendations.
 
 The server keeps only the top 500 sanitized rows, roster settings, and safe provenance for that exact sport/league/team/session identity. Raw workbook bytes are parsed in memory and discarded. Filenames, formulas, notes, URLs, and arbitrary cells are not stored.
+
+Generic CSV and strict JSON may also supply optional, explicit Breakout Watch evidence for RB/WR/TE players. CSV uses the six all-or-none columns `Projection Source`, `Projection As Of` (or `Projection Date`), `Projected Points`, `Projected Opportunities`, `Opportunity Kind`, and `Experience Years`; JSON uses the equivalent complete `breakout_evidence` object. RB uses projected `touches`; WR/TE may use projected `targets` or `receptions`. The source must be a safe attribution label rather than a URL, and the evidence date must match the profile season. DraftSheets `.xlsx` does not import these optional fields.
+
+A label appears only for fresh evidence at most 45 days old, a same-position/source/opportunity-kind cohort of at least five players, no more than three experience years, and projected points plus opportunities at or above the cohort's 60th percentile. It is marked uncalibrated, remains stable as players are drafted because the full bounded ranking cohort is used, and is never inferred from ADP or headlines. Missing evidence omits the label without degrading normal recommendations. FantasyPros news remains risk-only and does not create a breakout label.
 
 Google Drive is optional storage only, not a runtime integration. Download a local `.xlsx` from Drive or export the ECR tab from Google Sheets as CSV, then import that file through the dashboard.
 
@@ -162,13 +171,13 @@ Repair proceeds only when every completed row has the expected safe shape, respo
 
 Ordinary automatic scans never replace a saved authoritative ledger with a shorter visible prefix. An unsafe authoritative evaluation cannot replace the numbered ledger, while safely parsed ordinary observations continue through the conservative merge and sync path so newly visible gaps can still block recommendations. Picks-tab cards are secondary observations only: they never enter repair or authoritative replacement, never clear capture uncertainty, and their Yahoo injury badges are not treated as injury/news evidence. Numbered secondary observations recorded before a verified Round-by-Round baseline are retained but set one allowlisted boolean capture blocker for that exact league. It contains no DOM text or error details and makes the server block recommendations even when the picks look contiguous. A coherent authoritative scan clears it only when one stable positive Yahoo current-pick marker exactly follows the ledger maximum; without that evidence, the scan may update picks but preserves the prior capture decision. An accepted repair may also clear it. A scan with no Round-by-Round table leaves the prior server decision unchanged, so old clients and non-authoritative views cannot accidentally clear a block. After a baseline exists, equivalent panel/banner/ledger identities deduplicate; incompatible identities at the same overall pick remain explicit duplicates. If secondary capture later fills an already saved gap, the pick is retained but capture remains blocked until Round-by-Round verification or repair.
 
-## FantasyPros injury/news evidence
+## FantasyPros evidence
 
-When `FANTASY_PROS_API` is set on the server, recommendation cards can show FantasyPros-attributed status and recent headlines. The extension never receives the key.
+When `FANTASY_PROS_API` is set on the server, recommendations receive FantasyPros-attributed status, recent headlines, and cached preseason RB/WR/TE projection evidence. Matching candidate cards render the allowlisted projected points and position-appropriate opportunities as inert, attributed evidence with explicit season, scoring, freshness, and retrieval provenance. The extension never receives the key. FantasyPros does not supply experience years, so its projection evidence alone does not create a Breakout Watch label.
 
-The first FantasyPros-enabled recommendation creates and populates the private SQLite cache automatically; there is no separate prefetch or migration step. A complete normalized catalog snapshot lasts 24 hours; a provider-limited partial catalog and injury/news snapshots are retried after five minutes. Fresh snapshots survive server restarts. If an expired snapshot cannot refresh, last-known-good identity data may be retained, but recommendation risk remains unknown and stale headlines are not shown as recent news.
+The first FantasyPros-enabled recommendation creates or safely migrates the private SQLite cache automatically; there is no separate prefetch step. A complete normalized catalog and preseason projection snapshot lasts 24 hours; a provider-limited partial catalog and injury/news snapshots are retried after five minutes. The full enrichment phase has a 10-second outer deadline. Projection scoring uses an explicit imported setting when available and otherwise reports a `HALF` default; a missing league season similarly uses the current UTC year with a warning. `STD` and `PPR` can use their explicit same-season catalog ADP fields; half-PPR ADP remains unavailable rather than guessed. Projections do not establish NFL experience, so they cannot independently create a breakout label.
 
-See [FantasyPros injury/news cache](../README.md#fantasypros-injurynews-cache) for request limits, terms/attribution, cache contents, and privacy behavior.
+See [FantasyPros evidence cache](../README.md#fantasypros-evidence-cache) for request limits, terms/attribution, cache contents, and privacy behavior.
 
 ## Optional Databricks advisory critic
 
@@ -240,6 +249,7 @@ Yahoo may have changed its layout. Select **Save diagnostics**. The report conta
 - Loopback endpoints allowlist fields, validate the exact session, cap payloads, restrict origins, and return recommendation responses with `Cache-Control: no-store`.
 - Server-side draft/profile/cache files use user-only permissions.
 - The extension stores no Yahoo credentials, cookies, OAuth parameters, full page locations, or arbitrary browser fields.
+- Matching prefers equal validated Yahoo player keys. Unequal keys fail closed; a missing key uses the existing conservative name, position, and NFL-team fallback.
 - Optional Databricks review receives no player identity, league/session/team identity, ledger, headline, URL, or credential; it cannot mutate recommendation order or scores.
 - Recommendations never draft a player or inject controls into Yahoo.
 
@@ -255,4 +265,4 @@ No package installation is required for extension tests; they use Node's built-i
 npm --prefix chrome-extension test
 ```
 
-Tests cover authoritative parsing, duplicate/gap persistence, privacy-minimal diagnostics, guarded repair/reset, cross-league storage, background-broker serialization/recovery, loopback sync and recommendation requests, explicit league selection, profile import/reuse, inert text rendering, compact risk/news presentation, packaged icon dimensions, Firefox/Chrome compatibility, and export safety.
+Tests cover authoritative parsing, duplicate/gap persistence, privacy-minimal diagnostics, guarded repair/reset, cross-league storage, background-broker serialization/recovery, loopback sync and recommendation requests, explicit league selection, profile import/reuse, real-ADP market guards, bounded inert Sleeper Watch rendering, compact risk/news presentation, packaged icon dimensions, Firefox/Chrome compatibility, and export safety.

@@ -15,6 +15,19 @@
   const POSITION_ORDER = ['QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'DST', 'BN', 'IR'];
   const PLAYER_POSITIONS = new Set(['QB', 'RB', 'WR', 'TE', 'K', 'DST']);
   const FORMATS = new Set(['draftsheets-2026', 'csv', 'json']);
+  const BREAKOUT_EVIDENCE_KEYS = new Set([
+    'source',
+    'as_of',
+    'projected_points',
+    'projected_opportunities',
+    'opportunity_kind',
+    'experience_years',
+  ]);
+  const BREAKOUT_OPPORTUNITY_KINDS = {
+    RB: new Set(['touches']),
+    WR: new Set(['targets', 'receptions']),
+    TE: new Set(['targets', 'receptions']),
+  };
 
   function safeLeagueId(value) {
     const leagueId = typeof value === 'string' ? value.trim() : '';
@@ -79,6 +92,15 @@
     return team;
   }
 
+  function optionalPlayerKey(value, rowNumber) {
+    if (value === null || value === undefined || value === '') return null;
+    const playerKey = typeof value === 'string' ? value.trim() : '';
+    if (!/^[1-9]\d{0,9}\.p\.[1-9]\d{0,9}$/.test(playerKey)) {
+      throw new Error(`Yahoo player key in row ${rowNumber} is invalid.`);
+    }
+    return playerKey;
+  }
+
   function optionalIsoDate(value, label = 'Source date') {
     if (value === null || value === undefined || value === '') return null;
     if (typeof value !== 'string' || value.length > 40) throw new Error(`${label} is invalid.`);
@@ -87,18 +109,79 @@
     return parsed.toISOString();
   }
 
+  function sanitizeBreakoutEvidence(value, rowNumber, position) {
+    if (value === null || value === undefined) return null;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`Breakout evidence in row ${rowNumber} must be a complete object.`);
+    }
+    const keys = Object.keys(value);
+    if (keys.length !== BREAKOUT_EVIDENCE_KEYS.size || keys.some((key) => !BREAKOUT_EVIDENCE_KEYS.has(key))) {
+      throw new Error(`Breakout evidence in row ${rowNumber} must include only the complete supported fields.`);
+    }
+    const expectedKinds = BREAKOUT_OPPORTUNITY_KINDS[position];
+    if (!expectedKinds) {
+      throw new Error(`Breakout evidence in row ${rowNumber} is supported only for RB, WR, and TE.`);
+    }
+    const source = safeText(value.source, `Projection source in row ${rowNumber}`, 80);
+    if (!/^[A-Za-z0-9][A-Za-z0-9 ._()&'+-]{0,79}$/.test(source)) {
+      throw new Error(`Projection source in row ${rowNumber} is missing or invalid.`);
+    }
+    const asOfValue = typeof value.as_of === 'string' ? value.as_of.trim() : '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfValue)) {
+      throw new Error(`Projection date in row ${rowNumber} must be YYYY-MM-DD.`);
+    }
+    const parsedDate = new Date(`${asOfValue}T00:00:00Z`);
+    if (!Number.isFinite(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== asOfValue) {
+      throw new Error(`Projection date in row ${rowNumber} is invalid.`);
+    }
+    const projectedPoints = finiteNumber(
+      value.projected_points,
+      `Projected points in row ${rowNumber}`,
+    );
+    if (projectedPoints === null || projectedPoints <= 0 || projectedPoints > 1_000) {
+      throw new Error(`Projected points in row ${rowNumber} must be greater than 0 and at most 1000.`);
+    }
+    const opportunities = finiteNumber(
+      value.projected_opportunities,
+      `Projected opportunities in row ${rowNumber}`,
+    );
+    if (opportunities === null || opportunities < 1 || opportunities > 1_000) {
+      throw new Error(`Projected opportunities in row ${rowNumber} must be from 1 to 1000.`);
+    }
+    const opportunityKind = String(value.opportunity_kind || '').trim().toLowerCase();
+    if (!expectedKinds.has(opportunityKind)) {
+      throw new Error(`Opportunity kind in row ${rowNumber} must be ${[...expectedKinds].join(' or ')} for ${position}.`);
+    }
+    return {
+      source,
+      as_of: asOfValue,
+      projected_points: projectedPoints,
+      projected_opportunities: opportunities,
+      opportunity_kind: opportunityKind,
+      experience_years: safeInteger(
+        value.experience_years,
+        `Experience years in row ${rowNumber}`,
+        0,
+        30,
+      ),
+    };
+  }
+
   function sanitizeRanking(value, rowNumber) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new Error(`Ranking row ${rowNumber} must be an object.`);
     }
     const rank = safeInteger(value.rank, `Rank in row ${rowNumber}`, 1, 10_000);
+    const position = normalizePosition(value.position);
     const result = {
       name: safeText(value.name, `Player name in row ${rowNumber}`, 120),
-      position: normalizePosition(value.position),
+      position,
       rank,
     };
     const team = optionalTeam(value.team);
     if (team) result.team = team;
+    const playerKey = optionalPlayerKey(value.player_key ?? value.playerKey, rowNumber);
+    if (playerKey) result.player_key = playerKey;
     const adp = finiteNumber(value.average_draft_position, `ADP in row ${rowNumber}`);
     if (adp !== null) {
       if (adp <= 0 || adp > 10_000) throw new Error(`ADP in row ${rowNumber} is out of range.`);
@@ -111,6 +194,12 @@
       }
       result.bye_week = bye;
     }
+    const breakoutEvidence = sanitizeBreakoutEvidence(
+      value.breakout_evidence,
+      rowNumber,
+      position,
+    );
+    if (breakoutEvidence) result.breakout_evidence = breakoutEvidence;
     return result;
   }
 
@@ -202,18 +291,55 @@
       team: headerIndex(headers, new Set(['TEAM', 'NFL TEAM']), 'Team'),
       adp: headerIndex(headers, new Set(['ADP', 'AVG DRAFT POSITION', 'AVERAGE DRAFT POSITION']), 'ADP'),
       bye: headerIndex(headers, new Set(['BYE', 'BYE WEEK']), 'Bye Week'),
+      playerKey: headerIndex(
+        headers,
+        new Set(['YAHOO PLAYER KEY', 'PLAYER KEY', 'PLAYERKEY']),
+        'Yahoo Player Key',
+      ),
+      projectionSource: headerIndex(headers, new Set(['PROJECTION SOURCE']), 'Projection Source'),
+      projectionAsOf: headerIndex(headers, new Set(['PROJECTION AS OF', 'PROJECTION DATE']), 'Projection As Of'),
+      projectedPoints: headerIndex(headers, new Set(['PROJECTED POINTS']), 'Projected Points'),
+      projectedOpportunities: headerIndex(headers, new Set(['PROJECTED OPPORTUNITIES']), 'Projected Opportunities'),
+      opportunityKind: headerIndex(headers, new Set(['OPPORTUNITY KIND']), 'Opportunity Kind'),
+      experienceYears: headerIndex(headers, new Set(['EXPERIENCE YEARS']), 'Experience Years'),
     };
     const draftSheetsHeaders = ['RK', 'PLAYER NAME', 'TEAM', 'POS', 'BYE WEEK']
       .every((header) => headers.includes(header));
-    const values = rows.slice(1).map((columns, rowIndex) => ({
-      rank: columns[indexes.rank],
-      name: columns[indexes.name],
-      position: columns[indexes.position],
-      team: indexes.team >= 0 ? columns[indexes.team] : undefined,
-      average_draft_position: indexes.adp >= 0 ? columns[indexes.adp] : undefined,
-      bye_week: indexes.bye >= 0 ? columns[indexes.bye] : undefined,
-      _rowNumber: rowIndex + 2,
-    }));
+    const evidenceIndexes = [
+      indexes.projectionSource,
+      indexes.projectionAsOf,
+      indexes.projectedPoints,
+      indexes.projectedOpportunities,
+      indexes.opportunityKind,
+      indexes.experienceYears,
+    ];
+    const values = rows.slice(1).map((columns, rowIndex) => {
+      const evidenceValues = evidenceIndexes.map((index) => (
+        index >= 0 ? String(columns[index] || '').trim() : ''
+      ));
+      const hasEvidence = evidenceValues.some(Boolean);
+      if (hasEvidence && evidenceValues.some((value) => !value)) {
+        throw new Error(`Breakout evidence in row ${rowIndex + 2} must be complete.`);
+      }
+      return {
+        rank: columns[indexes.rank],
+        name: columns[indexes.name],
+        position: columns[indexes.position],
+        team: indexes.team >= 0 ? columns[indexes.team] : undefined,
+        average_draft_position: indexes.adp >= 0 ? columns[indexes.adp] : undefined,
+        bye_week: indexes.bye >= 0 ? columns[indexes.bye] : undefined,
+        player_key: indexes.playerKey >= 0 ? columns[indexes.playerKey] : undefined,
+        breakout_evidence: hasEvidence ? {
+          source: evidenceValues[0],
+          as_of: evidenceValues[1],
+          projected_points: evidenceValues[2],
+          projected_opportunities: evidenceValues[3],
+          opportunity_kind: evidenceValues[4],
+          experience_years: evidenceValues[5],
+        } : undefined,
+        _rowNumber: rowIndex + 2,
+      };
+    });
     const validated = validateAndSortRankings(values, {
       allowDraftSheetsTruncation: draftSheetsHeaders,
     });

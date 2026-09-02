@@ -13,6 +13,12 @@
       .trim();
   }
 
+  function normalizePlayerKey(value) {
+    if (typeof value !== 'string') return null;
+    const playerKey = value.trim();
+    return /^[1-9]\d{0,9}\.p\.[1-9]\d{0,9}$/.test(playerKey) ? playerKey : null;
+  }
+
   function positiveInteger(value) {
     const match = String(value ?? '').match(/\d+/);
     if (!match) return undefined;
@@ -131,7 +137,7 @@
     const isUserPick = /^(?:My|Your) Team$/i.test(fantasyTeam);
     if (isUserPick) fantasyTeam = 'Your Team';
 
-    return {
+    const pick = {
       pickNumber,
       player,
       position: normalizePosition(details[1]),
@@ -139,6 +145,9 @@
       fantasyTeam,
       isUserPick,
     };
+    const playerKey = normalizePlayerKey(snapshot?.playerKey);
+    if (playerKey) pick.playerKey = playerKey;
+    return pick;
   }
 
   function parsePickSnapshot(snapshot) {
@@ -244,13 +253,21 @@
     if (!/\p{L}/u.test(player) || player.length > 100) return null;
 
     pick.player = player;
+    const playerKey = normalizePlayerKey(labels.playerKey);
+    if (playerKey) pick.playerKey = playerKey;
     if (position) pick.position = position;
     if (nflTeam) pick.nflTeam = nflTeam;
     if (fantasyTeam) pick.fantasyTeam = fantasyTeam;
     return pick;
   }
 
-  function parseRoundByRoundSnapshot({ roundText, pickText, playerText, fantasyTeamText }) {
+  function parseRoundByRoundSnapshot({
+    roundText,
+    pickText,
+    playerText,
+    fantasyTeamText,
+    playerKey: rawPlayerKey,
+  }) {
     const pickNumber = positiveInteger(pickText);
     const roundNumber = positiveInteger(roundText);
     const lines = String(playerText ?? '')
@@ -275,10 +292,12 @@
       isUserPick: /^Your Team$/i.test(fantasyTeam),
     };
     if (roundNumber) pick.roundNumber = roundNumber;
+    const playerKey = normalizePlayerKey(rawPlayerKey);
+    if (playerKey) pick.playerKey = playerKey;
     return pick;
   }
 
-  function parseLiveDraftSnapshot({ statusText, lastPickText }) {
+  function parseLiveDraftSnapshot({ statusText, lastPickText, playerKey: rawPlayerKey }) {
     const currentPick = positiveInteger(
       normalizeText(statusText).match(/\bROUND\s+\d+\s*[,•·-]?\s*PICK\s*#?\s*(\d+)\b/i)?.[1],
     );
@@ -295,6 +314,8 @@
     };
     if (/^Your Team$/i.test(pick.fantasyTeam)) pick.isUserPick = true;
     if (currentPick && currentPick > 1) pick.pickNumber = currentPick - 1;
+    const playerKey = normalizePlayerKey(rawPlayerKey);
+    if (playerKey) pick.playerKey = playerKey;
     return pick;
   }
 
@@ -306,6 +327,8 @@
     if (positiveInteger(pick?.pickNumber)) {
       return `${sessionKey}:pick:${positiveInteger(pick.pickNumber)}`;
     }
+    const playerKey = normalizePlayerKey(pick?.playerKey);
+    if (playerKey) return `${sessionKey}:player-key:${playerKey}`;
     return `${sessionKey}:player:${slug(pick?.player)}:team:${slug(pick?.fantasyTeam)}`;
   }
 
@@ -353,6 +376,7 @@
 
   const api = {
     buildPickKey,
+    normalizePlayerKey,
     normalizeText,
     parseDraftUrl,
     parseLiveDraftSnapshot,

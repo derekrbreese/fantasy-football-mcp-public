@@ -10,16 +10,49 @@ function text(value) {
     .trim();
 }
 
+function childElement(tagName, attributeSource, bodyHtml) {
+  const attributes = parseAttributes(attributeSource);
+  return {
+    tagName: tagName.toUpperCase(),
+    innerText: text(bodyHtml),
+    textContent: text(bodyHtml),
+    getAttribute(name) {
+      return attributes[String(name).toLowerCase()] ?? null;
+    },
+  };
+}
+
+function cellElement(attributeSource, bodyHtml) {
+  const cell = childElement('td', attributeSource, bodyHtml);
+  const descendants = [
+    ...[...bodyHtml.matchAll(/<a([^>]*)>([\s\S]*?)<\/a>/gi)]
+      .map(([, attributes, body]) => childElement('a', attributes, body)),
+    ...[...bodyHtml.matchAll(/<span([^>]*)>([\s\S]*?)<\/span>/gi)]
+      .map(([, attributes, body]) => childElement('span', attributes, body)),
+  ];
+  cell.querySelector = (selector) => {
+    if (/^\[data-(?:yahoo-)?player-key\]$/.test(selector)) {
+      if (cell.getAttribute(selector.slice(1, -1))) return cell;
+      return descendants.find((item) => item.getAttribute(selector.slice(1, -1))) || null;
+    }
+    return null;
+  };
+  cell.querySelectorAll = (selector) => selector === 'a[href]'
+    ? descendants.filter((item) => item.tagName === 'A' && item.getAttribute('href'))
+    : [];
+  return cell;
+}
+
 function rowElement(rowHtml) {
-  const cells = [...rowHtml.matchAll(/<td(?:\s[^>]*)?>([\s\S]*?)<\/td>/gi)]
-    .map(([, value]) => text(value));
+  const cells = [...rowHtml.matchAll(/<td([^>]*)>([\s\S]*?)<\/td>/gi)]
+    .map(([, attributes, body]) => cellElement(attributes, body));
   const roleCells = [...rowHtml.matchAll(/<[^>]+role=["']cell["'][^>]*>([\s\S]*?)<\/[^>]+>/gi)]
     .map(([, value]) => text(value));
   return {
     innerText: text(rowHtml),
     querySelectorAll(selector) {
       return selector === 'td'
-        ? cells.map((textContent) => ({ textContent, innerText: textContent }))
+        ? cells
         : selector === '[role="cell"]'
           ? roleCells.map((textContent) => ({ textContent, innerText: textContent }))
           : [];

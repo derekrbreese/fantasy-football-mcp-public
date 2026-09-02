@@ -12,7 +12,7 @@ test('builds recommendation-ready context with all picks and the user roster', (
       sessionKey: 'f1:10462193',
       updatedAt: '2026-08-31T22:44:58.255Z',
       picks: [
-        { pickNumber: 1, player: 'J. Gibbs', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1', isUserPick: false },
+        { pickNumber: 1, player: 'J. Gibbs', position: 'RB', nflTeam: 'DET', fantasyTeam: 'Team 1', isUserPick: false, playerKey: '461.p.33536' },
         { pickNumber: 6, player: 'P. Nacua', position: 'WR', nflTeam: 'LAR', fantasyTeam: 'Your Team', isUserPick: true },
         { pickNumber: 19, player: 'S. Barkley', position: 'RB', nflTeam: 'PHI', fantasyTeam: 'Your Team', isUserPick: true },
       ],
@@ -31,6 +31,7 @@ test('builds recommendation-ready context with all picks and the user roster', (
   assert.equal(context.generatedAt, '2026-08-31T22:45:00.000Z');
   assert.equal(context.draft.leagueId, '10462193');
   assert.equal(context.picks.length, 3);
+  assert.equal(context.picks[0].playerKey, '461.p.33536');
 });
 
 test('does not include credentials, URLs, or arbitrary session properties', () => {
@@ -65,6 +66,7 @@ test('strips injected non-allowlisted fields from Picks-panel observations', () 
       href: 'https://example.test/?auth=secret',
       ariaLabel: 'private manager text',
       injuryStatus: 'Q',
+      playerKey: 'https://example.test/?player_key=461.p.33536&auth=secret',
     }],
   }, '2026-08-31T22:45:00.000Z');
 
@@ -78,6 +80,7 @@ test('strips injected non-allowlisted fields from Picks-panel observations', () 
   assert.equal(JSON.stringify(context).includes('example.test'), false);
   assert.equal(JSON.stringify(context).includes('private manager'), false);
   assert.equal(context.repair, undefined);
+  assert.equal(context.picks[0].playerKey, undefined);
 });
 
 test('adds a top-level repair marker only for explicit repair sync', () => {

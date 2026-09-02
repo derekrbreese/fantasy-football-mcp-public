@@ -23,6 +23,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from src.services.yahoo_player_identity import normalize_yahoo_player_key
+
 DEFAULT_PROFILE_STORE_PATH = Path.home() / ".fantasy-football-mcp" / "draft-profiles.json"
 DEFAULT_PROFILE_DEFAULTS_STORE_PATH = (
     Path.home() / ".fantasy-football-mcp" / "draft-profile-defaults.json"
@@ -39,7 +41,21 @@ _STORE_LOCK = threading.Lock()
 _SESSION_KEY = re.compile(r"^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{1,64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
 _TEAM = re.compile(r"^[A-Z0-9]{1,8}$")
+_BREAKOUT_SOURCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()&'+-]{0,79}$")
 _CANDIDATE_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DST"}
+_BREAKOUT_EVIDENCE_FIELDS = {
+    "source",
+    "as_of",
+    "projected_points",
+    "projected_opportunities",
+    "opportunity_kind",
+    "experience_years",
+}
+_BREAKOUT_OPPORTUNITY_KINDS = {
+    "RB": {"touches"},
+    "WR": {"targets", "receptions"},
+    "TE": {"targets", "receptions"},
+}
 _ROSTER_ORDER = (
     "QB",
     "RB",
@@ -73,6 +89,7 @@ _ECR_FIELD_ALIASES = {
     "position": {"POS", "POSITION"},
     "adp": {"ADP", "AVERAGEDRAFTPOSITION"},
     "bye": {"BYE", "BYEWEEK"},
+    "player_key": {"PLAYERKEY", "YAHOOPLAYERKEY"},
 }
 _SCORING_ALIASES = {
     "TEAMS": "teams",
@@ -97,7 +114,11 @@ _SCORING_ALIASES = {
     "BN": "BN",
     "BE": "BN",
     "IR": "IR",
+    "RECEPTION": "receptions",
+    "RECEPTIONS": "receptions",
+    "POINTSPERRECEPTION": "receptions",
 }
+_SCORING_FORMATS = {"STD", "HALF", "PPR"}
 _PRIVATE_PLAYER_TEXT = re.compile(
     r"(?:[a-z][a-z0-9+.-]{1,15}://|www\.|"
     r"\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|co|dev|app|test)(?:[/:?#]|$)|"
@@ -293,7 +314,59 @@ def _normalize_position(value: Any, *, roster: bool) -> str:
     return position
 
 
-def _sanitize_candidate(value: Any, index: int) -> dict[str, Any]:
+def _sanitize_breakout_evidence(
+    value: Any, *, index: int, position: str, season: int
+) -> dict[str, Any]:
+    field = f"rankings[{index}].breakout_evidence"
+    if not isinstance(value, Mapping) or set(value) != _BREAKOUT_EVIDENCE_FIELDS:
+        raise LocalDraftProfileValidationError(f"{field} fields are invalid")
+    expected_kinds = _BREAKOUT_OPPORTUNITY_KINDS.get(position)
+    if expected_kinds is None:
+        raise LocalDraftProfileValidationError(
+            f"{field} is supported only for RB, WR, and TE players"
+        )
+    source = _safe_string(value.get("source"), f"{field}.source", 80)
+    if not _BREAKOUT_SOURCE.fullmatch(source) or _PRIVATE_PLAYER_TEXT.search(source):
+        raise LocalDraftProfileValidationError(f"{field}.source is invalid")
+    as_of = _safe_string(value.get("as_of"), f"{field}.as_of", 10)
+    try:
+        parsed_as_of = date.fromisoformat(as_of)
+    except ValueError as error:
+        raise LocalDraftProfileValidationError(
+            f"{field}.as_of must be an ISO date"
+        ) from error
+    if parsed_as_of.year != season:
+        raise LocalDraftProfileValidationError(
+            f"{field}.as_of year must match profile season"
+        )
+    opportunity_kind = _safe_string(
+        value.get("opportunity_kind"), f"{field}.opportunity_kind", 16
+    ).casefold()
+    if opportunity_kind not in expected_kinds:
+        expected_label = " or ".join(sorted(expected_kinds))
+        raise LocalDraftProfileValidationError(
+            f"{field}.opportunity_kind must be {expected_label} for {position}"
+        )
+    return {
+        "source": source,
+        "as_of": parsed_as_of.isoformat(),
+        "projected_points": _strict_number(
+            value.get("projected_points"), f"{field}.projected_points", 0.01, 1_000
+        ),
+        "projected_opportunities": _strict_number(
+            value.get("projected_opportunities"),
+            f"{field}.projected_opportunities",
+            1,
+            1_000,
+        ),
+        "opportunity_kind": opportunity_kind,
+        "experience_years": _strict_integer(
+            value.get("experience_years"), f"{field}.experience_years", 0, 30
+        ),
+    }
+
+
+def _sanitize_candidate(value: Any, index: int, season: int) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise LocalDraftProfileValidationError(f"rankings[{index}] must be an object")
     name = _safe_player_name(value.get("name"), f"rankings[{index}].name")
@@ -319,6 +392,20 @@ def _sanitize_candidate(value: Any, index: int) -> dict[str, Any]:
     if "bye_week" in value and value["bye_week"] is not None:
         result["bye_week"] = _strict_integer(
             value["bye_week"], f"rankings[{index}].bye_week", 1, 22
+        )
+    if "player_key" in value and value["player_key"] is not None:
+        player_key = normalize_yahoo_player_key(value["player_key"])
+        if player_key is None:
+            raise LocalDraftProfileValidationError(
+                f"rankings[{index}].player_key has an invalid format"
+            )
+        result["player_key"] = player_key
+    if "breakout_evidence" in value and value["breakout_evidence"] is not None:
+        result["breakout_evidence"] = _sanitize_breakout_evidence(
+            value["breakout_evidence"],
+            index=index,
+            position=position,
+            season=season,
         )
     return result
 
@@ -346,7 +433,7 @@ def _sanitize_league_settings(value: Any) -> dict[str, Any]:
         )
     if sum(positions.values()) > 40:
         raise LocalDraftProfileValidationError("roster cannot exceed 40 slots")
-    return {
+    result = {
         "teams": teams,
         "rosterPositions": [
             {"position": position, "count": positions[position]}
@@ -354,6 +441,14 @@ def _sanitize_league_settings(value: Any) -> dict[str, Any]:
             if position in positions
         ],
     }
+    if "scoringFormat" in value:
+        scoring_format = value["scoringFormat"]
+        if scoring_format not in _SCORING_FORMATS:
+            raise LocalDraftProfileValidationError(
+                "leagueSettings.scoringFormat must be STD, HALF, or PPR"
+            )
+        result["scoringFormat"] = scoring_format
+    return result
 
 
 def _sanitize_provenance(value: Any, season: int) -> dict[str, str]:
@@ -395,7 +490,8 @@ def sanitize_local_draft_profile(value: Any) -> dict[str, Any]:
             f"rankings cannot exceed {MAX_CANDIDATES} candidates"
         )
     rankings = [
-        _sanitize_candidate(candidate, index) for index, candidate in enumerate(raw_rankings)
+        _sanitize_candidate(candidate, index, season)
+        for index, candidate in enumerate(raw_rankings)
     ]
     rankings.sort(key=lambda candidate: (candidate["rank"], candidate["name"]))
     ranks: set[int] = set()
@@ -998,6 +1094,14 @@ def _convert_ecr_rows(ecr_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, A
             candidate["bye_week"] = _coerce_integer(
                 bye_value, f"ECR row {row_number} bye week", 1, 22
             )
+        player_key_value = _row_lookup(row, _ECR_FIELD_ALIASES["player_key"])
+        if not _is_optional_blank(player_key_value):
+            player_key = normalize_yahoo_player_key(player_key_value)
+            if player_key is None:
+                raise LocalDraftProfileValidationError(
+                    f"ECR row {row_number} player_key has an invalid format"
+                )
+            candidate["player_key"] = player_key
         rankings.append(candidate)
     if not rankings:
         raise LocalDraftProfileValidationError(
@@ -1011,8 +1115,30 @@ def _scoring_name(value: Any) -> str | None:
     return _SCORING_ALIASES.get(_header_key(value))
 
 
-def _merge_scoring_value(settings: dict[str, int], name: str, value: Any, row_number: int) -> None:
+def _merge_scoring_value(
+    settings: dict[str, Any], name: str, value: Any, row_number: int
+) -> None:
     if _is_blank(value):
+        return
+    if name == "receptions":
+        receptions = _coerce_number(
+            value,
+            f"Scoring row {row_number} receptions",
+            0.0,
+            1.0,
+        )
+        formats = {0.0: "STD", 0.5: "HALF", 1.0: "PPR"}
+        scoring_format = formats.get(receptions)
+        if scoring_format is None:
+            raise LocalDraftProfileValidationError(
+                f"Scoring row {row_number} receptions must be 0, 0.5, or 1"
+            )
+        existing = settings.get("scoringFormat")
+        if existing is not None and existing != scoring_format:
+            raise LocalDraftProfileValidationError(
+                "DraftSheets Scoring has conflicting receptions values"
+            )
+        settings["scoringFormat"] = scoring_format
         return
     maximum = 20 if name == "teams" else 30
     minimum = 2 if name == "teams" else 0
@@ -1041,7 +1167,7 @@ def _convert_scoring_rows(
     if any(not isinstance(row, Mapping) for row in rows):
         raise LocalDraftProfileValidationError("each DraftSheets Scoring row must be an object")
 
-    settings: dict[str, int] = {}
+    settings: dict[str, Any] = {}
     grid_value_cells = {
         (index + 1, column)
         for index, row in enumerate(rows[:-1])
@@ -1088,7 +1214,10 @@ def _convert_scoring_rows(
     ]
     if not positions:
         raise LocalDraftProfileValidationError("DraftSheets Scoring must include roster positions")
-    return {"teams": teams, "rosterPositions": positions}
+    result = {"teams": teams, "rosterPositions": positions}
+    if "scoringFormat" in settings:
+        result["scoringFormat"] = settings["scoringFormat"]
+    return result
 
 
 def profile_from_draftsheets_rows(
@@ -1355,6 +1484,11 @@ def profile_from_draftsheets_xlsx(
             profile["leagueSettings"] = _sanitize_league_settings(
                 {
                     "teams": profile["leagueSettings"]["teams"],
+                    **(
+                        {"scoringFormat": profile["leagueSettings"]["scoringFormat"]}
+                        if "scoringFormat" in profile["leagueSettings"]
+                        else {}
+                    ),
                     "rosterPositions": [
                         {"position": position, "count": positions[position]}
                         for position in _ROSTER_ORDER

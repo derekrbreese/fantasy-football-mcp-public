@@ -65,6 +65,30 @@ test('concurrent league writes use independent keys and cannot clobber each othe
   assert.equal(await firstTab.getSession('f1:league-b'), leagueB);
 });
 
+test('browser storage retains only canonical Yahoo player keys', async () => {
+  const api = fakeExtensionStorage();
+  const storage = createTestDraftStorage(api);
+  const sessionKey = 'f1:league-a';
+
+  await storage.setSession(sessionKey, {
+    sessionKey,
+    picks: [
+      { pickNumber: 1, player: 'One', playerKey: ' 461.p.33536 ' },
+      {
+        pickNumber: 2,
+        player: 'Two',
+        playerKey: 'https://evil.test/?player_key=461.p.99999&auth=secret',
+      },
+    ],
+  });
+
+  const saved = await storage.getSession(sessionKey);
+  assert.equal(saved.picks[0].playerKey, '461.p.33536');
+  assert.equal(saved.picks[1].playerKey, undefined);
+  assert.equal(JSON.stringify(api.data).includes('evil.test'), false);
+  assert.equal(JSON.stringify(api.data).includes('secret'), false);
+});
+
 test('legacy aggregate sessions remain readable without aggregate rewrites', async () => {
   const legacy = { sessionKey: 'f1:legacy', picks: [{ pickNumber: 1 }] };
   const api = fakeExtensionStorage({ yahooDraftRecorderSessions: { 'f1:legacy': legacy } });

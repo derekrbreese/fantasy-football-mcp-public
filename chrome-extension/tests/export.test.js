@@ -9,6 +9,7 @@ const picks = [
     roundNumber: 1,
     roundPick: 1,
     player: 'Ja’Marr Chase',
+    playerKey: '461.p.33536',
     position: 'WR',
     nflTeam: 'CIN',
     fantasyTeam: 'Winners, Inc.',
@@ -21,8 +22,8 @@ test('exports picks as spreadsheet-safe CSV', () => {
   assert.equal(
     picksToCsv(picks),
     [
-      'Overall Pick,Round,Round Pick,Player,Position,NFL Team,Fantasy Team,Your Pick,Recorded At',
-      '1,1,1,Ja’Marr Chase,WR,CIN,"Winners, Inc.",true,2026-08-01T00:00:00.000Z',
+      'Overall Pick,Round,Round Pick,Player,Yahoo Player Key,Position,NFL Team,Fantasy Team,Your Pick,Recorded At',
+      '1,1,1,Ja’Marr Chase,461.p.33536,WR,CIN,"Winners, Inc.",true,2026-08-01T00:00:00.000Z',
     ].join('\r\n'),
   );
 });

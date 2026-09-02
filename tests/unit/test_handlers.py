@@ -123,6 +123,42 @@ class TestDraftRankings:
         assert result[0]["injury_note"] == "Injured Reserve"
         assert result[0]["rank"] == 1
 
+    @pytest.mark.asyncio
+    async def test_rankings_do_not_invent_market_adp_from_rank(self):
+        from fantasy_football_multi_league import get_draft_rankings
+
+        response = {
+            "fantasy_content": {
+                "league": [
+                    {"league_key": "461.l.61410"},
+                    {
+                        "players": {
+                            "0": {
+                                "player": [
+                                    [
+                                        {"name": {"full": "No ADP Player"}},
+                                        {"editorial_team_abbr": "SEA"},
+                                        {"display_position": "WR"},
+                                        {"draft_analysis": {"percent_drafted": 0}},
+                                    ]
+                                ]
+                            },
+                            "count": 1,
+                        }
+                    },
+                ]
+            }
+        }
+
+        with patch(
+            "fantasy_football_multi_league.yahoo_api_call",
+            AsyncMock(return_value=response),
+        ):
+            result = await get_draft_rankings("461.l.61410", count=1)
+
+        assert result[0]["rank"] == 1
+        assert "average_draft_position" not in result[0]
+
 
 class TestLeagueHandlers:
     """Test league-level handlers."""

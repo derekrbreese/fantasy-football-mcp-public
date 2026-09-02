@@ -28,6 +28,34 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  function normalizedPlayerKey(value) {
+    if (typeof value !== 'string') return null;
+    const playerKey = value.trim();
+    return /^[1-9]\d{0,9}\.p\.[1-9]\d{0,9}$/.test(playerKey) ? playerKey : null;
+  }
+
+  function sanitizeSessionPlayerKeys(session) {
+    if (!session || typeof session !== 'object' || !Array.isArray(session.picks)) return session;
+    let changed = false;
+    const picks = session.picks.map((pick) => {
+      if (!pick || typeof pick !== 'object' || !Object.hasOwn(pick, 'playerKey')) return pick;
+      const playerKey = normalizedPlayerKey(pick.playerKey);
+      if (playerKey === pick.playerKey) return pick;
+      changed = true;
+      const sanitized = { ...pick };
+      delete sanitized.playerKey;
+      if (playerKey) sanitized.playerKey = playerKey;
+      return sanitized;
+    });
+    return changed ? { ...session, picks } : session;
+  }
+
+  function sanitizePendingRepairPlayerKeys(pending) {
+    if (!pending || typeof pending !== 'object' || !pending.session) return pending;
+    const session = sanitizeSessionPlayerKeys(pending.session);
+    return session === pending.session ? pending : { ...pending, session };
+  }
+
   function isTabBlockedByReset(contentLoadedAt, resetAt, allowedResetAt) {
     const resetTime = timestampMillis(resetAt);
     if (resetTime === null) return false;
@@ -73,11 +101,15 @@
       const tombstone = await readValue(tombstoneStorageKey(sessionKey));
       const perSession = await readValue(sessionStorageKey(sessionKey));
       if (perSession && typeof perSession === 'object') {
-        return isVisibleAfterClear(perSession, tombstone) ? perSession : null;
+        return isVisibleAfterClear(perSession, tombstone)
+          ? sanitizeSessionPlayerKeys(perSession)
+          : null;
       }
       const legacy = await readValue(LEGACY_SESSIONS_KEY);
       const legacySession = legacy?.[sessionKey];
-      return isVisibleAfterClear(legacySession, tombstone) ? legacySession : null;
+      return isVisibleAfterClear(legacySession, tombstone)
+        ? sanitizeSessionPlayerKeys(legacySession)
+        : null;
     }
 
     async function getResetAt(sessionKey) {
@@ -98,14 +130,14 @@
       for (const [key, value] of Object.entries(all || {})) {
         const sessionKey = decodeSessionKey(key, SESSION_PREFIX);
         if (sessionKey && isVisibleAfterClear(value, tombstones.get(sessionKey))) {
-          sessions[sessionKey] = value;
+          sessions[sessionKey] = sanitizeSessionPlayerKeys(value);
         }
       }
       const legacy = all?.[LEGACY_SESSIONS_KEY];
       if (legacy && typeof legacy === 'object') {
         for (const [sessionKey, session] of Object.entries(legacy)) {
           if (!(sessionKey in sessions) && isVisibleAfterClear(session, tombstones.get(sessionKey))) {
-            sessions[sessionKey] = session;
+            sessions[sessionKey] = sanitizeSessionPlayerKeys(session);
           }
         }
       }
@@ -114,7 +146,7 @@
 
     function setSession(sessionKey, session) {
       return extensionApi.storageSet({
-        [sessionStorageKey(sessionKey)]: session,
+        [sessionStorageKey(sessionKey)]: sanitizeSessionPlayerKeys(session),
       });
     }
 
@@ -165,11 +197,15 @@
 
     async function getPendingRepair(sessionKey) {
       const pending = await readValue(pendingRepairStorageKey(sessionKey));
-      return pending && typeof pending === 'object' ? pending : null;
+      return pending && typeof pending === 'object'
+        ? sanitizePendingRepairPlayerKeys(pending)
+        : null;
     }
 
     function setPendingRepair(sessionKey, pending) {
-      return extensionApi.storageSet({ [pendingRepairStorageKey(sessionKey)]: pending });
+      return extensionApi.storageSet({
+        [pendingRepairStorageKey(sessionKey)]: sanitizePendingRepairPlayerKeys(pending),
+      });
     }
 
     function clearPendingRepair(sessionKey) {

@@ -14,6 +14,24 @@
     return node;
   }
 
+  function renderBadges(documentRef, badges) {
+    const row = element(documentRef, 'div', 'decision-badges');
+    for (const badge of Array.isArray(badges) ? badges.slice(0, 3) : []) {
+      const code = typeof badge === 'string' ? '' : badge?.code;
+      const label = typeof badge === 'string' ? badge : badge?.label;
+      const detail = typeof badge === 'string' ? '' : badge?.detail;
+      const node = element(
+        documentRef,
+        'span',
+        `decision-badge${code ? ` decision-badge--${code}` : ''}`,
+        label,
+      );
+      if (detail) node.setAttribute('title', detail);
+      row.appendChild(node);
+    }
+    return row;
+  }
+
   function renderDraftContext(documentRef, context) {
     const section = element(documentRef, 'section', 'draft-context');
     section.setAttribute('aria-label', 'Draft context');
@@ -40,6 +58,17 @@
     primary.appendChild(element(documentRef, 'span', 'decision-label', brief.primaryLabel));
     primary.appendChild(element(documentRef, 'strong', 'decision-name', brief.primaryName));
     primary.appendChild(element(documentRef, 'span', 'decision-meta', brief.primaryMeta));
+    if (brief.primaryBadges?.length) {
+      primary.appendChild(renderBadges(documentRef, brief.primaryBadges));
+    }
+    if (brief.primaryAction) {
+      primary.appendChild(element(
+        documentRef,
+        'span',
+        'decision-action decision-action--primary',
+        brief.primaryAction,
+      ));
+    }
     section.appendChild(primary);
 
     if (brief.fallbacks?.length) {
@@ -58,6 +87,46 @@
     return section;
   }
 
+  function renderNextTwoPicksPlan(documentRef, plan) {
+    const status = plan?.status === 'ready' ? 'ready' : 'degraded';
+    const section = element(documentRef, 'section', `two-pick-plan two-pick-plan--${status}`);
+    section.setAttribute('aria-label', 'Next two selections plan');
+    section.appendChild(element(documentRef, 'h2', '', 'Next two selections'));
+    section.appendChild(element(documentRef, 'p', 'two-pick-status', plan.statusLabel));
+    section.appendChild(element(documentRef, 'p', 'two-pick-summary', plan.summary));
+    section.appendChild(element(documentRef, 'p', 'two-pick-order', plan.pickLabel));
+    section.appendChild(element(documentRef, 'p', 'two-pick-primary', plan.primaryLabel));
+    if (plan.fallbackLabels?.length) {
+      section.appendChild(list(documentRef, plan.fallbackLabels, 'two-pick-fallbacks'));
+    }
+    if (plan.combinations?.length) {
+      const combinations = element(documentRef, 'section', 'two-pick-combinations');
+      combinations.appendChild(element(documentRef, 'h3', '', 'Position-aware combinations'));
+      for (const combination of plan.combinations) {
+        const combinationNode = element(documentRef, 'article', 'two-pick-combination');
+        combinationNode.appendChild(element(documentRef, 'strong', '', combination.label));
+        combinationNode.appendChild(element(
+          documentRef,
+          'p',
+          'two-pick-availability',
+          combination.availabilityLabel,
+        ));
+        if (combination.reasons?.length) {
+          combinationNode.appendChild(list(documentRef, combination.reasons, 'two-pick-reasons'));
+        }
+        combinations.appendChild(combinationNode);
+      }
+      section.appendChild(combinations);
+    }
+    if (plan.uncertainties?.length) {
+      const uncertainties = element(documentRef, 'section', 'two-pick-uncertainties');
+      uncertainties.appendChild(element(documentRef, 'h3', '', 'Planning uncertainties'));
+      uncertainties.appendChild(list(documentRef, plan.uncertainties, 'two-pick-uncertainty-list'));
+      section.appendChild(uncertainties);
+    }
+    return section;
+  }
+
   function renderRecommendation(documentRef, recommendation) {
     const card = element(documentRef, 'article', 'recommendation-card');
     const heading = element(documentRef, 'div', 'recommendation-heading');
@@ -69,8 +138,52 @@
     heading.appendChild(element(documentRef, 'strong', 'score', recommendation.scoreLabel));
     card.appendChild(heading);
 
+    if (recommendation.badges?.length) {
+      card.appendChild(renderBadges(documentRef, recommendation.badges));
+    }
+
+    if (recommendation.actionLabel) {
+      const action = element(documentRef, 'p', 'decision-action');
+      action.appendChild(element(documentRef, 'strong', '', recommendation.actionLabel));
+      if (recommendation.actionReason) {
+        action.appendChild(element(documentRef, 'span', '', ` · ${recommendation.actionReason}`));
+      }
+      card.appendChild(action);
+    }
+
     if (recommendation.valueLabel) {
       card.appendChild(element(documentRef, 'p', 'value-label', recommendation.valueLabel));
+    }
+    if (recommendation.projectionLabel) {
+      const projection = element(documentRef, 'section', 'projection-evidence');
+      projection.setAttribute('aria-label', 'FantasyPros projection evidence');
+      projection.appendChild(element(
+        documentRef,
+        'strong',
+        'projection-label',
+        recommendation.projectionLabel,
+      ));
+      projection.appendChild(element(
+        documentRef,
+        'p',
+        'projection-detail',
+        recommendation.projectionDetail,
+      ));
+      projection.appendChild(element(
+        documentRef,
+        'p',
+        'projection-caution',
+        recommendation.projectionCaution,
+      ));
+      card.appendChild(projection);
+    }
+    if (recommendation.breakoutLabel) {
+      const breakout = element(documentRef, 'section', 'breakout-watch');
+      breakout.setAttribute('aria-label', 'Breakout Watch evidence');
+      breakout.appendChild(element(documentRef, 'strong', 'breakout-label', recommendation.breakoutLabel));
+      breakout.appendChild(element(documentRef, 'p', 'breakout-detail', recommendation.breakoutDetail));
+      breakout.appendChild(element(documentRef, 'p', 'breakout-method', recommendation.breakoutMethod));
+      card.appendChild(breakout);
     }
 
     const metrics = element(documentRef, 'div', 'recommendation-metrics');
@@ -80,6 +193,9 @@
     card.appendChild(metrics);
     card.appendChild(element(documentRef, 'p', 'roster-impact', recommendation.rosterImpact));
     card.appendChild(element(documentRef, 'p', 'risk-label', recommendation.riskLabel));
+    if (recommendation.riskCaution) {
+      card.appendChild(element(documentRef, 'p', 'market-risk-caution', recommendation.riskCaution));
+    }
     if (recommendation.riskSourceLabel) {
       card.appendChild(element(documentRef, 'p', 'risk-source', recommendation.riskSourceLabel));
     }
@@ -93,6 +209,65 @@
       card.appendChild(list(documentRef, recommendation.reasoning, 'reasoning-list'));
     }
     return card;
+  }
+
+  function renderMarketSignals(documentRef, market) {
+    if (!market || !['available', 'blocked', 'unavailable'].includes(market.status)) return null;
+    const section = element(
+      documentRef,
+      'section',
+      `market-signals market-signals--${market.status}`,
+    );
+    section.setAttribute('aria-label', 'Sleeper Watch market signals');
+    section.appendChild(element(documentRef, 'h2', '', 'Sleeper Watch'));
+    section.appendChild(element(documentRef, 'p', 'market-message', market.message));
+    if (market.sourceLabel) {
+      section.appendChild(element(documentRef, 'p', 'market-source', market.sourceLabel));
+    }
+    if (market.methodLabel) {
+      section.appendChild(element(documentRef, 'p', 'market-method', market.methodLabel));
+    }
+    if (market.scope) section.appendChild(element(documentRef, 'p', 'market-scope', market.scope));
+
+    if (market.sleeperWatch?.length) {
+      const watchList = element(documentRef, 'div', 'sleeper-watch-list');
+      for (const sleeper of market.sleeperWatch.slice(0, 5)) {
+        const item = element(documentRef, 'article', 'sleeper-watch-item');
+        const identity = element(documentRef, 'div', 'sleeper-watch-identity');
+        identity.appendChild(element(documentRef, 'strong', '', sleeper.name));
+        identity.appendChild(element(documentRef, 'span', '', sleeper.playerMeta));
+        item.appendChild(identity);
+        if (sleeper.badges?.length) item.appendChild(renderBadges(documentRef, sleeper.badges));
+        item.appendChild(element(documentRef, 'p', 'market-summary', sleeper.summary));
+        if (sleeper.actionLabel) {
+          item.appendChild(element(
+            documentRef,
+            'p',
+            'decision-action',
+            `${sleeper.actionLabel}${sleeper.actionReason ? ` · ${sleeper.actionReason}` : ''}`,
+          ));
+        }
+        if (sleeper.riskCaution) {
+          item.appendChild(element(documentRef, 'p', 'market-risk-caution', sleeper.riskCaution));
+        }
+        watchList.appendChild(item);
+      }
+      section.appendChild(watchList);
+    }
+
+    const explanations = [
+      ['Definitions', market.definitions],
+      ['Trust checks', market.trust],
+      ['Bounded exclusions', market.exclusions],
+    ];
+    for (const [label, values] of explanations) {
+      if (!values?.length) continue;
+      const details = element(documentRef, 'details', 'market-details');
+      details.appendChild(element(documentRef, 'summary', '', label));
+      details.appendChild(list(documentRef, values, 'market-detail-list'));
+      section.appendChild(details);
+    }
+    return section;
   }
 
   function renderAdvisoryCritic(documentRef, critic) {
@@ -167,6 +342,21 @@
 
     if (model.decisionBrief) {
       root.appendChild(renderDecisionBrief(documentRef, model.decisionBrief));
+    }
+
+    const marketSignals = renderMarketSignals(documentRef, model.marketSignals);
+    if (marketSignals) root.appendChild(marketSignals);
+
+    if (model.nextTwoPicksPlan) {
+      root.appendChild(renderNextTwoPicksPlan(documentRef, model.nextTwoPicksPlan));
+    }
+
+    if (model.breakoutEvidenceNotice) {
+      const breakoutNotice = element(documentRef, 'section', 'notice notice--quality');
+      breakoutNotice.setAttribute('aria-label', 'Breakout evidence availability');
+      breakoutNotice.appendChild(element(documentRef, 'h2', '', 'Breakout evidence unavailable'));
+      breakoutNotice.appendChild(element(documentRef, 'p', '', model.breakoutEvidenceNotice));
+      root.appendChild(breakoutNotice);
     }
 
     if (model.ledgerIssues.length) {

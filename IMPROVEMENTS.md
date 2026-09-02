@@ -15,6 +15,9 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Per-league browser storage, durable repair/reset reconciliation, and a cross-browser extension-background lock broker with bounded heartbeats, expiring session fences, and cooperative lease cancellation instead of Firefox content-script Web Locks.
 - Persistent Firefox Draft Assistant sidebar with explicit league selection, shared fail-closed recommendation components, and no Yahoo-page injection or draft actions.
 - Clock-aware at-a-glance decision brief in the sidebar and dashboard with explicit on-clock/next/picks-away states, a primary pick, two immediate fallbacks, and a guarded plain-R refresh shortcut. It uses reliable pick distance and does not invent a countdown timer.
+- Transparent uncalibrated Value, Sleeper Watch, Fade, and take-now/can-wait signals shared by the sidebar and dashboard. They require real ADP plus dated same-season provenance, use league-round thresholds, fail closed for defective ledgers or unresolved drafted identities, preserve raw metrics, surface only fresh attributed risk cautions, and explain bounded exclusions without claiming breakout performance.
+- Bounded deterministic next-two-selections planning that preserves the primary recommendation, proposes position-aware fallback/next-turn combinations, labels actual-ADP availability as uncalibrated, and omits or degrades future projections when ledger, order, freshness, identity, team-count, or ADP evidence is uncertain.
+- Evidence-gated Breakout Watch labels from strict local CSV/JSON projection fields. Labels require fresh, explicitly attributed projected points plus position-appropriate touches, targets, or receptions; use a stable full-ranking same-source cohort; remain uncalibrated; and are never inferred from ADP or headline sentiment. Missing evidence does not degrade ordinary recommendations.
 - Exact-session-scoped personal queues in the dashboard and Firefox sidebar, with bounded reorder/removal controls, conservative drafted-player reconciliation, and no profile-to-mock copying.
 - Full live draft cockpit with position/tier filtering, three-strategy sensitivity, recent position-run alerts, roster-slot gap warnings, position-aware fallback tiers, readiness checks, bounded quick comparison, and value/reach recap.
 - Explicit opt-in, authoritative-ledger-only, deduplicated browser alerts when the user is next or on the clock; notifications remain advisory and never initiate a draft action.
@@ -22,6 +25,7 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Loopback-only local dashboard with a configurable recommendation board, roster and draft-history views, specialist comparisons, critic checks, and data-source diagnostics.
 - Exact-session local DraftSheets/JSON profile import with bounded parsing, private atomic storage, zero Yahoo API calls when a matching profile is available, and current-season per-sport defaults for future profileless recorder drafts without overwriting exact profiles or copying picks.
 - Optional bounded FantasyPros injury/news enrichment with factual bounded-snapshot disclosures, one-request-per-second pacing, a private persistent 95-call UTC-day budget, FantasyPros attribution, rate-limit backoff, freshness, and per-player unknown-data weighting. Normalized base catalog/injury/news snapshots persist in a private SQLite cache (24-hour complete catalog; five-minute partial-catalog/injury/news retry), so fresh data survives restart without another request; failed refreshes can use stale identity data only while recommendation status/headlines remain unknown. Targeted recent-news identity calls are skipped once every requested ranking already has an exact identity, avoiding irrelevant warnings and request-budget use.
+- Official scoring-specific FantasyPros preseason RB/WR/TE projection snapshots with strictly normalized points and opportunity volume, same-season explicit STD/PPR catalog ADP, a 10-second enrichment deadline, private bounded cache migration, stale provenance, and HALF-PPR ADP left unavailable instead of interpolated. This service-layer evidence does not alter deterministic scoring by itself and does not fabricate experience or breakout labels.
 - Optional disabled-by-default Databricks advisory critic with public OSS SDK dependencies, unified authentication, a strict identity-free outbound allowlist, bounded timeout/output, coalescing and in-memory-only caching, fail-open behavior, and no authority to reorder, score, select, or draft a player.
 - Strict local recommendation UI boundary: allowlisted bounded requests, exact saved/Yahoo league resolution, authenticated-team verification, serialized Yahoo calls, post-scoring snapshot revalidation, and no-store responses.
 - Uncalibrated labels for heuristic probabilities and confidence.
@@ -34,16 +38,17 @@ This list separates the delivered live-draft baseline from prioritized follow-up
    - Replay completed drafts and measure top-pick hit rate, regret versus later availability, Brier score, and calibration error.
    - Keep all probability outputs labeled uncalibrated until thresholds are defined and met.
 
-2. **Stable Yahoo player identity**
-   - Capture and propagate only the extracted Yahoo `player_key` identifier where available; never persist or transmit the containing player URL.
-   - Use IDs before conservative normalized-name matching; add fixtures for suffixes, same-surname players, trades, and DST aliases.
+2. **Stable Yahoo player identity — delivered**
+   - The recorder captures and propagates only a validated numeric Yahoo `player_key` where Yahoo exposes one; the containing URL, query parameters, and arbitrary attributes are never persisted or transmitted.
+   - Equal keys take precedence over conservative normalized-name matching, unequal keys fail closed, and one-sided missing keys retain the position/team-aware fallback for old sessions and profiles. Sanitized fixtures cover suffixes, same-surname players, DST aliases, hostile attributes, external hosts, and malformed URLs.
+   - Remaining evidence work: measure key availability across live Yahoo layouts and completed drafts before removing the conservative fallback.
 
 3. **Auditable injury/news enrichment**
    - Delivered the optional provider contract with normalized status, source/item/snapshot timestamps, bounded persistent base snapshots and in-memory targeted identity lookups, a private fail-closed daily request budget, explicit limited-coverage warnings, and unknown-data semantics.
    - Next, evaluate identity coverage, cache hit/refresh behavior, and freshness against completed draft snapshots before treating provider coverage as comprehensive.
 
 4. **Scoring-settings fidelity**
-   - Roster-slot and team-count import is delivered for the local DraftSheets path.
+   - Roster-slot, team-count, and strict `STD`/`HALF`/`PPR` reception-format import are delivered for the local DraftSheets path.
    - Incorporate passing-touchdown values, reception scoring, TE premiums, keeper costs, and custom roster eligibility into value and roster scoring; imported point values are not yet modeled directly.
 
 ## P1 — recommendation quality and latency
@@ -63,8 +68,8 @@ This list separates the delivered live-draft baseline from prioritized follow-up
    - Next, make critic checks actionable rather than merely descriptive.
 
 5. **Contingency depth**
-   - Delivered bounded position-aware fallback tiers from the current trustworthy ranking pool.
-   - Next, evaluate fallback usefulness in draft replays and model opponent-specific depletion before the user's next turn.
+   - Delivered bounded position-aware fallback tiers from the current trustworthy ranking pool and a deterministic primary-now plus next-turn combination planner.
+   - Next, evaluate fallback and two-pick usefulness in draft replays, calibrate any availability estimates, and model opponent-specific depletion before the user's next turn.
 
 ## P2 — operations and usability
 

@@ -32,6 +32,12 @@
     return safeText(value, 16).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16);
   }
 
+  function normalizeYahooPlayerKey(value) {
+    if (typeof value !== 'string') return '';
+    const playerKey = value.trim();
+    return /^[1-9]\d{0,9}\.p\.[1-9]\d{0,9}$/.test(playerKey) ? playerKey : '';
+  }
+
   function playerKey(value) {
     const player = value?.player && typeof value.player === 'object' ? value.player : value;
     const name = normalizedTokens(player?.name || player?.player).join('-');
@@ -52,7 +58,7 @@
       : (typeof value?.overallScore === 'number' && Number.isFinite(value.overallScore)
         ? Math.max(0, Math.min(100, value.overallScore))
         : null);
-    return {
+    const result = {
       key,
       name,
       position,
@@ -60,6 +66,11 @@
       tier: safeText(value?.tier || value?.specialistDetails?.value?.tier, 24) || 'unknown',
       score,
     };
+    const yahooPlayerKey = normalizeYahooPlayerKey(
+      player?.playerKey || player?.player_key || value?.playerKey || value?.player_key,
+    );
+    if (yahooPlayerKey) result.playerKey = yahooPlayerKey;
+    return result;
   }
 
   function sanitizePreferences(value) {
@@ -134,6 +145,11 @@
   }
 
   function samePlayer(candidate, pick) {
+    const candidatePlayerKey = normalizeYahooPlayerKey(
+      candidate?.playerKey || candidate?.player_key,
+    );
+    const pickPlayerKey = normalizeYahooPlayerKey(pick?.playerKey || pick?.player_key);
+    if (candidatePlayerKey && pickPlayerKey) return candidatePlayerKey === pickPlayerKey;
     const left = normalizedTokens(candidate?.name);
     const right = normalizedTokens(pick?.player || pick?.name);
     const candidatePosition = normalizedPosition(candidate?.position);

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
@@ -16,19 +17,25 @@ DEFAULT_SNAPSHOT_CACHE_PATH = (
     Path.home() / ".fantasy-football-mcp" / "fantasypros-snapshots.sqlite3"
 )
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _MAX_SNAPSHOTS = 16
 _MAX_SNAPSHOT_BYTES = 2_000_000
 _MAX_TOTAL_RECORD_BYTES = 8_000_000
 _MAX_DATABASE_BYTES = 16_777_216
 _BUSY_TIMEOUT_MILLISECONDS = 250
-_ENDPOINTS = frozenset({"players", "injuries", "news"})
+_ENDPOINTS = frozenset({"players", "injuries", "news", "projections"})
 _VARIANTS = {
-    "players": frozenset({"catalog"}),
+    "players": frozenset({"catalog", "catalog-season"}),
     "injuries": frozenset({"weekly"}),
     "news": frozenset({"recent"}),
+    "projections": frozenset({"preseason-std", "preseason-half", "preseason-ppr"}),
 }
-_RECORD_LIMITS = {"players": 5_000, "injuries": 2_000, "news": 100}
+_RECORD_LIMITS = {
+    "players": 5_000,
+    "injuries": 2_000,
+    "news": 100,
+    "projections": 5_000,
+}
 _POSITIONS = frozenset({"QB", "RB", "WR", "TE", "K", "DST"})
 _STATUSES = frozenset(
     {
@@ -77,7 +84,14 @@ class FantasyProsSnapshotKey:
         valid = valid and type(self.request_limit) is int and type(self.record_limit) is int
         valid = valid and 1 <= self.record_limit <= _RECORD_LIMITS.get(self.endpoint, 0)
         if self.endpoint == "players":
-            valid = valid and self.season == self.week == self.request_limit == 0
+            if self.variant == "catalog":
+                valid = valid and self.season == self.week == self.request_limit == 0
+            else:
+                valid = (
+                    valid
+                    and 2012 <= self.season <= 2100
+                    and self.week == self.request_limit == 0
+                )
         elif self.endpoint == "injuries":
             valid = (
                 valid
@@ -90,6 +104,13 @@ class FantasyProsSnapshotKey:
                 valid
                 and self.season == self.week == 0
                 and 1 <= self.request_limit <= 100
+            )
+        elif self.endpoint == "projections":
+            valid = (
+                valid
+                and 2012 <= self.season <= 2100
+                and self.week == 0
+                and self.request_limit == 0
             )
         if not valid:
             raise ValueError("invalid FantasyPros snapshot key")
@@ -272,11 +293,36 @@ class FantasyProsSnapshotCache:
     @staticmethod
     def _initialize_schema(connection: sqlite3.Connection) -> None:
         version = connection.execute("PRAGMA user_version").fetchone()
-        if version is None or type(version[0]) is not int or version[0] not in (0, _SCHEMA_VERSION):
+        if version is None or type(version[0]) is not int or version[0] not in (0, 1, 2):
+            raise FantasyProsSnapshotCacheUnavailable
+        if version[0] == 1:
+            with connection:
+                FantasyProsSnapshotCache._create_schema(connection, "snapshots_v2")
+                connection.execute(
+                    """
+                    INSERT INTO snapshots_v2
+                    SELECT endpoint, variant, season, week, request_limit, record_limit,
+                           fetched_at, records_json, truncated, returned_count,
+                           reported_count, reported_limit, public_api_limited
+                    FROM snapshots
+                    """
+                )
+                connection.execute("DROP TABLE snapshots")
+                connection.execute("ALTER TABLE snapshots_v2 RENAME TO snapshots")
+                connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            return
+        FantasyProsSnapshotCache._create_schema(connection, "snapshots")
+        if version[0] == 0:
+            connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            connection.commit()
+
+    @staticmethod
+    def _create_schema(connection: sqlite3.Connection, table: str) -> None:
+        if table not in {"snapshots", "snapshots_v2"}:
             raise FantasyProsSnapshotCacheUnavailable
         connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS snapshots (
+            f"""
+            CREATE TABLE IF NOT EXISTS {table} (
                 endpoint TEXT NOT NULL,
                 variant TEXT NOT NULL,
                 season INTEGER NOT NULL,
@@ -293,14 +339,14 @@ class FantasyProsSnapshotCache:
                 PRIMARY KEY (
                     endpoint, variant, season, week, request_limit, record_limit
                 ),
-                CHECK(endpoint IN ('players', 'injuries', 'news')),
-                CHECK(variant IN ('catalog', 'weekly', 'recent'))
+                CHECK(endpoint IN ('players', 'injuries', 'news', 'projections')),
+                CHECK(variant IN (
+                    'catalog', 'catalog-season', 'weekly', 'recent',
+                    'preseason-std', 'preseason-half', 'preseason-ppr'
+                ))
             ) WITHOUT ROWID
             """
         )
-        if version[0] == 0:
-            connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-            connection.commit()
 
     @classmethod
     def _encode_snapshot(
@@ -390,6 +436,8 @@ class FantasyProsSnapshotCache:
                 cls._validate_injury(copied)
             elif endpoint == "news":
                 cls._validate_news(copied)
+            elif endpoint == "projections":
+                cls._validate_projection(copied)
             else:
                 raise FantasyProsSnapshotCacheUnavailable
             result.append(copied)
@@ -397,9 +445,15 @@ class FantasyProsSnapshotCache:
 
     @classmethod
     def _validate_player(cls, record: dict[str, Any]) -> None:
-        if set(record) != {"id", "name", "position", "team"}:
+        base_fields = {"id", "name", "position", "team"}
+        if set(record) not in (base_fields, base_fields | {"adpStd", "adpPpr"}):
             raise FantasyProsSnapshotCacheUnavailable
         cls._validate_identity_fields(record, allow_empty=False)
+        if "adpStd" in record:
+            for field in ("adpStd", "adpPpr"):
+                value = record[field]
+                if value is not None and not cls._bounded_number(value, 0.01, 10_000.0):
+                    raise FantasyProsSnapshotCacheUnavailable
 
     @classmethod
     def _validate_injury(cls, record: dict[str, Any]) -> None:
@@ -428,6 +482,29 @@ class FantasyProsSnapshotCache:
         if record["category"] not in _NEWS_CATEGORIES:
             raise FantasyProsSnapshotCacheUnavailable
         cls._validate_timestamp(record["publishedAt"], allow_none=False)
+
+    @classmethod
+    def _validate_projection(cls, record: dict[str, Any]) -> None:
+        if set(record) != {
+            "id",
+            "name",
+            "position",
+            "team",
+            "points",
+            "opportunities",
+            "opportunityKind",
+        }:
+            raise FantasyProsSnapshotCacheUnavailable
+        cls._validate_identity_fields(record, allow_empty=False)
+        if record["position"] not in {"RB", "WR", "TE"}:
+            raise FantasyProsSnapshotCacheUnavailable
+        if not cls._bounded_number(record["points"], 0.0, 10_000.0):
+            raise FantasyProsSnapshotCacheUnavailable
+        if not cls._bounded_number(record["opportunities"], 0.0, 10_000.0):
+            raise FantasyProsSnapshotCacheUnavailable
+        expected_kind = "touches" if record["position"] == "RB" else "receptions"
+        if record["opportunityKind"] != expected_kind:
+            raise FantasyProsSnapshotCacheUnavailable
 
     @classmethod
     def _validate_identity_fields(
@@ -477,6 +554,14 @@ class FantasyProsSnapshotCache:
     @staticmethod
     def _bounded_int(value: Any, minimum: int, maximum: int) -> bool:
         return type(value) is int and minimum <= value <= maximum
+
+    @staticmethod
+    def _bounded_number(value: Any, minimum: float, maximum: float) -> bool:
+        return (
+            type(value) in (int, float)
+            and math.isfinite(float(value))
+            and minimum <= float(value) <= maximum
+        )
 
     @staticmethod
     def _bounded_text(value: Any, minimum: int, maximum: int) -> bool:

@@ -48,6 +48,7 @@ def local_profile(league_id: str = "498589", team_id: str = "6") -> dict:
                 "rank": 1,
                 "average_draft_position": 1.5,
                 "bye_week": 6,
+                "player_key": "461.p.33536",
                 "notes": "must not be retained",
             },
             {
@@ -109,6 +110,7 @@ def test_sanitizes_canonical_profile_and_strips_unknown_fields() -> None:
                 "rank": 1,
                 "average_draft_position": 1.5,
                 "bye_week": 6,
+                "player_key": "461.p.33536",
             },
             {
                 "name": "Seattle Seahawks",
@@ -140,6 +142,135 @@ def test_sanitizes_canonical_profile_and_strips_unknown_fields() -> None:
     assert "secret" not in json.dumps(sanitized)
 
 
+def test_sanitizes_explicit_sourced_breakout_evidence() -> None:
+    profile = local_profile()
+    profile["rankings"][0]["breakout_evidence"] = {
+        "source": "Example Projections",
+        "as_of": "2026-08-20",
+        "projected_points": 285.25,
+        "projected_opportunities": 265,
+        "opportunity_kind": "touches",
+        "experience_years": 2,
+    }
+
+    sanitized = sanitize_local_draft_profile(profile)
+
+    assert sanitized["rankings"][0]["breakout_evidence"] == {
+        "source": "Example Projections",
+        "as_of": "2026-08-20",
+        "projected_points": 285.25,
+        "projected_opportunities": 265.0,
+        "opportunity_kind": "touches",
+        "experience_years": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("evidence", "message"),
+    [
+        ({"source": "Example Projections"}, "fields"),
+        (
+            {
+                "source": "https://example.test/?token=secret",
+                "as_of": "2026-08-20",
+                "projected_points": 100,
+                "projected_opportunities": 100,
+                "opportunity_kind": "touches",
+                "experience_years": 2,
+            },
+            "source",
+        ),
+        (
+            {
+                "source": "/Users/private/projections.csv",
+                "as_of": "2026-08-20",
+                "projected_points": 100,
+                "projected_opportunities": 100,
+                "opportunity_kind": "touches",
+                "experience_years": 2,
+            },
+            "source",
+        ),
+        (
+            {
+                "source": "Example Projections",
+                "as_of": "2025-08-20",
+                "projected_points": 100,
+                "projected_opportunities": 100,
+                "opportunity_kind": "touches",
+                "experience_years": 2,
+            },
+            "season",
+        ),
+        (
+            {
+                "source": "Example Projections",
+                "as_of": "2026-08-20",
+                "projected_points": 100,
+                "projected_opportunities": 100,
+                "opportunity_kind": "targets",
+                "experience_years": 2,
+            },
+            "touches",
+        ),
+        (
+            {
+                "source": "Example Projections",
+                "as_of": "2026-08-20",
+                "projected_points": 100,
+                "projected_opportunities": 100,
+                "opportunity_kind": "touches",
+                "experience_years": 2,
+                "private_notes": "do not persist",
+            },
+            "fields",
+        ),
+    ],
+)
+def test_rejects_incomplete_unsafe_or_incompatible_breakout_evidence(
+    evidence: dict, message: str
+) -> None:
+    profile = local_profile()
+    profile["rankings"][0]["breakout_evidence"] = evidence
+
+    with pytest.raises(LocalDraftProfileValidationError, match=message):
+        sanitize_local_draft_profile(profile)
+
+
+def test_optional_scoring_format_is_strict_and_backward_compatible() -> None:
+    without_format = sanitize_local_draft_profile(local_profile())
+    assert "scoringFormat" not in without_format["leagueSettings"]
+
+    profile = local_profile()
+    profile["leagueSettings"]["scoringFormat"] = "HALF"
+    assert sanitize_local_draft_profile(profile)["leagueSettings"]["scoringFormat"] == "HALF"
+
+    profile["leagueSettings"]["scoringFormat"] = "half-ppr"
+    with pytest.raises(LocalDraftProfileValidationError, match="scoringFormat"):
+        sanitize_local_draft_profile(profile)
+
+
+def test_draftsheets_receptions_value_maps_to_explicit_scoring_format() -> None:
+    profile = profile_from_draftsheets_rows(
+        [
+            {
+                "RK": 1,
+                "PLAYER NAME": "Jordan Alpha",
+                "TEAM": "SF",
+                "POS": "RB1",
+            }
+        ],
+        [
+            {"#TEAMS:": 12, "QB:": 1, "RB:": 2, "WR:": 2, "RECEPTIONS:": 0.5},
+        ],
+        draft=draft_identity(),
+        imported_at="2026-09-01T16:45:00Z",
+        season=2026,
+    )
+
+    assert profile["leagueSettings"]["scoringFormat"] == "HALF"
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -153,6 +284,12 @@ def test_sanitizes_canonical_profile_and_strips_unknown_fields() -> None:
         (lambda value: value["rankings"][0].update(position="FLEX"), "position"),
         (lambda value: value["rankings"][0].update(rank=True), "rank"),
         (lambda value: value["rankings"][0].update(team="https://bad"), "team"),
+        (
+            lambda value: value["rankings"][0].update(
+                player_key="461.p.33536?auth=secret"
+            ),
+            "player_key",
+        ),
         (
             lambda value: value["provenance"].update(format="arbitrary-sheet"),
             "provenance.format",
@@ -248,6 +385,40 @@ def test_saves_loads_exact_identity_and_isolates_leagues(tmp_path: Path) -> None
     assert load_local_draft_profile(draft_identity("111", "8"), path) is None
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_profile_storage_round_trip_keeps_player_key_and_breakout_evidence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "private" / "draft-profiles.json"
+    profile = local_profile()
+    profile["rankings"][0]["breakout_evidence"] = {
+        "source": "Example Projections",
+        "as_of": "2026-08-20",
+        "projected_points": 285.25,
+        "projected_opportunities": 265,
+        "opportunity_kind": "touches",
+        "experience_years": 2,
+    }
+
+    saved = save_local_draft_profile(profile, path)
+    loaded = load_local_draft_profile(draft_identity(), path)
+
+    assert loaded == saved
+    assert {
+        "player_key": loaded["rankings"][0]["player_key"],
+        "breakout_evidence": loaded["rankings"][0]["breakout_evidence"],
+    } == {
+        "player_key": "461.p.33536",
+        "breakout_evidence": {
+            "source": "Example Projections",
+            "as_of": "2026-08-20",
+            "projected_points": 285.25,
+            "projected_opportunities": 265.0,
+            "opportunity_kind": "touches",
+            "experience_years": 2,
+        },
+    }
 
 
 def test_lists_privacy_minimal_profile_summaries(tmp_path: Path) -> None:
@@ -859,6 +1030,8 @@ def _xlsx_bytes(
     scoring["R4"] = 1
     scoring["S3"] = "IR:"
     scoring["S4"] = 1
+    scoring["T3"] = "Receptions:"
+    scoring["T4"] = 0.5
     ecr = workbook.create_sheet("ECR")
     ecr.append(
         [
@@ -896,6 +1069,7 @@ def test_parses_bounded_draftsheets_xlsx_without_treating_delta_as_adp() -> None
     ]
     assert all("average_draft_position" not in item for item in profile["rankings"])
     assert profile["provenance"]["asOf"] == "2026-08-31"
+    assert profile["leagueSettings"]["scoringFormat"] == "HALF"
     slots = {
         item["position"]: item["count"] for item in profile["leagueSettings"]["rosterPositions"]
     }
@@ -928,6 +1102,7 @@ def test_xlsx_roster_overrides_replace_conflicting_workbook_values() -> None:
 
     assert profile["leagueSettings"] == {
         "teams": 12,
+        "scoringFormat": "HALF",
         "rosterPositions": [
             {"position": "QB", "count": 1},
             {"position": "RB", "count": 3},

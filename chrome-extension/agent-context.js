@@ -19,6 +19,10 @@
       const value = pick?.[field];
       if (value !== undefined && value !== null && value !== '') result[field] = value;
     }
+    if (
+      typeof pick?.playerKey === 'string' &&
+      /^[1-9]\d{0,9}\.p\.[1-9]\d{0,9}$/.test(pick.playerKey.trim())
+    ) result.playerKey = pick.playerKey.trim();
     return result;
   }
 

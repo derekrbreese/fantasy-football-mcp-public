@@ -6,6 +6,7 @@ import asyncio
 import re
 import unicodedata
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,12 @@ from src.services.local_draft_profile_store import (
     bind_default_local_draft_profile,
     load_local_draft_profile,
 )
+from src.services.yahoo_player_identity import normalize_yahoo_player_key
 
 ToolCaller = Callable[..., Awaitable[dict[str, Any]]]
 _YAHOO_RECOMMENDATION_LOCK = asyncio.Lock()
 _DRAFT_IDENTITY_FIELDS = ("sport", "leagueId", "teamId", "sessionKey")
+_FANTASYPROS_ENRICHMENT_TIMEOUT_SECONDS = 10.0
 _FANTASYPROS_PROVIDER = FantasyProsProvider()
 _DATABRICKS_ADVISORY_CRITIC = DatabricksAdvisoryCritic()
 _FANTASYPROS_FIELDS = (
@@ -43,8 +46,48 @@ _FANTASYPROS_FIELDS = (
     "news_fresh",
     "recentNews",
     "retrievedAt",
+    "projected_points",
+    "projected_opportunities",
+    "projection_opportunity_kind",
+    "projection_source",
+    "projection_season",
+    "projection_scoring",
+    "projection_source_as_of",
+    "projection_fetched_at",
+    "projection_stale",
+    "average_draft_position",
+    "adp_source",
+    "adp_season",
+    "adp_scoring",
+    "adp_source_as_of",
+    "adp_fetched_at",
+    "adp_stale",
 )
 _POSITION_ALIASES = {"DEF": "DST", "D/ST": "DST"}
+
+
+def _sanitize_ranking_player_keys(
+    rankings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep only one canonical Yahoo key and discard untrusted aliases."""
+
+    sanitized = []
+    for ranking in rankings:
+        candidate = dict(ranking)
+        supplied = [
+            candidate.pop(field)
+            for field in ("player_key", "playerKey")
+            if field in candidate
+        ]
+        valid = {
+            player_key
+            for value in supplied
+            if (player_key := normalize_yahoo_player_key(value)) is not None
+        }
+        if len(valid) == 1:
+            candidate["player_key"] = valid.pop()
+        sanitized.append(candidate)
+    return sanitized
 
 
 def _advisory_critic_enabled(critic: Any) -> bool:
@@ -195,6 +238,219 @@ def _same_enrichment_identity(
     )
 
 
+def _resolve_projection_scoring(
+    league_info: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    for field, source in (
+        ("scoringFormat", "leagueSettings.scoringFormat"),
+        ("scoring_format", "league.scoring_format"),
+    ):
+        value = league_info.get(field)
+        if value in {"STD", "HALF", "PPR"}:
+            return str(value), {"value": value, "source": source, "defaulted": False}
+    for field, source in (
+        ("pointsPerReception", "league.pointsPerReception"),
+        ("points_per_reception", "league.points_per_reception"),
+    ):
+        value = league_info.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        scoring = {0.0: "STD", 0.5: "HALF", 1.0: "PPR"}.get(float(value))
+        if scoring is not None:
+            return scoring, {"value": scoring, "source": source, "defaulted": False}
+    return "HALF", {"value": "HALF", "source": "default", "defaulted": True}
+
+
+def _resolve_projection_season(
+    value: Any,
+    *,
+    source: str,
+    current_year: int | None = None,
+) -> tuple[int, dict[str, Any]]:
+    utc_year = current_year if current_year is not None else datetime.now(timezone.utc).year
+    if type(value) is int:
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"\d{4}", value):
+        parsed = int(value)
+    else:
+        parsed = None
+    if parsed is not None and 2012 <= parsed <= utc_year + 1:
+        return parsed, {"value": parsed, "source": source, "defaulted": False}
+    return utc_year, {
+        "value": utc_year,
+        "source": "currentUtcYear",
+        "defaulted": True,
+        "reason": f"{source}_unavailable_or_invalid",
+    }
+
+
+def _safe_projection_evidence(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    result: dict[str, Any] = {}
+    for field in (
+        "status",
+        "source",
+        "season",
+        "week",
+        "scoring",
+        "sourceAsOf",
+        "fetchedAt",
+        "stale",
+        "refreshFailed",
+        "availablePlayers",
+        "experienceYearsAvailable",
+        "returnedCount",
+        "reportedCount",
+        "reportedLimit",
+        "publicApiLimited",
+    ):
+        if field in value and isinstance(value[field], (str, int, bool, type(None))):
+            result[field] = value[field]
+    positions = value.get("positions")
+    if (
+        isinstance(positions, list)
+        and len(positions) <= 3
+        and all(position in {"RB", "WR", "TE"} for position in positions)
+    ):
+        result["positions"] = list(positions)
+    return result
+
+
+def _safe_adp_evidence(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    result: dict[str, Any] = {}
+    for field in (
+        "status",
+        "reason",
+        "source",
+        "season",
+        "scoring",
+        "sourceAsOf",
+        "fetchedAt",
+        "stale",
+        "refreshFailed",
+        "availablePlayers",
+        "publicApiLimited",
+    ):
+        if field in value and isinstance(value[field], (str, int, bool, type(None))):
+            result[field] = value[field]
+    return result
+
+
+def _ranking_declares_adp(value: Mapping[str, Any]) -> bool:
+    """Treat any supported input ADP field as provenance that must not be mixed."""
+
+    return "average_draft_position" in value or "adp" in value
+
+
+def _valid_provider_time(value: Any, season: int) -> bool:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 40
+        or value != value.strip()
+        or re.search(r"[\x00-\x1f\x7f]", value)
+    ):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.year == season
+
+
+def _positive_finite_number(value: Any) -> float | None:
+    if type(value) not in (int, float):
+        return None
+    parsed = float(value)
+    return parsed if 0 < parsed < float("inf") else None
+
+
+def _fantasypros_market_source(
+    original_rankings: list[dict[str, Any]],
+    enriched_rankings: list[dict[str, Any]],
+    enrichment: Mapping[str, Any],
+    *,
+    season: int,
+    scoring: str,
+) -> dict[str, Any] | None:
+    """Return provider market provenance only for one unambiguous ADP source."""
+
+    if scoring not in {"STD", "HALF", "PPR"}:
+        return None
+    if any(_ranking_declares_adp(item) for item in original_rankings):
+        return None
+    evidence = enrichment.get("adpEvidence")
+    if not isinstance(evidence, Mapping):
+        return None
+    fetched_at = evidence.get("fetchedAt")
+    source_as_of = evidence.get("sourceAsOf")
+    available_players = evidence.get("availablePlayers")
+    adp_players = enrichment.get("adpPlayers")
+    if (
+        evidence.get("status") != "available"
+        or evidence.get("source") != "FantasyPros"
+        or type(evidence.get("season")) is not int
+        or evidence.get("season") != season
+        or evidence.get("scoring") != scoring
+        or evidence.get("stale") is not False
+        or not _valid_provider_time(fetched_at, season)
+        or type(available_players) is not int
+        or available_players < 1
+        or type(adp_players) is not int
+        or adp_players < 1
+        or available_players < adp_players
+        or (
+            source_as_of is not None
+            and not _valid_provider_time(source_as_of, season)
+        )
+    ):
+        return None
+
+    provider_rows = [
+        item for item in enriched_rankings if "average_draft_position" in item
+    ]
+    if len(provider_rows) != adp_players:
+        return None
+    for item in provider_rows:
+        if (
+            item.get("identityResolved") is not True
+            or _positive_finite_number(item.get("average_draft_position")) is None
+            or item.get("adp_source") != "FantasyPros"
+            or type(item.get("adp_season")) is not int
+            or item.get("adp_season") != season
+            or item.get("adp_scoring") != scoring
+            or item.get("adp_source_as_of") != source_as_of
+            or item.get("adp_fetched_at") != fetched_at
+            or item.get("adp_stale") is not False
+        ):
+            return None
+    return {
+        "name": "FantasyPros",
+        "season": season,
+        "asOf": fetched_at,
+        "asOfBasis": "retrieved",
+    }
+
+
+def _without_fantasypros_adp(
+    rankings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove provider ADP whose provenance could not be safely established."""
+
+    sanitized: list[dict[str, Any]] = []
+    for ranking in rankings:
+        candidate = {
+            key: value
+            for key, value in ranking.items()
+            if key != "average_draft_position" and not key.startswith("adp_")
+        }
+        sanitized.append(candidate)
+    return sanitized
+
+
 def _merge_fantasypros_updates(
     rankings: list[dict[str, Any]], provider_result: Mapping[str, Any]
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -204,11 +460,22 @@ def _merge_fantasypros_updates(
     resolved = 0
     fresh_injuries = 0
     fresh_news = 0
+    projected = 0
+    adp = 0
+    imported_adp = sum(_ranking_declares_adp(ranking) for ranking in rankings)
     for index, ranking in enumerate(rankings):
         candidate = dict(ranking)
         update = updates[index] if index < len(updates) else None
         if isinstance(update, Mapping) and _same_enrichment_identity(candidate, update):
+            accept_provider_adp = (
+                imported_adp == 0 and update.get("identityResolved") is True
+            )
             for field in _FANTASYPROS_FIELDS:
+                if (
+                    not accept_provider_adp
+                    and (field == "average_draft_position" or field.startswith("adp_"))
+                ):
+                    continue
                 if field in update:
                     candidate[field] = update[field]
             if update.get("identityResolved") is True:
@@ -217,6 +484,10 @@ def _merge_fantasypros_updates(
                 fresh_injuries += 1
             if update.get("news_fresh") is True:
                 fresh_news += 1
+            if "projected_points" in update and "projected_opportunities" in update:
+                projected += 1
+            if accept_provider_adp and "average_draft_position" in update:
+                adp += 1
         merged.append(candidate)
     raw_status = provider_result.get("status")
     status = raw_status if raw_status in {"success", "degraded", "unavailable"} else "unavailable"
@@ -229,6 +500,9 @@ def _merge_fantasypros_updates(
         "identityResolvedPlayers": resolved,
         "freshInjuryPlayers": fresh_injuries,
         "freshNewsPlayers": fresh_news,
+        "projectedPlayers": projected,
+        "adpPlayers": adp,
+        "importedAdpPlayers": imported_adp,
     }
 
 
@@ -236,31 +510,53 @@ async def _enrich_with_fantasypros(
     rankings: list[dict[str, Any]],
     *,
     season: int | None,
+    league_info: Mapping[str, Any],
     provider: Any,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+    projection_scoring, scoring_provenance = _resolve_projection_scoring(league_info)
     try:
-        raw_result = await provider.get_player_updates(
-            rankings,
-            year=season,
-            week=0,
+        raw_result = await asyncio.wait_for(
+            provider.get_player_updates(
+                rankings,
+                year=season,
+                week=0,
+                projection_scoring=projection_scoring,
+            ),
+            timeout=_FANTASYPROS_ENRICHMENT_TIMEOUT_SECONDS,
         )
     except asyncio.CancelledError:
         raise
+    except asyncio.TimeoutError:
+        raw_result = {
+            "status": "unavailable",
+            "provider": "FantasyPros",
+            "players": [],
+            "warnings": [
+                "FantasyPros evidence timed out; missing data remains unknown"
+            ],
+        }
     except Exception:
         raw_result = {
             "status": "unavailable",
             "provider": "FantasyPros",
             "players": [],
-            "warnings": ["FantasyPros injury and news enrichment is temporarily unavailable"],
+            "warnings": ["FantasyPros evidence is temporarily unavailable"],
         }
     if not isinstance(raw_result, Mapping):
         raw_result = {
             "status": "unavailable",
             "provider": "FantasyPros",
             "players": [],
-            "warnings": ["FantasyPros injury and news enrichment is temporarily unavailable"],
+            "warnings": ["FantasyPros evidence is temporarily unavailable"],
         }
     merged, summary = _merge_fantasypros_updates(rankings, raw_result)
+    summary["projectionScoring"] = scoring_provenance
+    projection_evidence = _safe_projection_evidence(raw_result.get("projectionEvidence"))
+    if projection_evidence is not None:
+        summary["projectionEvidence"] = projection_evidence
+    adp_evidence = _safe_adp_evidence(raw_result.get("adpEvidence"))
+    if adp_evidence is not None:
+        summary["adpEvidence"] = adp_evidence
     warnings: list[str] = []
     raw_warnings = raw_result.get("warnings")
     if isinstance(raw_warnings, list):
@@ -269,7 +565,7 @@ async def _enrich_with_fantasypros(
                 warnings.append(warning[:240])
     if summary["status"] == "unavailable" and not warnings:
         warnings.append(
-            "FantasyPros injury and news enrichment is unavailable; missing data remains unknown"
+            "FantasyPros evidence is unavailable; missing data remains unknown"
         )
     return merged, summary, warnings
 
@@ -282,6 +578,24 @@ def _profile_source_label(profile: Mapping[str, Any]) -> str:
     if format_name == "csv":
         return "user-imported rankings CSV"
     return "user-imported rankings profile"
+
+
+def _profile_market_source(profile: Mapping[str, Any], name: str) -> dict[str, Any]:
+    provenance = profile.get("provenance")
+    source_as_of = provenance.get("asOf") if isinstance(provenance, Mapping) else None
+    imported_at = profile.get("importedAt")
+    if isinstance(source_as_of, str) and source_as_of:
+        as_of = source_as_of
+        basis = "source"
+    else:
+        as_of = imported_at if isinstance(imported_at, str) else None
+        basis = "imported"
+    return {
+        "name": name,
+        "season": profile.get("season"),
+        "asOf": as_of,
+        "asOfBasis": basis,
+    }
 
 
 def _resolve_league_key(result: Mapping[str, Any], league_id: str) -> str:
@@ -425,8 +739,10 @@ async def get_live_draft_recommendation(
         league_result: Mapping[str, Any] = league_info
         rankings_source = _profile_source_label(profile)
         league_source = "user-imported league profile"
-        season_value = profile.get("season")
-        season = season_value if isinstance(season_value, int) else None
+        season, season_provenance = _resolve_projection_season(
+            profile.get("season"), source="localProfile.season"
+        )
+        market_source = _profile_market_source(profile, rankings_source)
     else:
         # Keep all Yahoo calls serialized: concurrent 401 responses can race rotating token
         # refreshes. CPU-only scoring starts after releasing the Yahoo boundary.
@@ -469,13 +785,50 @@ async def get_live_draft_recommendation(
         league_info = dict(league_result) if isinstance(league_result, Mapping) else {}
         rankings_source = "Yahoo pre-draft rankings"
         league_source = "Yahoo league info"
-        season = None
+        season, season_provenance = _resolve_projection_season(
+            league_info.get("season"), source="yahooLeagueInfo.season"
+        )
+        market_source = {
+            "name": rankings_source,
+            "season": season,
+            "asOf": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "asOfBasis": "retrieved",
+        }
 
+    rankings = _sanitize_ranking_player_keys(rankings)
+    rankings_before_enrichment = [dict(item) for item in rankings]
     rankings, enrichment, enrichment_warnings = await _enrich_with_fantasypros(
         rankings,
         season=season,
+        league_info=league_info,
         provider=fantasypros_provider or _FANTASYPROS_PROVIDER,
     )
+    enrichment["seasonProvenance"] = season_provenance
+    if season_provenance["defaulted"] is True:
+        enrichment_warnings.append(
+            "FantasyPros season defaulted to the current UTC year because the league "
+            "season was unavailable or invalid"
+        )
+    scoring = enrichment.get("projectionScoring", {}).get("value")
+    provider_market_source = _fantasypros_market_source(
+        rankings_before_enrichment,
+        rankings,
+        enrichment,
+        season=season,
+        scoring=scoring if isinstance(scoring, str) else "",
+    )
+    if provider_market_source is not None:
+        market_source = provider_market_source
+    elif (
+        enrichment.get("adpPlayers", 0) > 0
+        and not any(
+            _ranking_declares_adp(item) for item in rankings_before_enrichment
+        )
+    ):
+        # Provider ADP without fully valid provenance must neither influence scores
+        # nor inherit the label of an unrelated ranking source.
+        rankings = _without_fantasypros_adp(rankings)
+        market_source = None
     engine = LiveDraftRecommendationEngine(simulations=max(0, min(int(simulations), 512)))
     result = await asyncio.to_thread(
         engine.recommend,
@@ -484,6 +837,7 @@ async def get_live_draft_recommendation(
         league_info,
         strategy=strategy,
         count=max(1, min(int(count), 20)),
+        market_source=market_source,
     )
     if isinstance(rankings_result, Mapping) and not rankings:
         ranking_error = rankings_result.get("message") or rankings_result.get("error")

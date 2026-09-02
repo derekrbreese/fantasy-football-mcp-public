@@ -58,6 +58,8 @@
   }
 
   function identityKey(sessionKey, pick) {
+    const playerKey = parser.normalizePlayerKey(pick?.playerKey);
+    if (playerKey) return `${sessionKey}:yahoo-player:${playerKey}`;
     const isUserPick = pick?.isUserPick === true || /^(?:My|Your) Team$/i.test(String(pick?.fantasyTeam || ''));
     const canonicalPick = {
       ...pick,
@@ -76,8 +78,12 @@
     return baseKey;
   }
 
-  function numberedIdentityKey(sessionKey, pick) {
-    return `${Number(pick.pickNumber)}:${identityKey(sessionKey, pick)}`;
+  function sameIdentityObservation(sessionKey, left, right) {
+    const leftPlayerKey = parser.normalizePlayerKey(left?.playerKey);
+    const rightPlayerKey = parser.normalizePlayerKey(right?.playerKey);
+    if (leftPlayerKey && rightPlayerKey) return leftPlayerKey === rightPlayerKey;
+    return identityKey(sessionKey, { ...left, playerKey: undefined }) ===
+      identityKey(sessionKey, { ...right, playerKey: undefined });
   }
 
   function fillMissingPickFields(existing, incoming) {
@@ -125,6 +131,9 @@
 
   function sameNumberObservation(left, right) {
     if (Number(left?.pickNumber) !== Number(right?.pickNumber)) return false;
+    const leftPlayerKey = parser.normalizePlayerKey(left?.playerKey);
+    const rightPlayerKey = parser.normalizePlayerKey(right?.playerKey);
+    if (leftPlayerKey && rightPlayerKey) return leftPlayerKey === rightPlayerKey;
     const leftPosition = normalizedObservedPosition(left?.position);
     const rightPosition = normalizedObservedPosition(right?.position);
     const leftTeam = String(left?.nflTeam || '').toUpperCase();
@@ -220,24 +229,28 @@
     observedNonLedgerPicks,
     timestamp,
   ) {
-    const existingByIdentity = new Map();
-    for (const pick of existing?.picks || []) {
-      if (!hasPickNumber(pick)) continue;
-      const key = numberedIdentityKey(metadata.sessionKey, pick);
-      if (!existingByIdentity.has(key)) existingByIdentity.set(key, []);
-      existingByIdentity.get(key).push(pick);
-    }
+    const unmatchedExistingNumbered = (existing?.picks || [])
+      .filter(hasPickNumber)
+      .map((pick) => ({ ...pick }));
 
     const numberedPicks = (authoritativePicks || []).map((pick) => {
-      const existingMatches = existingByIdentity.get(numberedIdentityKey(metadata.sessionKey, pick));
-      const matched = existingMatches?.shift();
+      const matchedIndex = unmatchedExistingNumbered.findIndex((saved) => (
+        sameNumberObservation(saved, pick)
+      ));
+      const matched = matchedIndex >= 0
+        ? unmatchedExistingNumbered.splice(matchedIndex, 1)[0]
+        : null;
+      const matchedPlayerKey = parser.normalizePlayerKey(matched?.playerKey);
+      const preserveMatchedPlayerKey = (
+        !parser.normalizePlayerKey(pick?.playerKey) && matchedPlayerKey
+      );
       return {
         ...pick,
+        ...(preserveMatchedPlayerKey ? { playerKey: matchedPlayerKey } : {}),
         recordedAt: pick.recordedAt || matched?.recordedAt || timestamp,
       };
     }).sort((left, right) => Number(left.pickNumber) - Number(right.pickNumber));
 
-    const authoritativeIdentities = new Set(numberedPicks.map((pick) => identityKey(metadata.sessionKey, pick)));
     const unnumberedCandidates = [
       ...(existing?.picks || []).filter((pick) => !hasPickNumber(pick)),
       ...(observedNonLedgerPicks || []).filter((pick) => !hasPickNumber(pick)).map((pick) => ({
@@ -247,7 +260,9 @@
     ];
     const unmatchedUnnumbered = parser
       .upsertPicks(metadata.sessionKey, [], unnumberedCandidates)
-      .filter((pick) => !authoritativeIdentities.has(identityKey(metadata.sessionKey, pick)));
+      .filter((pick) => !numberedPicks.some((numbered) => (
+        sameIdentityObservation(metadata.sessionKey, numbered, pick)
+      )));
 
     return {
       ...(existing || {}),

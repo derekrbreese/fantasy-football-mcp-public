@@ -6,6 +6,7 @@
     ['Round', 'roundNumber'],
     ['Round Pick', 'roundPick'],
     ['Player', 'player'],
+    ['Yahoo Player Key', 'playerKey'],
     ['Position', 'position'],
     ['NFL Team', 'nflTeam'],
     ['Fantasy Team', 'fantasyTeam'],

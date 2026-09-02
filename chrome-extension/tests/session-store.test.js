@@ -887,6 +887,113 @@ test('keeps the original timestamp when a later scan enriches a pick', () => {
   assert.equal(session.updatedAt, '2026-08-01T00:01:00.000Z');
 });
 
+test('prefers matching Yahoo player keys and preserves unequal-key observations as duplicates', () => {
+  const metadata = {
+    sport: 'f1', leagueId: '12345678', teamId: '6', sessionKey: 'f1:12345678',
+  };
+  const existing = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    picks: [{
+      pickNumber: 1,
+      player: 'B. Robinson Jr.',
+      position: 'RB',
+      nflTeam: 'WAS',
+      fantasyTeam: 'Team 1',
+      playerKey: '461.p.33536',
+      recordedAt: '2026-08-01T00:00:00.000Z',
+    }],
+  };
+
+  const sameKey = updateDraftSessionFromSecondaryObservations(
+    existing,
+    metadata,
+    [{
+      pickNumber: 1,
+      player: 'Brian Robinson Jr.',
+      position: 'RB',
+      nflTeam: 'WAS',
+      fantasyTeam: 'Team 1',
+      playerKey: '461.p.33536',
+    }],
+    '2026-08-01T00:01:00.000Z',
+  );
+  assert.equal(sameKey.picks.length, 1);
+  assert.equal(sameKey.picks[0].recordedAt, '2026-08-01T00:00:00.000Z');
+
+  const unequalKey = updateDraftSessionFromSecondaryObservations(
+    existing,
+    metadata,
+    [{
+      pickNumber: 1,
+      player: 'B. Robinson Jr.',
+      position: 'RB',
+      nflTeam: 'WAS',
+      fantasyTeam: 'Team 1',
+      playerKey: '461.p.99999',
+    }],
+    '2026-08-01T00:01:00.000Z',
+  );
+  assert.equal(unequalKey.picks.length, 2);
+  assert.deepEqual(
+    unequalKey.picks.map((pick) => pick.playerKey),
+    ['461.p.33536', '461.p.99999'],
+  );
+});
+
+test('authoritative rescans retain a saved Yahoo player key when the matching row omits it', () => {
+  const metadata = {
+    sport: 'f1', leagueId: '12345678', teamId: '6', sessionKey: 'f1:12345678',
+  };
+  const existing = {
+    ...metadata,
+    numberedLedgerAuthoritative: true,
+    picks: [{
+      pickNumber: 1,
+      player: 'Brian Robinson Jr.',
+      position: 'RB',
+      nflTeam: 'WAS',
+      fantasyTeam: 'Team 1',
+      playerKey: '461.p.33536',
+      recordedAt: '2026-08-01T00:00:00.000Z',
+    }],
+  };
+
+  const withoutKey = updateDraftSessionFromAuthoritativeLedger(
+    existing,
+    metadata,
+    [{
+      pickNumber: 1,
+      player: 'Brian Robinson Jr.',
+      position: 'RB',
+      nflTeam: 'WAS',
+      fantasyTeam: 'Team 1',
+    }],
+    [],
+    '2026-08-01T00:01:00.000Z',
+  );
+
+  assert.equal(withoutKey.picks[0].playerKey, '461.p.33536');
+  assert.equal(withoutKey.picks[0].recordedAt, '2026-08-01T00:00:00.000Z');
+
+  const withDifferentValidKey = updateDraftSessionFromAuthoritativeLedger(
+    existing,
+    metadata,
+    [{
+      pickNumber: 1,
+      player: 'Brian Robinson Jr.',
+      position: 'RB',
+      nflTeam: 'WAS',
+      fantasyTeam: 'Team 1',
+      playerKey: '461.p.99999',
+    }],
+    [],
+    '2026-08-01T00:01:00.000Z',
+  );
+
+  assert.equal(withDifferentValidKey.picks[0].playerKey, '461.p.99999');
+});
+
 test('authoritative scan preserves duplicate rows and gaps in server-bound picks until repair', () => {
   const metadata = { sport: 'f1', leagueId: '12345678', teamId: '6', sessionKey: 'f1:12345678' };
   const session = updateDraftSessionFromAuthoritativeLedger(

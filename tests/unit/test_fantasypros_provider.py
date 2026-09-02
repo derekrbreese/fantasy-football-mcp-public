@@ -257,6 +257,478 @@ def source_payloads() -> dict[str, dict[str, Any]]:
     }
 
 
+def _projection_payload(*, scoring: str = "HALF") -> dict[str, Any]:
+    return {
+        "season": "2026",
+        "week": "0",
+        "count": "3",
+        "positions": "RB,WR,TE",
+        "scoring": scoring,
+        "experts": [9, 22],
+        "players": [
+            {
+                "fpid": "101",
+                "name": "Jordan Alpha",
+                "position_id": "RB",
+                "team_id": "SF",
+                "filename": "must-not-escape.php",
+                "stats": {
+                    "points": 201.25,
+                    "points_half": 221.5,
+                    "points_ppr": 241.75,
+                    "rush_att": 181.25,
+                    "rec_rec": 41.5,
+                    "raw_note": "must-not-escape",
+                },
+            },
+            {
+                "fpid": "202",
+                "name": "Case O'Neil",
+                "position_id": "WR",
+                "team_id": "NYJ",
+                "filename": "must-not-escape.php",
+                "stats": {
+                    "points": 155.0,
+                    "points_half": 190.25,
+                    "points_ppr": 225.5,
+                    "rush_att": 2.0,
+                    "rec_rec": 70.5,
+                },
+            },
+            {
+                "fpid": "303",
+                "name": "Invalid Tight End",
+                "position_id": "TE",
+                "team_id": "DAL",
+                "stats": {"points": 99.0, "points_half": 110.0, "points_ppr": 121.0},
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_preseason_projections_use_explicit_contract_and_strict_allowlist(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    now = datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+    source_payloads["projections"] = _projection_payload()
+    source_payloads["players"].update({"season": "2026", "week": "0"})
+    transport = FakeTransport(source_payloads)
+    provider = _provider(api_key="unit-test-secret", transport=transport, clock=lambda: now)
+
+    result = await provider.get_player_updates(
+        [
+            {
+                "name": "Jordan Alpha",
+                "position": "RB",
+                "team": "SF",
+                "fantasypros_id": 101,
+            },
+            {
+                "name": "Case O'Neil",
+                "position": "WR",
+                "team": "NYJ",
+                "fantasypros_id": 202,
+            },
+            {"name": "A Quarterback", "position": "QB", "team": "BUF"},
+        ],
+        year=2026,
+        week=0,
+        projection_scoring="HALF",
+    )
+
+    projection_call = next(call for call in transport.calls if call["url"].endswith("/projections"))
+    assert projection_call["url"] == (
+        "https://api.fantasypros.com/public/v2/json/nfl/2026/projections"
+    )
+    assert projection_call["params"] == {
+        "week": 0,
+        "positions": "RB:WR:TE",
+        "scoring": "HALF",
+    }
+    assert result["projectionEvidence"] == {
+        "status": "available",
+        "source": "FantasyPros",
+        "season": 2026,
+        "week": 0,
+        "positions": ["RB", "WR", "TE"],
+        "scoring": "HALF",
+        "sourceAsOf": None,
+        "fetchedAt": "2026-09-01T16:00:00Z",
+        "stale": False,
+        "refreshFailed": False,
+        "availablePlayers": 2,
+        "experienceYearsAvailable": False,
+        "returnedCount": 3,
+        "reportedCount": 3,
+        "reportedLimit": None,
+        "publicApiLimited": False,
+    }
+    assert result["adpEvidence"]["status"] == "unavailable"
+    assert result["adpEvidence"]["reason"] == "half_ppr_adp_unavailable"
+    expected_projection = {
+        "projected_points": 221.5,
+        "projected_opportunities": 222.75,
+        "projection_opportunity_kind": "touches",
+        "projection_source": "FantasyPros",
+        "projection_season": 2026,
+        "projection_scoring": "HALF",
+        "projection_source_as_of": None,
+        "projection_fetched_at": "2026-09-01T16:00:00Z",
+        "projection_stale": False,
+    }
+    assert {
+        key: result["players"][0][key] for key in expected_projection
+    } == expected_projection
+    assert result["players"][1]["projected_opportunities"] == 70.5
+    assert result["players"][1]["projection_opportunity_kind"] == "receptions"
+    assert "projected_points" not in result["players"][2]
+    serialized = repr(result)
+    for forbidden in (
+        "must-not-escape",
+        "filename",
+        "raw_note",
+        "experience_years",
+        "average_draft_position",
+    ):
+        assert forbidden not in serialized
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scoring", "expected_adp", "expected_status", "expected_reason"),
+    [
+        ("STD", 18.0, "available", None),
+        ("PPR", 23.0, "available", None),
+        ("HALF", None, "unavailable", "half_ppr_adp_unavailable"),
+    ],
+)
+async def test_catalog_adp_uses_only_explicit_scoring_field_and_same_season(
+    source_payloads: dict[str, dict[str, Any]],
+    scoring: str,
+    expected_adp: float | None,
+    expected_status: str,
+    expected_reason: str | None,
+) -> None:
+    source_payloads["players"].update(
+        {
+            "season": "2026",
+            "week": "0",
+            "public_api_limited": True,
+        }
+    )
+    source_payloads["players"]["players"][0].update(
+        {"rank_adp": 18, "rank_adp_ppr": 23, "rank_ecr": 1}
+    )
+    source_payloads["projections"] = _projection_payload(scoring=scoring)
+    result = await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
+    ).get_player_updates(
+        [
+            {
+                "name": "Jordan Alpha",
+                "position": "RB",
+                "team": "SF",
+                "fantasypros_id": 101,
+            }
+        ],
+        year=2026,
+        projection_scoring=scoring,
+    )
+
+    player = result["players"][0]
+    if expected_adp is None:
+        assert "average_draft_position" not in player
+    else:
+        assert player["average_draft_position"] == expected_adp
+        assert player["adp_source"] == "FantasyPros"
+        assert player["adp_season"] == 2026
+        assert player["adp_scoring"] == scoring
+        assert player["adp_source_as_of"] is None
+        assert player["adp_fetched_at"] == "2026-09-01T00:00:00Z"
+        assert player["adp_stale"] is False
+    assert result["adpEvidence"]["status"] == expected_status
+    assert result["adpEvidence"]["reason"] == expected_reason
+    assert result["adpEvidence"]["publicApiLimited"] is True
+    assert "rank_ecr" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_catalog_adp_rejects_unverified_season_without_losing_projections(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    source_payloads["players"].update({"season": "2025", "week": "0"})
+    source_payloads["players"]["players"][0].update({"rank_adp": 18, "rank_adp_ppr": 23})
+    source_payloads["projections"] = _projection_payload(scoring="PPR")
+    result = await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
+    ).get_player_updates(
+        [
+            {
+                "name": "Jordan Alpha",
+                "position": "RB",
+                "team": "SF",
+                "fantasypros_id": 101,
+            }
+        ],
+        year=2026,
+        projection_scoring="PPR",
+    )
+
+    assert result["players"][0]["projected_points"] == 241.75
+    assert "average_draft_position" not in result["players"][0]
+    assert result["adpEvidence"]["status"] == "unavailable"
+    assert result["adpEvidence"]["reason"] == "catalog_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutation", "warning_fragment"),
+    [
+        ({"season": "2025"}, "preseason projections is temporarily unavailable"),
+        ({"week": "1"}, "preseason projections is temporarily unavailable"),
+        ({"scoring": "PPR"}, "preseason projections is temporarily unavailable"),
+        ({"positions": "RB:WR"}, "preseason projections is temporarily unavailable"),
+        ({"positions": "TE,RB,WR"}, "preseason projections is temporarily unavailable"),
+    ],
+)
+async def test_projection_response_scope_mismatch_fails_closed_without_zero_evidence(
+    source_payloads: dict[str, dict[str, Any]],
+    mutation: dict[str, Any],
+    warning_fragment: str,
+) -> None:
+    payload = _projection_payload()
+    payload.update(mutation)
+    source_payloads["projections"] = payload
+    result = await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
+    ).get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
+        year=2026,
+        projection_scoring="HALF",
+    )
+
+    assert any(warning_fragment in warning for warning in result["warnings"])
+    assert result["projectionEvidence"]["status"] == "unavailable"
+    assert "projected_points" not in result["players"][0]
+
+
+@pytest.mark.asyncio
+async def test_projection_snapshot_schema_migration_preserves_existing_snapshots(
+    tmp_path: Path,
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    cache_path = tmp_path / "private" / "fantasypros-snapshots.sqlite3"
+    cache_path.parent.mkdir(mode=0o700)
+    with sqlite3.connect(cache_path) as connection:
+        connection.executescript(
+            """
+            PRAGMA user_version = 1;
+            CREATE TABLE snapshots (
+                endpoint TEXT NOT NULL,
+                variant TEXT NOT NULL,
+                season INTEGER NOT NULL,
+                week INTEGER NOT NULL,
+                request_limit INTEGER NOT NULL,
+                record_limit INTEGER NOT NULL,
+                fetched_at INTEGER NOT NULL,
+                records_json TEXT NOT NULL CHECK(length(records_json) <= 2000000),
+                truncated INTEGER NOT NULL CHECK(truncated IN (0, 1)),
+                returned_count INTEGER NOT NULL CHECK(returned_count BETWEEN 0 AND 100000),
+                reported_count INTEGER CHECK(reported_count BETWEEN 0 AND 10000000),
+                reported_limit INTEGER CHECK(reported_limit BETWEEN 1 AND 100000),
+                public_api_limited INTEGER NOT NULL CHECK(public_api_limited IN (0, 1)),
+                PRIMARY KEY (endpoint, variant, season, week, request_limit, record_limit),
+                CHECK(endpoint IN ('players', 'injuries', 'news')),
+                CHECK(variant IN ('catalog', 'weekly', 'recent'))
+            ) WITHOUT ROWID;
+            """
+        )
+        connection.execute(
+            "INSERT INTO snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "players",
+                "catalog",
+                0,
+                0,
+                0,
+                2500,
+                1788288000,
+                '[{"id":101,"name":"Jordan Alpha","position":"RB","team":"SF"}]',
+                0,
+                1,
+                1,
+                None,
+                0,
+            ),
+        )
+
+    cache = snapshot_cache_module.FantasyProsSnapshotCache(path=cache_path)
+    old_key = snapshot_cache_module.FantasyProsSnapshotKey(
+        "players", "catalog", record_limit=2500
+    )
+    assert cache.load(old_key) is not None
+    projection_key = snapshot_cache_module.FantasyProsSnapshotKey(
+        "projections", "preseason-half", season=2026, week=0, record_limit=2500
+    )
+    cache.save(
+        projection_key,
+        snapshot_cache_module.FantasyProsSnapshot(
+            records=(
+                {
+                    "id": 101,
+                    "name": "Jordan Alpha",
+                    "position": "RB",
+                    "team": "SF",
+                    "points": 221.5,
+                    "opportunities": 222.75,
+                    "opportunityKind": "touches",
+                },
+            ),
+            fetched_at=datetime(2026, 9, 1, 18, 40, tzinfo=timezone.utc),
+            truncated=False,
+            returned_count=1,
+            reported_count=1,
+            reported_limit=None,
+            public_api_limited=False,
+        ),
+    )
+
+    migrated = cache.load(old_key)
+    assert migrated is not None
+    assert migrated.records == (
+        {"id": 101, "name": "Jordan Alpha", "position": "RB", "team": "SF"},
+    )
+    assert cache.load(projection_key) is not None
+    with sqlite3.connect(cache_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("SELECT count(*) FROM snapshots").fetchone()[0] == 2
+
+    source_payloads["projections"] = _projection_payload()
+    transport = FakeTransport(source_payloads)
+    result = await _provider(
+        api_key="secret",
+        transport=transport,
+        snapshot_cache_path=cache_path,
+        clock=lambda: datetime(2026, 9, 1, 18, 41, tzinfo=timezone.utc),
+    ).get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
+        year=2026,
+        projection_scoring="HALF",
+    )
+
+    assert {call["url"].rsplit("/", 1)[-1] for call in transport.calls} == {
+        "injuries",
+        "news",
+    }
+    assert result["players"][0]["identityResolved"] is True
+    assert result["players"][0]["projected_points"] == 221.5
+    assert result["adpEvidence"]["reason"] == "half_ppr_adp_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_projection_and_adp_snapshots_are_private_and_reused_after_restart(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    now = datetime(2026, 9, 1, 16, tzinfo=timezone.utc)
+    source_payloads["players"].update(
+        {"season": "2026", "week": "0", "public_api_limited": True}
+    )
+    source_payloads["players"]["players"][0].update(
+        {"rank_adp": 18, "rank_adp_ppr": 23, "rank_ecr": 1}
+    )
+    source_payloads["projections"] = _projection_payload(scoring="PPR")
+    identity = [
+        {
+            "name": "Jordan Alpha",
+            "position": "RB",
+            "team": "SF",
+            "fantasypros_id": 101,
+        }
+    ]
+    first_transport = FakeTransport(source_payloads)
+    first = await _provider(
+        api_key="first-secret",
+        transport=first_transport,
+        clock=lambda: now,
+    ).get_player_updates(identity, year=2026, projection_scoring="PPR")
+
+    restarted_transport = FakeTransport(source_payloads)
+    restarted = await _provider(
+        api_key="second-secret",
+        transport=restarted_transport,
+        clock=lambda: now,
+    ).get_player_updates(identity, year=2026, projection_scoring="PPR")
+
+    assert len(first_transport.calls) == 4
+    assert restarted_transport.calls == []
+    assert restarted["players"][0]["projected_points"] == 241.75
+    assert restarted["players"][0]["average_draft_position"] == 23.0
+    assert restarted["projectionEvidence"]["status"] == "available"
+    assert restarted["adpEvidence"]["status"] == "available"
+    cache_path = snapshot_cache_module.DEFAULT_SNAPSHOT_CACHE_PATH
+    with sqlite3.connect(cache_path) as connection:
+        rows = connection.execute(
+            "SELECT endpoint, variant, season, records_json FROM snapshots "
+            "WHERE endpoint IN ('players', 'projections') ORDER BY endpoint"
+        ).fetchall()
+    assert {(endpoint, variant, season) for endpoint, variant, season, _ in rows} == {
+        ("players", "catalog-season", 2026),
+        ("projections", "preseason-ppr", 2026),
+    }
+    serialized_rows = repr(rows)
+    assert "rank_ecr" not in serialized_rows
+    assert "filename" not in serialized_rows
+    stored_bytes = cache_path.read_bytes()
+    for forbidden in (b"first-secret", b"second-secret", b"https://", b"x-api-key"):
+        assert forbidden not in stored_bytes
+    assert first["coverage"]["playerCatalog"]["publicApiLimited"] is True
+
+
+@pytest.mark.asyncio
+async def test_projection_refresh_failure_uses_bounded_stale_snapshot_with_provenance(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    current = [datetime(2026, 9, 1, 16, tzinfo=timezone.utc)]
+    source_payloads["players"].update({"season": "2026", "week": "0"})
+    source_payloads["projections"] = _projection_payload()
+    identity = [
+        {
+            "name": "Jordan Alpha",
+            "position": "RB",
+            "team": "SF",
+            "fantasypros_id": 101,
+        }
+    ]
+    await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026, projection_scoring="HALF")
+
+    current[0] += timedelta(days=2)
+    refreshed = deepcopy(source_payloads)
+    refreshed["projections"] = RuntimeError("raw provider failure must not escape")
+    result = await _provider(
+        api_key="secret",
+        transport=FakeTransport(refreshed),
+        clock=lambda: current[0],
+    ).get_player_updates(identity, year=2026, projection_scoring="HALF")
+
+    assert result["projectionEvidence"]["status"] == "stale"
+    assert result["projectionEvidence"]["refreshFailed"] is True
+    assert result["players"][0]["projected_points"] == 221.5
+    assert result["players"][0]["projection_stale"] is True
+    assert any("preseason projections refresh failed" in item for item in result["warnings"])
+    assert "raw provider failure" not in repr(result)
+
+
 @pytest.mark.asyncio
 async def test_provider_uses_official_contract_and_returns_only_allowlisted_fields(
     source_payloads: dict[str, dict[str, Any]],

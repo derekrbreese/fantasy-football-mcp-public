@@ -54,6 +54,54 @@ test('sanitizes exact-session cockpit preferences and bounds private player stat
   assert.throws(() => notificationId('10572539'), /valid Yahoo sessionKey/);
 });
 
+test('uses matching Yahoo keys before names and safely falls back when one side is missing', () => {
+  const keyed = sanitizePreferences({
+    watchlist: [{
+      name: 'Brian Robinson Jr.',
+      position: 'RB',
+      team: 'WAS',
+      playerKey: '461.p.33536',
+    }],
+  }).watchlist;
+  assert.equal(keyed[0].playerKey, '461.p.33536');
+
+  assert.equal(reconcileWatchlist(keyed, [{
+    pickNumber: 20,
+    player: 'B. Robinson Jr.',
+    position: 'RB',
+    nflTeam: 'WAS',
+    playerKey: '461.p.33536',
+  }])[0].drafted, true);
+  assert.equal(reconcileWatchlist(keyed, [{
+    pickNumber: 20,
+    player: 'Brian Robinson Jr.',
+    position: 'RB',
+    nflTeam: 'WAS',
+    playerKey: '461.p.99999',
+  }])[0].drafted, false);
+  assert.equal(reconcileWatchlist(keyed, [{
+    pickNumber: 20,
+    player: 'B. Robinson Jr.',
+    position: 'RB',
+    nflTeam: 'WAS',
+  }])[0].drafted, true);
+});
+
+test('drops malformed Yahoo keys from private cockpit storage', () => {
+  const [candidate] = sanitizePreferences({
+    watchlist: [{
+      name: 'Breece Hall',
+      position: 'RB',
+      team: 'NYJ',
+      playerKey: 'https://evil.test/?player_key=461.p.33536&auth=secret',
+    }],
+  }).watchlist;
+
+  assert.equal(candidate.playerKey, undefined);
+  assert.equal(JSON.stringify(candidate).includes('evil.test'), false);
+  assert.equal(JSON.stringify(candidate).includes('secret'), false);
+});
+
 test('adds, reorders, removes, and reconciles a conservative exact player queue', () => {
   let preferences = sanitizePreferences({});
   preferences = addToWatchlist(preferences, candidates[0]);

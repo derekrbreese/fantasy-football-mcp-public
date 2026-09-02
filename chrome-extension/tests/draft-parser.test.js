@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   buildPickKey,
+  normalizePlayerKey,
   parseDraftUrl,
   parseLiveDraftSnapshot,
   parsePicksPanelSnapshot,
@@ -36,6 +37,7 @@ test('reads a pick from explicit labels and normalizes its values', () => {
       position: 'wr',
       nflTeam: 'cin',
       fantasyTeam: ' Sunday Winners ',
+      playerKey: '461.p.33536',
     },
   });
 
@@ -47,7 +49,23 @@ test('reads a pick from explicit labels and normalizes its values', () => {
     position: 'WR',
     nflTeam: 'CIN',
     fantasyTeam: 'Sunday Winners',
+    playerKey: '461.p.33536',
   });
+});
+
+test('accepts only canonical Yahoo player keys', () => {
+  assert.equal(normalizePlayerKey(' 461.p.33536 '), '461.p.33536');
+  for (const value of [
+    '461.p.0',
+    '461.player.33536',
+    '461.p.33536?auth=secret',
+    'nfl.p.33536',
+    'https://football.fantasysports.yahoo.com/?player_key=461.p.33536',
+    'p.33536',
+    33536,
+  ]) {
+    assert.equal(normalizePlayerKey(value), null);
+  }
 });
 
 test('parses a compact Yahoo-style multiline draft row', () => {
@@ -76,6 +94,7 @@ test('strictly parses one sanitized Yahoo Picks-tab card', () => {
     fantasyTeamText: 'My Team',
     href: 'https://example.test/?auth=secret',
     status: 'Q',
+    playerKey: '461.p.30123',
   }), {
     pickNumber: 3,
     player: 'P. Nacua',
@@ -83,6 +102,7 @@ test('strictly parses one sanitized Yahoo Picks-tab card', () => {
     nflTeam: 'LAR',
     fantasyTeam: 'Your Team',
     isUserPick: true,
+    playerKey: '461.p.30123',
   });
 });
 
@@ -161,6 +181,7 @@ test('parses a Yahoo Round by Round results row', () => {
       pickText: '19',
       playerText: 'S. Barkley\nRB\nPhi\nBye 10',
       fantasyTeamText: 'Your Team',
+      playerKey: '461.p.31860',
     }),
     {
       pickNumber: 19,
@@ -170,6 +191,7 @@ test('parses a Yahoo Round by Round results row', () => {
       nflTeam: 'PHI',
       fantasyTeam: 'Your Team',
       isUserPick: true,
+      playerKey: '461.p.31860',
     },
   );
 });
@@ -243,6 +265,25 @@ test('uses the overall pick as the stable key when it is available', () => {
       fantasyTeam: 'Team One',
     }),
     'f1:12345678:pick:12',
+  );
+});
+
+test('uses a validated Yahoo player key for an unnumbered identity without storing a URL', () => {
+  assert.equal(
+    buildPickKey('f1:12345678', {
+      playerKey: '461.p.33536',
+      player: 'B. Hall',
+      fantasyTeam: 'Team One',
+    }),
+    'f1:12345678:player-key:461.p.33536',
+  );
+  assert.notEqual(
+    buildPickKey('f1:12345678', {
+      playerKey: 'https://evil.test/?player_key=461.p.33536',
+      player: 'B. Hall',
+      fantasyTeam: 'Team One',
+    }),
+    'f1:12345678:player-key:461.p.33536',
   );
 });
 

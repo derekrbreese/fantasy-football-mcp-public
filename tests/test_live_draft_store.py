@@ -148,6 +148,42 @@ def test_strips_unknown_fields_including_credentials(tmp_path: Path) -> None:
     assert "cookie" not in saved["picks"][0]
 
 
+def test_persists_only_a_valid_allowlisted_yahoo_player_key(tmp_path: Path) -> None:
+    context = draft_context()
+    context["picks"][0]["playerKey"] = "461.p.33536"
+    context["picks"][0]["playerUrl"] = (
+        "https://football.fantasysports.yahoo.com/playernote?"
+        "player_key=461.p.33536&auth=secret"
+    )
+
+    saved = save_live_draft(context, tmp_path / "live-drafts.json")
+
+    assert saved["picks"][0]["playerKey"] == "461.p.33536"
+    assert "playerUrl" not in saved["picks"][0]
+    assert "auth" not in json.dumps(saved)
+
+
+@pytest.mark.parametrize(
+    "player_key",
+    [
+        33536,
+        "p.33536",
+        "461.p.0",
+        "nfl.p.33536",
+        "461.p.33536?auth=secret",
+        "https://example.test/?player_key=461.p.33536",
+    ],
+)
+def test_rejects_invalid_yahoo_player_keys(
+    tmp_path: Path, player_key: object
+) -> None:
+    context = draft_context()
+    context["picks"][0]["playerKey"] = player_key
+
+    with pytest.raises(LiveDraftValidationError, match="playerKey"):
+        save_live_draft(context, tmp_path / "live-drafts.json")
+
+
 def test_persists_only_literal_authoritative_capture_blocker(tmp_path: Path) -> None:
     context = draft_context()
     context["captureBlocked"] = True

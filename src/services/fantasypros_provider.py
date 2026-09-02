@@ -1,4 +1,4 @@
-"""Bounded FantasyPros NFL injury and news enrichment.
+"""Bounded FantasyPros NFL injury, news, and preseason projection enrichment.
 
 The provider is deliberately isolated from the deterministic recommendation engine.
 It fetches data in the service layer, keeps only a small allowlist, and uses exact
@@ -42,6 +42,8 @@ _BASE_URL = "https://api.fantasypros.com/public/v2/json/nfl"
 _PROVIDER = "FantasyPros"
 _ENV_NAME = "FANTASY_PROS_API"
 _POSITIONS = frozenset({"QB", "RB", "WR", "TE", "K", "DST"})
+_PROJECTION_POSITIONS = ("RB", "WR", "TE")
+_PROJECTION_SCORING = frozenset({"STD", "HALF", "PPR"})
 _POSITION_ALIASES = {"DEF": "DST", "D/ST": "DST"}
 _NEWS_CATEGORIES = frozenset(
     {"injury", "breaking", "transaction", "rumor", "recap", "news", "commentary"}
@@ -167,6 +169,8 @@ class _CatalogPlayer:
     name: str
     position: str
     team: str
+    adp_std: float | None = None
+    adp_ppr: float | None = None
 
 
 @dataclass(frozen=True)
@@ -187,7 +191,18 @@ class _News:
     published_at: datetime
 
 
-_Record = TypeVar("_Record", _CatalogPlayer, _Injury, _News)
+@dataclass(frozen=True)
+class _Projection:
+    fantasypros_id: int
+    name: str
+    position: str
+    team: str
+    points: float
+    opportunities: float
+    opportunity_kind: str
+
+
+_Record = TypeVar("_Record", _CatalogPlayer, _Injury, _News, _Projection)
 
 
 @dataclass(frozen=True)
@@ -318,7 +333,7 @@ def _fresh(source_time: datetime | None, now: datetime, max_age_seconds: float) 
 
 
 class FantasyProsProvider:
-    """Fetch and conservatively join FantasyPros NFL injury/news evidence."""
+    """Fetch and conservatively join FantasyPros NFL evidence."""
 
     def __init__(
         self,
@@ -332,8 +347,10 @@ class FantasyProsProvider:
         player_cache_ttl_seconds: float = 86_400.0,
         injury_max_age_seconds: float = 86_400.0,
         news_max_age_seconds: float = 172_800.0,
+        projection_cache_ttl_seconds: float = 86_400.0,
         max_players: int = 2_500,
         max_injuries: int = 1_000,
+        max_projections: int = 2_500,
         news_limit: int = 100,
         recent_news_limit: int = 3,
         max_cache_entries: int = 256,
@@ -359,8 +376,13 @@ class FantasyProsProvider:
         )
         self._injury_max_age_seconds = max(0.0, min(float(injury_max_age_seconds), 2_592_000.0))
         self._news_max_age_seconds = max(0.0, min(float(news_max_age_seconds), 604_800.0))
+        self._projection_cache_ttl_seconds = max(
+            self._cache_ttl_seconds,
+            min(float(projection_cache_ttl_seconds), 86_400.0),
+        )
         self._max_players = max(1, min(int(max_players), 5_000))
         self._max_injuries = max(1, min(int(max_injuries), 2_000))
+        self._max_projections = max(1, min(int(max_projections), 5_000))
         self._news_limit = max(1, min(int(news_limit), 100))
         self._recent_news_limit = max(1, min(int(recent_news_limit), 5))
         self._max_cache_entries = max(16, min(int(max_cache_entries), 1_024))
@@ -407,13 +429,16 @@ class FantasyProsProvider:
         *,
         year: int | None = None,
         week: int | None = 0,
+        projection_scoring: str | None = None,
     ) -> dict[str, Any]:
         """Return one allowlisted enrichment record per input player, in input order."""
 
         now = self._now()
         identities = [self._input_identity(player) for player in players]
+        scoring = self._normalize_projection_scoring(projection_scoring)
+        projection_requested = projection_scoring is not None
         if not self._api_key:
-            return {
+            result = {
                 "status": "unavailable",
                 "provider": _PROVIDER,
                 "retrievedAt": _iso(now),
@@ -422,18 +447,43 @@ class FantasyProsProvider:
                     f"FantasyPros enrichment is unavailable because {_ENV_NAME} is not configured"
                 ],
             }
+            if projection_requested:
+                unavailable = _LoadResult((), failed=True, refresh_failed=True)
+                season = self._bounded_year(year, now.year)
+                result["projectionEvidence"] = self._projection_evidence(
+                    unavailable,
+                    season,
+                    scoring,
+                )
+                result["adpEvidence"] = self._adp_evidence(
+                    unavailable,
+                    season,
+                    scoring,
+                    (),
+                )
+            return result
 
         request_year = self._bounded_year(year, now.year)
         request_week = max(0, min(int(week or 0), 25))
+        include_adp = scoring in {"STD", "PPR"}
         async with self._request_lock:
-            catalog_result, injury_result, news_result = await asyncio.gather(
+            loads = [
                 self._safe_load(
                     "players",
                     {"ecr": "included"},
                     "players",
                     self._max_players,
                     self._player_cache_ttl_seconds,
-                    self._catalog_player,
+                    (
+                        lambda raw: self._catalog_player(raw, include_adp=True)
+                        if include_adp
+                        else self._catalog_player(raw)
+                    ),
+                    response_scope=(
+                        {"season": request_year, "week": 0}
+                        if include_adp
+                        else None
+                    ),
                 ),
                 self._safe_load(
                     "injuries",
@@ -455,6 +505,28 @@ class FantasyProsProvider:
                     self._cache_ttl_seconds,
                     self._news,
                 ),
+            ]
+            if scoring is not None:
+                loads.append(
+                    self._safe_load(
+                        f"{request_year}/projections",
+                        {
+                            "week": 0,
+                            "positions": ":".join(_PROJECTION_POSITIONS),
+                            "scoring": scoring,
+                        },
+                        "players",
+                        self._max_projections,
+                        self._projection_cache_ttl_seconds,
+                        lambda raw: self._projection(raw, scoring),
+                    )
+                )
+            load_results = await asyncio.gather(*loads)
+            catalog_result, injury_result, news_result = load_results[:3]
+            projection_result = (
+                load_results[3]
+                if scoring is not None
+                else _LoadResult((), failed=projection_requested, refresh_failed=projection_requested)
             )
 
             catalog = [
@@ -462,8 +534,14 @@ class FantasyProsProvider:
             ]
             injuries = [record for record in injury_result.records if isinstance(record, _Injury)]
             news = [record for record in news_result.records if isinstance(record, _News)]
+            projections = [
+                record for record in projection_result.records if isinstance(record, _Projection)
+            ]
             injury_players = self._injury_players(injuries)
-            base_catalog = list(dict.fromkeys((*catalog, *injury_players)))
+            projection_players = self._projection_players(projections)
+            base_catalog = list(
+                dict.fromkeys((*catalog, *injury_players, *projection_players))
+            )
             base_resolved = self._resolve_identities(identities, base_catalog)
             needs_targeted_identity = any(player is None for player in base_resolved)
             known_ids = {
@@ -501,7 +579,14 @@ class FantasyProsProvider:
                 )
             )
 
-        warnings = self._warnings(catalog_result, injury_result, news_result)
+        warnings = self._warnings(
+            catalog_result,
+            injury_result,
+            news_result,
+            projection_result if projection_requested else None,
+        )
+        if projection_requested and scoring is None:
+            warnings.append("FantasyPros preseason projections require STD, HALF, or PPR scoring")
         targeted_players: list[_CatalogPlayer] = []
         targeted_failed = False
         targeted_incomplete = False
@@ -541,6 +626,7 @@ class FantasyProsProvider:
         resolved = self._resolve_identities(identities, combined_catalog)
         injuries_by_id = self._latest_injuries(injuries)
         news_by_id = self._news_by_id(news)
+        projections_by_id = self._unique_projections(projections)
         enriched = [
             self._enrichment(
                 identity,
@@ -551,10 +637,19 @@ class FantasyProsProvider:
                 injury_snapshot_at=injury_result.fetched_at,
                 injury_snapshot_stale=injury_result.stale,
                 news_snapshot_stale=news_result.stale,
+                projection=projections_by_id.get(player.fantasypros_id) if player else None,
+                projection_season=request_year,
+                projection_scoring=scoring,
+                projection_fetched_at=projection_result.fetched_at,
+                projection_stale=projection_result.stale,
+                adp_scoring=scoring,
+                adp_season=request_year,
+                adp_fetched_at=catalog_result.fetched_at,
+                adp_stale=catalog_result.stale,
             )
             for identity, player in zip(identities, resolved, strict=True)
         ]
-        return {
+        result = {
             "status": "degraded" if warnings else "success",
             "provider": _PROVIDER,
             "retrievedAt": _iso(now),
@@ -571,6 +666,28 @@ class FantasyProsProvider:
                 },
             },
         }
+        if projection_requested:
+            result["coverage"]["projections"] = self._coverage(projection_result)
+            result["projectionEvidence"] = self._projection_evidence(
+                projection_result,
+                request_year,
+                scoring,
+                available_players=len(projections_by_id),
+            )
+            result["adpEvidence"] = self._adp_evidence(
+                catalog_result,
+                request_year,
+                scoring,
+                catalog,
+            )
+        return result
+
+    @staticmethod
+    def _normalize_projection_scoring(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        result = value.strip().upper()
+        return result if result in _PROJECTION_SCORING else None
 
     @staticmethod
     def _bounded_year(value: int | None, current_year: int) -> int:
@@ -588,6 +705,8 @@ class FantasyProsProvider:
         record_limit: int,
         ttl_seconds: float,
         normalizer: Callable[[Mapping[str, Any]], _Record | None],
+        *,
+        response_scope: Mapping[str, int] | None = None,
     ) -> _LoadResult:
         try:
             return await self._load(
@@ -597,6 +716,7 @@ class FantasyProsProvider:
                 record_limit,
                 ttl_seconds,
                 normalizer,
+                response_scope=response_scope,
             )
         except asyncio.CancelledError:
             raise
@@ -617,7 +737,7 @@ class FantasyProsProvider:
         except FantasyProsProviderError as error:
             rate_limited = error.status_code == 429
             self._remember_failure(
-                (endpoint, tuple(sorted(params.items()))),
+                self._cache_key(endpoint, params, response_scope),
                 seconds=(
                     self._rate_limit_backoff_seconds
                     if rate_limited
@@ -632,7 +752,7 @@ class FantasyProsProvider:
                 refresh_failed=True,
             )
         except Exception:
-            self._remember_failure((endpoint, tuple(sorted(params.items()))))
+            self._remember_failure(self._cache_key(endpoint, params, response_scope))
             return _LoadResult((), failed=True, refresh_failed=True)
 
     def _remember_failure(
@@ -721,12 +841,19 @@ class FantasyProsProvider:
         record_limit: int,
         ttl_seconds: float,
         normalizer: Callable[[Mapping[str, Any]], _Record | None],
+        *,
+        response_scope: Mapping[str, int] | None = None,
     ) -> _LoadResult:
-        cache_key = (endpoint, tuple(sorted(params.items())))
+        cache_key = self._cache_key(endpoint, params, response_scope)
         now = self._now()
         cached = self._cache.get(cache_key)
         try:
-            snapshot_key = self._snapshot_key(endpoint, params, record_limit)
+            snapshot_key = self._snapshot_key(
+                endpoint,
+                params,
+                record_limit,
+                response_scope=response_scope,
+            )
         except ValueError:
             snapshot_key = None
         if cached is None and snapshot_key is not None:
@@ -760,6 +887,7 @@ class FantasyProsProvider:
                 headers={"x-api-key": self._api_key},
                 params=params,
             )
+            self._validate_response_scope(endpoint, params, payload, response_scope)
             raw_records = payload.get(array_key)
             if not isinstance(raw_records, list):
                 raise FantasyProsProviderError("FantasyPros returned an invalid response shape")
@@ -811,6 +939,20 @@ class FantasyProsProvider:
         return self._load_result(entry)
 
     @staticmethod
+    def _cache_key(
+        endpoint: str,
+        params: Mapping[str, str | int],
+        response_scope: Mapping[str, int] | None,
+    ) -> tuple[str, tuple[tuple[str, str | int], ...]]:
+        if response_scope is None:
+            scoped_endpoint = endpoint
+        else:
+            scoped_endpoint = (
+                f"{endpoint}@{response_scope.get('season')}:{response_scope.get('week')}"
+            )
+        return scoped_endpoint, tuple(sorted(params.items()))
+
+    @staticmethod
     def _effective_ttl(
         endpoint: str,
         params: Mapping[str, str | int],
@@ -824,6 +966,47 @@ class FantasyProsProvider:
             and entry.reported_count > entry.returned_count
         )
         return min(ttl_seconds, 300.0) if is_partial_catalog else ttl_seconds
+
+    @staticmethod
+    def _validate_response_scope(
+        endpoint: str,
+        params: Mapping[str, str | int],
+        payload: Mapping[str, Any],
+        response_scope: Mapping[str, int] | None,
+    ) -> None:
+        if endpoint == "players" and response_scope is not None:
+            if (
+                payload.get("sport") != "NFL"
+                or str(payload.get("season")) != str(response_scope.get("season"))
+                or str(payload.get("week")) != str(response_scope.get("week"))
+            ):
+                raise FantasyProsProviderError("FantasyPros returned an invalid response scope")
+            return
+        match = re.fullmatch(r"(\d{4})/projections", endpoint)
+        if match is None:
+            return
+        expected_year = int(match.group(1))
+        expected_scoring = params.get("scoring")
+        if (
+            str(payload.get("season")) != str(expected_year)
+            or str(payload.get("week")) != "0"
+            or payload.get("scoring") != expected_scoring
+            or FantasyProsProvider._projection_positions(payload.get("positions"))
+            != _PROJECTION_POSITIONS
+        ):
+            raise FantasyProsProviderError("FantasyPros returned an invalid response scope")
+
+    @staticmethod
+    def _projection_positions(value: Any) -> tuple[str, ...] | None:
+        if not isinstance(value, str):
+            return None
+        has_colon = ":" in value
+        has_comma = "," in value
+        if has_colon == has_comma:
+            return None
+        delimiter = ":" if has_colon else ","
+        positions = tuple(part.strip() for part in value.split(delimiter))
+        return positions if positions == _PROJECTION_POSITIONS else None
 
     def _remember_cache_entry(
         self,
@@ -885,8 +1068,22 @@ class FantasyProsProvider:
         endpoint: str,
         params: Mapping[str, str | int],
         record_limit: int,
+        *,
+        response_scope: Mapping[str, int] | None = None,
     ) -> FantasyProsSnapshotKey | None:
         if endpoint == "players" and params == {"ecr": "included"}:
+            if response_scope is not None:
+                season = response_scope.get("season")
+                week = response_scope.get("week")
+                if type(season) is not int or week != 0:
+                    return None
+                return FantasyProsSnapshotKey(
+                    "players",
+                    "catalog-season",
+                    season=season,
+                    week=0,
+                    record_limit=record_limit,
+                )
             return FantasyProsSnapshotKey("players", "catalog", record_limit=record_limit)
         if endpoint == "injuries" and set(params) == {
             "year",
@@ -916,6 +1113,26 @@ class FantasyProsProvider:
                 "news",
                 "recent",
                 request_limit=request_limit,
+                record_limit=record_limit,
+            )
+        projection_match = re.fullmatch(r"(\d{4})/projections", endpoint)
+        if projection_match is not None and set(params) == {
+            "week",
+            "positions",
+            "scoring",
+        }:
+            scoring = params.get("scoring")
+            if (
+                params.get("week") != 0
+                or params.get("positions") != ":".join(_PROJECTION_POSITIONS)
+                or scoring not in _PROJECTION_SCORING
+            ):
+                return None
+            return FantasyProsSnapshotKey(
+                "projections",
+                f"preseason-{str(scoring).lower()}",
+                season=int(projection_match.group(1)),
+                week=0,
                 record_limit=record_limit,
             )
         return None
@@ -975,16 +1192,20 @@ class FantasyProsProvider:
         records: Sequence[Any],
     ) -> tuple[dict[str, Any], ...]:
         if endpoint == "players":
-            return tuple(
-                {
+            result: list[dict[str, Any]] = []
+            for record in records:
+                if not isinstance(record, _CatalogPlayer):
+                    continue
+                stored = {
                     "id": record.fantasypros_id,
                     "name": record.name,
                     "position": record.position,
                     "team": record.team,
                 }
-                for record in records
-                if isinstance(record, _CatalogPlayer)
-            )
+                if record.adp_std is not None or record.adp_ppr is not None:
+                    stored.update({"adpStd": record.adp_std, "adpPpr": record.adp_ppr})
+                result.append(stored)
+            return tuple(result)
         if endpoint == "injuries":
             return tuple(
                 {
@@ -1009,6 +1230,20 @@ class FantasyProsProvider:
                 for record in records
                 if isinstance(record, _News)
             )
+        if endpoint == "projections":
+            return tuple(
+                {
+                    "id": record.fantasypros_id,
+                    "name": record.name,
+                    "position": record.position,
+                    "team": record.team,
+                    "points": record.points,
+                    "opportunities": record.opportunities,
+                    "opportunityKind": record.opportunity_kind,
+                }
+                for record in records
+                if isinstance(record, _Projection)
+            )
         return ()
 
     @staticmethod
@@ -1023,6 +1258,8 @@ class FantasyProsProvider:
                     str(record["name"]),
                     str(record["position"]),
                     str(record["team"]),
+                    FantasyProsProvider._optional_projection_number(record.get("adpStd")),
+                    FantasyProsProvider._optional_projection_number(record.get("adpPpr")),
                 )
                 for record in records
             )
@@ -1053,17 +1290,43 @@ class FantasyProsProvider:
                     )
                 )
             return tuple(result)
+        if endpoint == "projections":
+            return tuple(
+                _Projection(
+                    int(record["id"]),
+                    str(record["name"]),
+                    str(record["position"]),
+                    str(record["team"]),
+                    float(record["points"]),
+                    float(record["opportunities"]),
+                    str(record["opportunityKind"]),
+                )
+                for record in records
+            )
         raise ValueError("invalid cached endpoint")
 
     @staticmethod
-    def _catalog_player(raw: Mapping[str, Any]) -> _CatalogPlayer | None:
+    def _catalog_player(
+        raw: Mapping[str, Any], *, include_adp: bool = False
+    ) -> _CatalogPlayer | None:
         fantasypros_id = _positive_int(raw.get("player_id"))
         name = _safe_text(raw.get("player_name"), 120)
         position = _position(raw.get("position_id"))
         team = _team(raw.get("team_id"))
         if fantasypros_id is None or not name or not position or not team:
             return None
-        return _CatalogPlayer(fantasypros_id, name, position, team)
+        return _CatalogPlayer(
+            fantasypros_id,
+            name,
+            position,
+            team,
+            FantasyProsProvider._positive_projection_number(raw.get("rank_adp"))
+            if include_adp
+            else None,
+            FantasyProsProvider._positive_projection_number(raw.get("rank_adp_ppr"))
+            if include_adp
+            else None,
+        )
 
     @staticmethod
     def _injury(raw: Mapping[str, Any]) -> _Injury | None:
@@ -1094,6 +1357,71 @@ class FantasyProsProvider:
         )
 
     @staticmethod
+    def _projection(raw: Mapping[str, Any], scoring: str) -> _Projection | None:
+        fantasypros_id = _positive_int(raw.get("fpid"))
+        name = _safe_text(raw.get("name"), 120)
+        position = _position(raw.get("position_id"))
+        team = _team(raw.get("team_id"))
+        raw_stats = raw.get("stats")
+        if (
+            fantasypros_id is None
+            or not name
+            or position not in _PROJECTION_POSITIONS
+            or not team
+            or not isinstance(raw_stats, Mapping)
+        ):
+            return None
+        stats = raw_stats
+        points_field = {"STD": "points", "HALF": "points_half", "PPR": "points_ppr"}.get(
+            scoring
+        )
+        points = FantasyProsProvider._projection_number(stats.get(points_field))
+        receptions = FantasyProsProvider._projection_number(stats.get("rec_rec"))
+        if points is None or receptions is None:
+            return None
+        if position == "RB":
+            rush_attempts = FantasyProsProvider._projection_number(stats.get("rush_att"))
+            if rush_attempts is None:
+                return None
+            opportunities = rush_attempts + receptions
+            opportunity_kind = "touches"
+        else:
+            opportunities = receptions
+            opportunity_kind = "receptions"
+        if opportunities > 10_000.0:
+            return None
+        return _Projection(
+            fantasypros_id,
+            name,
+            position,
+            team,
+            points,
+            opportunities,
+            opportunity_kind,
+        )
+
+    @staticmethod
+    def _projection_number(value: Any) -> float | None:
+        if type(value) not in (int, float):
+            return None
+        result = float(value)
+        return result if 0.0 <= result <= 10_000.0 and result == result else None
+
+    @staticmethod
+    def _positive_projection_number(value: Any) -> float | None:
+        result = FantasyProsProvider._projection_number(value)
+        return result if result is not None and result > 0.0 else None
+
+    @staticmethod
+    def _optional_projection_number(value: Any) -> float | None:
+        if value is None:
+            return None
+        result = FantasyProsProvider._positive_projection_number(value)
+        if result is None:
+            raise ValueError("invalid cached ADP")
+        return result
+
+    @staticmethod
     def _input_identity(raw: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "name": _safe_text(raw.get("name"), 120),
@@ -1108,10 +1436,11 @@ class FantasyProsProvider:
     def _resolve_identities(
         identities: Sequence[Mapping[str, Any]], catalog: Sequence[_CatalogPlayer]
     ) -> list[_CatalogPlayer | None]:
-        by_id = {player.fantasypros_id: player for player in catalog}
+        by_id: dict[int, _CatalogPlayer] = {}
         by_identity: dict[tuple[str, str, str], list[_CatalogPlayer]] = defaultdict(list)
         dst_by_team: dict[str, list[_CatalogPlayer]] = defaultdict(list)
         for player in catalog:
+            by_id.setdefault(player.fantasypros_id, player)
             by_identity[(_name_key(player.name), player.position, player.team)].append(player)
             if player.position == "DST":
                 dst_by_team[player.team].append(player)
@@ -1137,9 +1466,9 @@ class FantasyProsProvider:
             matches = by_identity.get((name, position, team), []) if name else []
             if not matches and position == "DST" and team:
                 matches = dst_by_team.get(team, [])
-            unique_matches = {
-                match.fantasypros_id: match for match in matches
-            }
+            unique_matches: dict[int, _CatalogPlayer] = {}
+            for match in matches:
+                unique_matches.setdefault(match.fantasypros_id, match)
             result.append(next(iter(unique_matches.values())) if len(unique_matches) == 1 else None)
         return result
 
@@ -1164,6 +1493,18 @@ class FantasyProsProvider:
         ]
 
     @staticmethod
+    def _projection_players(projections: Sequence[_Projection]) -> list[_CatalogPlayer]:
+        return [
+            _CatalogPlayer(
+                projection.fantasypros_id,
+                projection.name,
+                projection.position,
+                projection.team,
+            )
+            for projection in projections
+        ]
+
+    @staticmethod
     def _news_by_id(news: Sequence[_News]) -> dict[int, list[_News]]:
         result: dict[int, list[_News]] = defaultdict(list)
         for item in news:
@@ -1171,6 +1512,17 @@ class FantasyProsProvider:
         for items in result.values():
             items.sort(key=lambda item: item.published_at, reverse=True)
         return dict(result)
+
+    @staticmethod
+    def _unique_projections(projections: Sequence[_Projection]) -> dict[int, _Projection]:
+        grouped: dict[int, list[_Projection]] = defaultdict(list)
+        for projection in projections:
+            grouped[projection.fantasypros_id].append(projection)
+        return {
+            fantasypros_id: records[0]
+            for fantasypros_id, records in grouped.items()
+            if len(records) == 1
+        }
 
     def _enrichment(
         self,
@@ -1183,6 +1535,15 @@ class FantasyProsProvider:
         injury_snapshot_at: datetime | None,
         injury_snapshot_stale: bool,
         news_snapshot_stale: bool,
+        projection: _Projection | None,
+        projection_season: int,
+        projection_scoring: str | None,
+        projection_fetched_at: datetime | None,
+        projection_stale: bool,
+        adp_scoring: str | None,
+        adp_season: int,
+        adp_fetched_at: datetime | None,
+        adp_stale: bool,
     ) -> dict[str, Any]:
         if player is None:
             return self._unknown_player(identity, now)
@@ -1232,6 +1593,43 @@ class FantasyProsProvider:
                 }
                 for item in fresh_news
             ]
+        if (
+            projection is not None
+            and projection_scoring is not None
+            and projection.fantasypros_id == player.fantasypros_id
+        ):
+            result.update(
+                {
+                    "projected_points": projection.points,
+                    "projected_opportunities": projection.opportunities,
+                    "projection_opportunity_kind": projection.opportunity_kind,
+                    "projection_source": _PROVIDER,
+                    "projection_season": projection_season,
+                    "projection_scoring": projection_scoring,
+                    "projection_source_as_of": None,
+                    "projection_fetched_at": _iso(projection_fetched_at),
+                    "projection_stale": projection_stale,
+                }
+            )
+        adp = (
+            player.adp_std
+            if adp_scoring == "STD"
+            else player.adp_ppr
+            if adp_scoring == "PPR"
+            else None
+        )
+        if adp is not None:
+            result.update(
+                {
+                    "average_draft_position": adp,
+                    "adp_source": _PROVIDER,
+                    "adp_season": adp_season,
+                    "adp_scoring": adp_scoring,
+                    "adp_source_as_of": None,
+                    "adp_fetched_at": _iso(adp_fetched_at),
+                    "adp_stale": adp_stale,
+                }
+            )
         return result
 
     @staticmethod
@@ -1264,8 +1662,13 @@ class FantasyProsProvider:
         catalog: _LoadResult,
         injuries: _LoadResult,
         news: _LoadResult,
+        projections: _LoadResult | None = None,
     ) -> list[str]:
         results = (
+            ("player catalog", catalog),
+            ("injuries", injuries),
+            ("news", news),
+        ) + (("preseason projections", projections),) if projections is not None else (
             ("player catalog", catalog),
             ("injuries", injuries),
             ("news", news),
@@ -1305,6 +1708,79 @@ class FantasyProsProvider:
             ):
                 warnings.append(f"FantasyPros {label} coverage is limited by the public API")
         return warnings
+
+    @staticmethod
+    def _projection_evidence(
+        result: _LoadResult,
+        season: int,
+        scoring: str | None,
+        *,
+        available_players: int = 0,
+    ) -> dict[str, Any]:
+        status = "unavailable"
+        if result.stale and available_players:
+            status = "stale"
+        elif not result.failed and available_players:
+            status = "available"
+        return {
+            "status": status,
+            "source": _PROVIDER,
+            "season": season,
+            "week": 0,
+            "positions": list(_PROJECTION_POSITIONS),
+            "scoring": scoring,
+            "sourceAsOf": None,
+            "fetchedAt": _iso(result.fetched_at),
+            "stale": result.stale,
+            "refreshFailed": result.refresh_failed,
+            "availablePlayers": available_players,
+            "experienceYearsAvailable": False,
+            "returnedCount": result.returned_count,
+            "reportedCount": result.reported_count,
+            "reportedLimit": result.reported_limit,
+            "publicApiLimited": result.public_api_limited,
+        }
+
+    @staticmethod
+    def _adp_evidence(
+        result: _LoadResult,
+        season: int,
+        scoring: str | None,
+        catalog: Sequence[_CatalogPlayer],
+    ) -> dict[str, Any]:
+        if scoring == "HALF":
+            reason = "half_ppr_adp_unavailable"
+            available = 0
+        elif scoring not in {"STD", "PPR"}:
+            reason = "scoring_unavailable"
+            available = 0
+        else:
+            values = (
+                (player.adp_std if scoring == "STD" else player.adp_ppr)
+                for player in catalog
+            )
+            available = sum(value is not None for value in values)
+            reason = None if available else (
+                "catalog_unavailable" if result.failed else "explicit_adp_field_unavailable"
+            )
+        status = "unavailable"
+        if result.stale and available:
+            status = "stale"
+        elif not result.failed and available:
+            status = "available"
+        return {
+            "status": status,
+            "reason": reason,
+            "source": _PROVIDER,
+            "season": season,
+            "scoring": scoring,
+            "sourceAsOf": None,
+            "fetchedAt": _iso(result.fetched_at),
+            "stale": result.stale,
+            "refreshFailed": result.refresh_failed,
+            "availablePlayers": available,
+            "publicApiLimited": result.public_api_limited,
+        }
 
     @staticmethod
     def _daily_budget_warning(results: Sequence[_LoadResult]) -> str | None:

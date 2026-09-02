@@ -200,6 +200,8 @@ button:disabled { cursor: wait; opacity: 0.58; }
 .assistant-status,
 .draft-context,
 .decision-brief,
+.market-signals,
+.two-pick-plan,
 .notice,
 .no-autodraft { grid-column: 1 / -1; }
 .assistant-status,
@@ -231,6 +233,41 @@ button:disabled { cursor: wait; opacity: 0.58; }
 .fallback-item { display: grid; min-width: 150px; padding: 8px 10px; border-radius: 8px; background: var(--panel-raised); }
 .fallback-item strong { overflow-wrap: anywhere; }
 .fallback-item small { margin-top: 2px; color: var(--muted); }
+.decision-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.decision-primary .decision-badges { grid-column: 1 / -1; margin-top: 4px; }
+.decision-badge { padding: 4px 7px; border: 1px solid #42604f; border-radius: 999px; color: var(--mint); background: rgba(105, 213, 155, 0.08); font-size: 0.68rem; font-weight: 800; }
+.decision-badge--sleeper-watch { border-color: #7d5c96; color: #e6c9fa; background: rgba(125, 92, 150, 0.16); }
+.decision-badge--fade { border-color: #6b5831; color: var(--amber); background: rgba(107, 88, 49, 0.16); }
+.decision-action { margin: 8px 0 0; color: var(--mint); font-size: 0.74rem; line-height: 1.4; overflow-wrap: anywhere; }
+.decision-action--primary { align-self: center; justify-self: end; margin-top: 4px; font-weight: 850; }
+.market-signals { grid-column: 1 / -1; padding: 17px; border: 1px solid #42604f; border-radius: 12px; background: #0d1812; }
+.market-signals--blocked { border-color: #743e3a; }
+.market-signals--unavailable { border-color: #6b5831; }
+.market-signals h2 { margin: 0; font-size: 1.05rem; }
+.market-message { margin: 6px 0 0; font-size: 0.82rem; font-weight: 750; }
+.market-source, .market-method, .market-scope { margin: 5px 0 0; color: var(--muted); font-size: 0.7rem; line-height: 1.45; overflow-wrap: anywhere; }
+.sleeper-watch-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; margin-top: 12px; }
+.sleeper-watch-item { padding: 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-raised); }
+.sleeper-watch-identity { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; }
+.sleeper-watch-identity strong { overflow-wrap: anywhere; }
+.sleeper-watch-identity span { color: var(--muted); font-size: 0.7rem; white-space: nowrap; }
+.market-summary { margin: 7px 0 0; color: #cfdbd4; font-size: 0.76rem; line-height: 1.4; }
+.market-risk-caution { margin: 7px 0 0; color: #ffc2be; font-size: 0.74rem; font-weight: 750; line-height: 1.4; overflow-wrap: anywhere; }
+.market-details { margin-top: 9px; color: var(--muted); font-size: 0.74rem; }
+.market-details summary { cursor: pointer; color: var(--text); font-weight: 800; }
+.market-detail-list { margin: 7px 0 0; padding-left: 19px; line-height: 1.5; overflow-wrap: anywhere; }
+.two-pick-plan { grid-column: 1 / -1; padding: 17px; border: 1px solid #42604f; border-radius: 12px; background: #0d1812; }
+.two-pick-plan--degraded { border-color: #6b5831; }
+.two-pick-plan h2 { margin: 0 0 7px; font-size: 1rem; }
+.two-pick-status { margin: 0; color: var(--mint); font-size: 0.72rem; font-weight: 850; letter-spacing: 0.06em; text-transform: uppercase; }
+.two-pick-plan--degraded .two-pick-status { color: var(--amber); }
+.two-pick-summary, .two-pick-order { margin: 6px 0 0; color: var(--muted); font-size: 0.8rem; line-height: 1.45; }
+.two-pick-primary { margin: 10px 0 0; font-weight: 800; overflow-wrap: anywhere; }
+.two-pick-fallbacks, .two-pick-reasons, .two-pick-uncertainty-list { margin: 7px 0 0; padding-left: 20px; color: #cfdbd4; font-size: 0.78rem; line-height: 1.45; }
+.two-pick-combinations, .two-pick-uncertainties { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.two-pick-combinations h3, .two-pick-uncertainties h3 { margin: 0; font-size: 0.82rem; }
+.two-pick-combination { margin-top: 8px; padding: 10px; border-radius: 8px; background: var(--panel-raised); }
+.two-pick-availability { margin: 4px 0 0; color: var(--lime); font-size: 0.75rem; }
 .notice h2 { margin-bottom: 7px; font-size: 0.95rem; }
 .notice--blocked { border-color: #743e3a; color: #ffc2be; background: rgba(116, 62, 58, 0.18); }
 .notice--quality { border-color: #6b5831; color: #ffe2a6; background: rgba(107, 88, 49, 0.16); }
@@ -247,6 +284,10 @@ button:disabled { cursor: wait; opacity: 0.58; }
 .player-meta, .value-label { color: var(--muted); font-size: 0.75rem; }
 .player-meta { margin: 2px 0 0; }
 .value-label { margin: 9px 0 0; }
+.breakout-watch { margin-top: 10px; padding: 9px; border: 1px solid #42604f; border-radius: 8px; background: rgba(105, 213, 155, 0.08); }
+.breakout-label { color: var(--lime); font-size: 0.72rem; }
+.breakout-detail, .breakout-method { margin: 4px 0 0; color: #cfdbd4; font-size: 0.7rem; line-height: 1.4; overflow-wrap: anywhere; }
+.breakout-method { color: var(--muted); }
 .score { color: var(--mint); font-size: 0.78rem; }
 .recommendation-metrics { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
 .metric { min-width: 0; padding: 5px 7px; border-radius: 7px; color: #e3f6ea; background: var(--panel-raised); font-size: 0.68rem; line-height: 1.25; }

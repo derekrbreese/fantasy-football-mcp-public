@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+from src.services.yahoo_player_identity import normalize_yahoo_player_key
+
 DEFAULT_STORE_PATH = Path.home() / ".fantasy-football-mcp" / "live-drafts.json"
 MAX_PICKS = 500
 _STORE_LOCK = threading.Lock()
@@ -74,6 +76,12 @@ def _sanitize_pick(value: Any) -> Dict[str, Any]:
         text = _safe_optional_string(value.get(field), field)
         if text is not None:
             pick[field] = text
+
+    if value.get("playerKey") not in (None, ""):
+        player_key = normalize_yahoo_player_key(value.get("playerKey"))
+        if player_key is None:
+            raise LiveDraftValidationError("playerKey has an invalid format")
+        pick["playerKey"] = player_key
 
     if "player" not in pick:
         raise LiveDraftValidationError("each pick must include a player")

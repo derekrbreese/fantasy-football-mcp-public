@@ -41,9 +41,9 @@ test('parses a DraftSheets ECR CSV locally and allowlists ranking fields', () =>
 
 test('normalizes generic CSV aliases and optional ADP without inventing missing values', () => {
   const parsed = parseDraftProfileFile([
-    'Rank,Name,Position,NFL Team,ADP,Bye',
-    '1,Player One,QB,buf,3.25,7',
-    '2,Player Two,WR,,,',
+    'Rank,Name,Position,NFL Team,ADP,Bye,Yahoo Player Key',
+    '1,Player One,QB,buf,3.25,7,461.p.33536',
+    '2,Player Two,WR,,,,',
   ].join('\n'), 'board.CSV');
 
   assert.equal(parsed.format, 'csv');
@@ -55,9 +55,62 @@ test('normalizes generic CSV aliases and optional ADP without inventing missing 
       rank: 1,
       average_draft_position: 3.25,
       bye_week: 7,
+      player_key: '461.p.33536',
     },
     { name: 'Player Two', position: 'WR', rank: 2 },
   ]);
+});
+
+test('parses only complete sourced breakout evidence from generic CSV', () => {
+  const parsed = parseDraftProfileFile([
+    'Rank,Name,Position,NFL Team,Projection Source,Projection As Of,Projected Points,Projected Opportunities,Opportunity Kind,Experience Years,Private Notes',
+    '1,Young Runner,RB,buf,Example Projections,2026-08-20,245.5,270,touches,2,manager secret',
+    '2,Plain Receiver,WR,sea,,,,,,,private chat',
+  ].join('\n'), 'board.csv');
+
+  assert.deepEqual(parsed.rankings, [
+    {
+      name: 'Young Runner',
+      position: 'RB',
+      team: 'BUF',
+      rank: 1,
+      breakout_evidence: {
+        source: 'Example Projections',
+        as_of: '2026-08-20',
+        projected_points: 245.5,
+        projected_opportunities: 270,
+        opportunity_kind: 'touches',
+        experience_years: 2,
+      },
+    },
+    { name: 'Plain Receiver', position: 'WR', team: 'SEA', rank: 2 },
+  ]);
+  assert.equal(JSON.stringify(parsed).includes('secret'), false);
+  assert.equal(JSON.stringify(parsed).includes('chat'), false);
+});
+
+test('rejects partial or unsafe breakout evidence instead of guessing', () => {
+  assert.throws(
+    () => parseDraftProfileFile([
+      'Rank,Name,Position,Projection Source,Projected Points',
+      '1,Young Runner,RB,Example Projections,245.5',
+    ].join('\n'), 'board.csv'),
+    /Breakout evidence.*complete/i,
+  );
+  assert.throws(
+    () => parseDraftProfileFile([
+      'Rank,Name,Position,Projection Source,Projection As Of,Projected Points,Projected Opportunities,Opportunity Kind,Experience Years',
+      '1,Young Runner,RB,https://example.test/?token=secret,2026-08-20,245.5,270,touches,2',
+    ].join('\n'), 'board.csv'),
+    /Projection source.*invalid/i,
+  );
+  assert.throws(
+    () => parseDraftProfileFile([
+      'Rank,Name,Position,Projection Source,Projection As Of,Projected Points,Projected Opportunities,Opportunity Kind,Experience Years',
+      '1,Young Runner,RB,/Users/private/projections.csv,2026-08-20,245.5,270,touches,2',
+    ].join('\n'), 'board.csv'),
+    /Projection source.*invalid/i,
+  );
 });
 
 test('rejects malformed, ambiguous, or oversized generic CSV instead of guessing', () => {
@@ -113,6 +166,7 @@ test('parses strict JSON while omitting unknown private fields', () => {
       bye_week: 10,
       notes: 'private manager note',
       injury_status: 'Healthy',
+      player_key: '449.p.100042',
     }],
   }), 'profile.json');
 
@@ -126,12 +180,111 @@ test('parses strict JSON while omitting unknown private fields', () => {
       rank: 1,
       average_draft_position: 4.5,
       bye_week: 10,
+      player_key: '449.p.100042',
     }],
     truncatedCount: 0,
   });
   assert.equal(JSON.stringify(parsed).includes('secret'), false);
   assert.equal(JSON.stringify(parsed).includes('private'), false);
   assert.equal(JSON.stringify(parsed).includes('Healthy'), false);
+});
+
+test('preserves a strict complete breakout evidence object from JSON', () => {
+  const parsed = parseDraftProfileFile(JSON.stringify({
+    schemaVersion: 1,
+    rankings: [{
+      rank: 1,
+      name: 'Young Receiver',
+      position: 'WR',
+      breakout_evidence: {
+        source: 'Example Projections',
+        as_of: '2026-08-20',
+        projected_points: 210,
+        projected_opportunities: 125,
+        opportunity_kind: 'targets',
+        experience_years: 1,
+      },
+    }],
+  }), 'profile.json');
+
+  assert.deepEqual(parsed.rankings[0].breakout_evidence, {
+    source: 'Example Projections',
+    as_of: '2026-08-20',
+    projected_points: 210,
+    projected_opportunities: 125,
+    opportunity_kind: 'targets',
+    experience_years: 1,
+  });
+});
+
+test('round-trips player key and breakout evidence together through the client request', async () => {
+  const expectedRanking = {
+    name: 'Young Receiver',
+    position: 'WR',
+    team: 'SEA',
+    rank: 1,
+    player_key: '461.p.33536',
+    breakout_evidence: {
+      source: 'Example Projections',
+      as_of: '2026-08-20',
+      projected_points: 210,
+      projected_opportunities: 125,
+      opportunity_kind: 'targets',
+      experience_years: 1,
+    },
+  };
+  const parsed = parseDraftProfileFile(JSON.stringify({
+    schemaVersion: 1,
+    rankings: [{
+      ...expectedRanking,
+      private_notes: 'must not leave the browser',
+    }],
+  }), 'profile.json');
+  let outboundRequest;
+
+  await saveDraftProfile({
+    ...parsed,
+    leagueId: '498589',
+    leagueSettings: {
+      teams: 12,
+      rosterPositions: [{ position: 'WR', count: 1 }],
+    },
+  }, {
+    now: new Date('2026-09-01T12:34:56Z'),
+    fetchImpl: async (_url, options) => {
+      outboundRequest = JSON.parse(options.body);
+      return {
+        ok: true,
+        json: async () => ({ status: 'success', leagueId: '498589', rankingCount: 1 }),
+      };
+    },
+  });
+
+  assert.deepEqual(parsed.rankings[0], expectedRanking);
+  assert.deepEqual(outboundRequest.rankings[0], expectedRanking);
+  assert.equal(JSON.stringify(outboundRequest).includes('private_notes'), false);
+});
+
+test('keeps projected receptions distinct from projected targets for WR and TE evidence', () => {
+  const parsed = parseDraftProfileFile(JSON.stringify({
+    schemaVersion: 1,
+    rankings: [{
+      rank: 1,
+      name: 'Young Receiver',
+      position: 'WR',
+      breakout_evidence: {
+        source: 'FantasyPros Projections',
+        as_of: '2026-08-20',
+        projected_points: 210,
+        projected_opportunities: 72,
+        opportunity_kind: 'receptions',
+        experience_years: 1,
+      },
+    }],
+  }), 'profile.json');
+
+  assert.equal(parsed.rankings[0].breakout_evidence.opportunity_kind, 'receptions');
+  assert.equal(parsed.rankings[0].breakout_evidence.projected_opportunities, 72);
 });
 
 test('does not accept a URL or spreadsheet formula disguised as a player name', () => {
@@ -142,6 +295,29 @@ test('does not accept a URL or spreadsheet formula disguised as a player name', 
         rankings: [{ rank: 1, name, position: 'QB', team: 'BUF' }],
       }), 'profile.json'),
       /Player name.*invalid/,
+    );
+  }
+});
+
+test('rejects a URL or query-bearing value disguised as a Yahoo player key', () => {
+  for (const playerKey of [
+    'https://example.test/?player_key=461.p.33536',
+    '461.p.33536?auth=secret',
+    'nfl.p.33536',
+    'p.33536',
+  ]) {
+    assert.throws(
+      () => parseDraftProfileFile(JSON.stringify({
+        schemaVersion: 1,
+        rankings: [{
+          rank: 1,
+          name: 'Player One',
+          position: 'QB',
+          team: 'BUF',
+          player_key: playerKey,
+        }],
+      }), 'profile.json'),
+      /Yahoo player key.*invalid/i,
     );
   }
 });
