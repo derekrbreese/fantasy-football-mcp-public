@@ -171,6 +171,12 @@
 
   function degradationMessages(response, health) {
     const messages = [];
+    const enrichmentProvider = safeText(response?.enrichment?.provider, 40).toLowerCase();
+    const enrichmentStatus = safeText(response?.enrichment?.status, 24).toLowerCase();
+    const freshInjuryPlayers = finiteNumber(response?.enrichment?.freshInjuryPlayers);
+    const noFreshFantasyProsInjuries = enrichmentProvider === 'fantasypros'
+      && ['success', 'degraded'].includes(enrichmentStatus)
+      && freshInjuryPlayers === 0;
     if (health?.fresh === false) {
       const age = finiteNumber(health?.stateAgeSeconds);
       messages.push(age === null
@@ -187,7 +193,9 @@
       messages.push('Some drafted player identities are unresolved.');
     }
     if (response?.capabilities?.injuryStatus === false) {
-      messages.push('Injury status is unavailable; treat it as unknown.');
+      messages.push(noFreshFantasyProsInjuries
+        ? 'No fresh FantasyPros injury record matched this player pool; missing status does not mean healthy.'
+        : 'Injury status is unavailable; treat it as unknown.');
     }
     if (response?.capabilities?.externalNews === false) {
       messages.push('External news is unavailable; treat it as unknown.');
@@ -211,16 +219,22 @@
         messages.push(safeWarning);
       }
       const coverageLabels = [
-        ['player catalog', 'the player catalog'],
-        ['injuries', 'injuries'],
+        ['player catalog', 'catalog'],
+        ['injuries', 'injury'],
         ['news', 'news'],
       ].filter(([key]) => limitedFantasyProsCoverage.has(key)).map(([, label]) => label);
       if (coverageLabels.length) {
-        const finalLabel = coverageLabels.pop();
-        const joined = coverageLabels.length
-          ? `${coverageLabels.join(', ')}${coverageLabels.length > 1 ? ',' : ''} and ${finalLabel}`
-          : finalLabel;
-        messages.push(`FantasyPros public API coverage is limited for ${joined}.`);
+        if (coverageLabels.length === 1) {
+          messages.push(
+            `FantasyPros returned a bounded ${coverageLabels[0]} snapshot; missing records remain unknown.`,
+          );
+        } else {
+          const finalLabel = coverageLabels.pop();
+          const joined = `${coverageLabels.join(', ')}${coverageLabels.length > 1 ? ',' : ''} and ${finalLabel}`;
+          messages.push(
+            `FantasyPros returned bounded ${joined} snapshots; missing records remain unknown.`,
+          );
+        }
       }
     }
     return uniqueStrings(messages);

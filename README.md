@@ -132,7 +132,7 @@ Before importing, check the team count and roster slots shown in the form. The s
 
 Google Drive is optional storage only; this app does not read Drive or Google Sheets at runtime. Download the sheet to your computer as `.xlsx` or export its ECR tab as CSV, then choose that local file in the dashboard.
 
-A matching local profile provides rankings and league settings with zero Yahoo API calls. Drafted players still come from the extension's live ledger.
+A matching local profile provides rankings and league settings with zero Yahoo API calls. Drafted players still come from the extension's live ledger. Yahoo's initialed player names are matched conservatively by name, position, and canonical NFL team; known equivalent provider codes such as Jacksonville's `JAX` and `JAC` are normalized before availability is decided.
 
 ### 7. Get recommendations
 
@@ -187,7 +187,7 @@ The integration is defensive by design:
 - When a snapshot expires, the provider attempts a normal paced and budgeted refresh. If that refresh fails, last-known-good data up to seven days old may still support identity matching, but recommendation risk remains unknown: stale status is not treated as current and stale headlines are not presented as recent news.
 - This app reserves at most 95 requests per UTC day in a private persistent counter, leaving a margin below the public 100-request limit. Other programs using the same key can still consume the provider's account-wide allowance.
 - Bounded player-detail lookups are used only when at least one requested ranking remains unresolved. Unrelated recent-news IDs do not consume that lookup allowance or produce an identity-coverage warning after the requested ranking pool is already resolved.
-- Only allowlisted player identity, status, timestamp, category, and headline fields reach recommendations. Fresh, exactly resolved rows may still be used when the API labels its overall coverage as limited; missing, unresolved, stale, rate-limited, unavailable, or out-of-coverage players remain explicitly unknown, and the coverage warning remains visible.
+- Only allowlisted player identity, status, timestamp, category, and headline fields reach recommendations. Fresh, exactly resolved rows may still be used when the API labels its overall coverage as limited; missing, unresolved, stale, rate-limited, unavailable, or out-of-coverage players remain explicitly unknown. The UI describes these results as bounded snapshots rather than inferring an API plan, and distinguishes a working feed with no fresh injury match from an unavailable feed.
 
 The first FantasyPros-enabled recommendation automatically fetches the base player catalog, injuries, and news and populates `~/.fantasy-football-mcp/fantasypros-snapshots.sqlite3` with each successful snapshot. No separate prefetch, database migration, or user refresh command is needed. The SQLite cache is bounded to sixteen snapshot variants and 8 MB of normalized record JSON. It contains normalized FantasyPros base snapshots only—not the API key, raw provider bodies, URLs, query strings, targeted identity lookups, Yahoo data, draft state, league IDs, or recommendation candidates. User-facing warnings identify stale fallback; stale per-player status and headlines are suppressed.
 

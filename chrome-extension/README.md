@@ -91,7 +91,7 @@ The popup displays picks and recorder health, not recommendations, and it cannot
 
 The sidebar shows up to five recommendations beside Yahoo. It selects a league only from the active draft tab or an explicit saved-league choice; it never silently chooses the newest saved session. After the initial request, a newer pick for that exact league cancels stale work, debounces duplicate events, and refreshes automatically. Another league's storage updates do not affect it.
 
-Cards show roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, and explicitly uncalibrated confidence and return/simulation probabilities. Stale state, inferred team counts, unresolved player identities, unavailable roster settings, and unknown injury/news data are visibly degraded. When the server's optional Databricks critic is enabled and available, a separate advisory-only summary appears after the unchanged deterministic recommendations.
+Cards show roster fit, rank/ADP/tier/bye context, reasoning, injury/news risk, and explicitly uncalibrated confidence and return/simulation probabilities. Stale state, inferred team counts, unresolved player identities, unavailable roster settings, and unknown injury/news data are visibly degraded. FantasyPros coverage markers are described as bounded snapshots; when its feed works but no fresh injury record matches the player pool, the UI says that missing status does not mean healthy instead of calling the feed unavailable. When the server's optional Databricks critic is enabled and available, a separate advisory-only summary appears after the unchanged deterministic recommendations.
 
 ### Full dashboard
 

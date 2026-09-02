@@ -28,6 +28,9 @@ _POSITION_ALIASES = {
     "Q/W/R/T": "SUPERFLEX",
     "OP": "SUPERFLEX",
 }
+# Yahoo uses JAX while several ranking providers use JAC. Keep this map small and
+# explicit so initialed-name matching still requires a known-equivalent team.
+_NFL_TEAM_ALIASES = {"JAC": "JAX"}
 _DEFAULT_ROSTER = [
     {"position": "QB", "count": 1},
     {"position": "RB", "count": 2},
@@ -100,6 +103,11 @@ def _position(value: Any) -> str:
     return _POSITION_ALIASES.get(result, result)
 
 
+def _nfl_team(value: Any) -> str:
+    result = str(value or "").strip().upper()
+    return _NFL_TEAM_ALIASES.get(result, result)
+
+
 @lru_cache(maxsize=2048)
 def _cached_name_tokens(text: str) -> tuple[str, ...]:
     normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
@@ -128,8 +136,8 @@ def _same_player(pick: Mapping[str, Any], player: Mapping[str, Any]) -> bool:
 
     pick_position = _position(pick.get("position"))
     player_position = _position(player.get("position"))
-    pick_team = str(pick.get("nflTeam") or "").upper()
-    player_team = str(player.get("team") or "").upper()
+    pick_team = _nfl_team(pick.get("nflTeam"))
+    player_team = _nfl_team(player.get("team"))
     if (
         pick_position == "DST"
         and player_position == "DST"

@@ -95,6 +95,13 @@ test('builds a bounded recommendation view with roster, round, degradation, and 
 test('groups repeated FantasyPros public coverage warnings into one readable disclosure', () => {
   const model = createRecommendationViewModel(response({
     capabilities: { injuryStatus: false, externalNews: true },
+    enrichment: {
+      provider: 'FantasyPros',
+      status: 'degraded',
+      requestedPlayers: 250,
+      freshInjuryPlayers: 0,
+      freshNewsPlayers: 19,
+    },
     warnings: [
       'FantasyPros player catalog coverage is limited by the public API',
       'FantasyPros injuries coverage is limited by the public API',
@@ -106,9 +113,43 @@ test('groups repeated FantasyPros public coverage warnings into one readable dis
     'Draft state is stale by about 181 seconds.',
     'Team count was inferred from the recorded ledger.',
     'Some drafted player identities are unresolved.',
-    'Injury status is unavailable; treat it as unknown.',
-    'FantasyPros public API coverage is limited for the player catalog, injuries, and news.',
+    'No fresh FantasyPros injury record matched this player pool; missing status does not mean healthy.',
+    'FantasyPros returned bounded catalog, injury, and news snapshots; missing records remain unknown.',
   ]);
+});
+
+test('renders one FantasyPros coverage marker as a singular bounded snapshot', () => {
+  const model = createRecommendationViewModel(response({
+    capabilities: { injuryStatus: true, externalNews: true },
+    enrichment: {
+      provider: 'FantasyPros',
+      status: 'degraded',
+      requestedPlayers: 250,
+      freshInjuryPlayers: 1,
+    },
+    warnings: ['FantasyPros injuries coverage is limited by the public API'],
+  }), { leagueId: '10462193' });
+
+  assert.equal(
+    model.degradations.at(-1),
+    'FantasyPros returned a bounded injury snapshot; missing records remain unknown.',
+  );
+});
+
+test('keeps generic injury wording when FantasyPros enrichment is unavailable', () => {
+  const model = createRecommendationViewModel(response({
+    capabilities: { injuryStatus: false, externalNews: true },
+    enrichment: {
+      provider: 'FantasyPros',
+      status: 'unavailable',
+      requestedPlayers: 250,
+      freshInjuryPlayers: 0,
+    },
+    warnings: [],
+  }), { leagueId: '10462193' });
+
+  assert.ok(model.degradations.includes('Injury status is unavailable; treat it as unknown.'));
+  assert.ok(!model.degradations.some((message) => message.startsWith('No fresh FantasyPros')));
 });
 
 test('lets the shared dashboard request a bounded twenty-card board', () => {

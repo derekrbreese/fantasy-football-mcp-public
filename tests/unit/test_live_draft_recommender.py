@@ -204,6 +204,65 @@ def test_recommender_filters_drafted_players_in_initialed_yahoo_ledger() -> None
     assert set(names).issubset({item["name"] for item in rankings()[6:]})
 
 
+def test_recommender_normalizes_jaguars_team_alias_for_initialed_picks() -> None:
+    context = live_context()
+    context["picks"].extend(
+        [
+            {
+                "pickNumber": 7,
+                "player": "B. Tuten",
+                "position": "RB",
+                "nflTeam": "JAX",
+                "fantasyTeam": "Alpha",
+                "isUserPick": False,
+            },
+            {
+                "pickNumber": 8,
+                "player": "P. Washington",
+                "position": "WR",
+                "nflTeam": "JAX",
+                "fantasyTeam": "Beta",
+                "isUserPick": False,
+            },
+        ]
+    )
+    candidate_pool = [
+        *rankings(),
+        {
+            "name": "Bhayshul Tuten",
+            "position": "RB",
+            "team": "JAC",
+            "average_draft_position": 59.0,
+            "rank": 59,
+        },
+        {
+            "name": "Parker Washington",
+            "position": "WR",
+            "team": "JAC",
+            "average_draft_position": 64.0,
+            "rank": 64,
+        },
+        {
+            "name": "Baxter Tuten",
+            "position": "RB",
+            "team": "TEN",
+            "average_draft_position": 200.0,
+            "rank": 200,
+        },
+    ]
+
+    result = LiveDraftRecommendationEngine(simulations=8).recommend(
+        context, candidate_pool, {"teams": 4}, count=20
+    )
+
+    names = [item["player"]["name"] for item in result["recommendations"]]
+    assert "Bhayshul Tuten" not in names
+    assert "Parker Washington" not in names
+    assert "Baxter Tuten" in names
+    assert not any("could not be resolved" in warning for warning in result["warnings"])
+    assert result["critic"]["checks"]["allDraftedPlayersResolved"] is True
+
+
 def test_full_suite_returns_specialists_scenario_critic_and_contingency() -> None:
     engine = LiveDraftRecommendationEngine(simulations=96, random_seed=17)
 
