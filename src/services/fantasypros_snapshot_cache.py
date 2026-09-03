@@ -1,4 +1,4 @@
-"""Private, bounded persistence for normalized FantasyPros snapshots."""
+"""Private, bounded persistence for normalized provider snapshots."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import math
 import os
 import sqlite3
+import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -13,28 +14,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SNAPSHOT_CACHE_PATH = (
+DEFAULT_PROVIDER_SNAPSHOT_CACHE_PATH = (
+    Path.home() / ".fantasy-football-mcp" / "provider-snapshots.sqlite3"
+)
+LEGACY_FANTASYPROS_SNAPSHOT_CACHE_PATH = (
     Path.home() / ".fantasy-football-mcp" / "fantasypros-snapshots.sqlite3"
 )
+# Backward-compatible import name used by callers and tests.
+DEFAULT_SNAPSHOT_CACHE_PATH = DEFAULT_PROVIDER_SNAPSHOT_CACHE_PATH
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _MAX_SNAPSHOTS = 16
 _MAX_SNAPSHOT_BYTES = 2_000_000
 _MAX_TOTAL_RECORD_BYTES = 8_000_000
 _MAX_DATABASE_BYTES = 16_777_216
 _BUSY_TIMEOUT_MILLISECONDS = 250
-_ENDPOINTS = frozenset({"players", "injuries", "news", "projections"})
+_ENDPOINTS = frozenset(
+    {"players", "injuries", "news", "projections", "sleeper_players"}
+)
 _VARIANTS = {
     "players": frozenset({"catalog", "catalog-season"}),
     "injuries": frozenset({"weekly"}),
     "news": frozenset({"recent"}),
     "projections": frozenset({"preseason-std", "preseason-half", "preseason-ppr"}),
+    "sleeper_players": frozenset({"active"}),
 }
 _RECORD_LIMITS = {
     "players": 5_000,
     "injuries": 2_000,
     "news": 100,
     "projections": 5_000,
+    "sleeper_players": 10_000,
 }
 _POSITIONS = frozenset({"QB", "RB", "WR", "TE", "K", "DST"})
 _STATUSES = frozenset(
@@ -112,6 +122,12 @@ class FantasyProsSnapshotKey:
                 and self.week == 0
                 and self.request_limit == 0
             )
+        elif self.endpoint == "sleeper_players":
+            valid = (
+                valid
+                and self.variant == "active"
+                and self.season == self.week == self.request_limit == 0
+            )
         if not valid:
             raise ValueError("invalid FantasyPros snapshot key")
 
@@ -134,6 +150,7 @@ class FantasyProsSnapshotCache:
 
     def __init__(self, *, path: str | Path | None = None) -> None:
         self._path = Path(path).expanduser() if path is not None else None
+        self._legacy_migration_checked = False
 
     @property
     def path(self) -> Path:
@@ -222,6 +239,7 @@ class FantasyProsSnapshotCache:
         try:
             destination = self.path
             self._prepare_directory(destination, tighten_existing=self._path is None)
+            self._migrate_legacy_database(destination)
             self._prepare_file(destination)
             connection = sqlite3.connect(
                 destination,
@@ -255,6 +273,52 @@ class FantasyProsSnapshotCache:
             raise
         except (OSError, sqlite3.Error) as error:
             raise FantasyProsSnapshotCacheUnavailable from error
+
+    def _migrate_legacy_database(self, destination: Path) -> None:
+        if self._legacy_migration_checked:
+            return
+        self._legacy_migration_checked = True
+        legacy = LEGACY_FANTASYPROS_SNAPSHOT_CACHE_PATH
+        if (
+            self._path is not None
+            or destination != DEFAULT_PROVIDER_SNAPSHOT_CACHE_PATH
+            or destination.exists()
+            or not legacy.exists()
+            or legacy == destination
+        ):
+            return
+        if (
+            legacy.is_symlink()
+            or not legacy.is_file()
+            or legacy.stat().st_nlink != 1
+            or legacy.stat().st_size > _MAX_DATABASE_BYTES
+        ):
+            raise FantasyProsSnapshotCacheUnavailable
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".provider-snapshots-migration-",
+            suffix=".sqlite3",
+            dir=destination.parent,
+        )
+        os.close(descriptor)
+        try:
+            source_uri = f"{legacy.resolve().as_uri()}?mode=ro"
+            with closing(sqlite3.connect(source_uri, uri=True)) as source:
+                with closing(sqlite3.connect(temporary_name)) as target:
+                    source.backup(target)
+                    target.commit()
+            with open(temporary_name, "rb") as migrated:
+                os.fsync(migrated.fileno())
+            os.chmod(temporary_name, 0o600)
+            try:
+                os.link(temporary_name, destination)
+            except FileExistsError:
+                # Another provider process completed the same first-use migration.
+                pass
+            else:
+                destination.chmod(0o600)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
 
     @staticmethod
     def _prepare_directory(destination: Path, *, tighten_existing: bool) -> None:
@@ -293,14 +357,14 @@ class FantasyProsSnapshotCache:
     @staticmethod
     def _initialize_schema(connection: sqlite3.Connection) -> None:
         version = connection.execute("PRAGMA user_version").fetchone()
-        if version is None or type(version[0]) is not int or version[0] not in (0, 1, 2):
+        if version is None or type(version[0]) is not int or version[0] not in (0, 1, 2, 3):
             raise FantasyProsSnapshotCacheUnavailable
-        if version[0] == 1:
+        if version[0] in (1, 2):
             with connection:
-                FantasyProsSnapshotCache._create_schema(connection, "snapshots_v2")
+                FantasyProsSnapshotCache._create_schema(connection, "snapshots_v3")
                 connection.execute(
                     """
-                    INSERT INTO snapshots_v2
+                    INSERT INTO snapshots_v3
                     SELECT endpoint, variant, season, week, request_limit, record_limit,
                            fetched_at, records_json, truncated, returned_count,
                            reported_count, reported_limit, public_api_limited
@@ -308,7 +372,7 @@ class FantasyProsSnapshotCache:
                     """
                 )
                 connection.execute("DROP TABLE snapshots")
-                connection.execute("ALTER TABLE snapshots_v2 RENAME TO snapshots")
+                connection.execute("ALTER TABLE snapshots_v3 RENAME TO snapshots")
                 connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
         FantasyProsSnapshotCache._create_schema(connection, "snapshots")
@@ -318,7 +382,7 @@ class FantasyProsSnapshotCache:
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection, table: str) -> None:
-        if table not in {"snapshots", "snapshots_v2"}:
+        if table not in {"snapshots", "snapshots_v2", "snapshots_v3"}:
             raise FantasyProsSnapshotCacheUnavailable
         connection.execute(
             f"""
@@ -339,10 +403,12 @@ class FantasyProsSnapshotCache:
                 PRIMARY KEY (
                     endpoint, variant, season, week, request_limit, record_limit
                 ),
-                CHECK(endpoint IN ('players', 'injuries', 'news', 'projections')),
+                CHECK(endpoint IN (
+                    'players', 'injuries', 'news', 'projections', 'sleeper_players'
+                )),
                 CHECK(variant IN (
                     'catalog', 'catalog-season', 'weekly', 'recent',
-                    'preseason-std', 'preseason-half', 'preseason-ppr'
+                    'preseason-std', 'preseason-half', 'preseason-ppr', 'active'
                 ))
             ) WITHOUT ROWID
             """
@@ -438,6 +504,8 @@ class FantasyProsSnapshotCache:
                 cls._validate_news(copied)
             elif endpoint == "projections":
                 cls._validate_projection(copied)
+            elif endpoint == "sleeper_players":
+                cls._validate_sleeper_player(copied)
             else:
                 raise FantasyProsSnapshotCacheUnavailable
             result.append(copied)
@@ -504,6 +572,45 @@ class FantasyProsSnapshotCache:
             raise FantasyProsSnapshotCacheUnavailable
         expected_kind = "touches" if record["position"] == "RB" else "receptions"
         if record["opportunityKind"] != expected_kind:
+            raise FantasyProsSnapshotCacheUnavailable
+
+    @classmethod
+    def _validate_sleeper_player(cls, record: dict[str, Any]) -> None:
+        if set(record) != {
+            "sleeperId",
+            "name",
+            "position",
+            "team",
+            "yearsExperience",
+            "yahooId",
+        }:
+            raise FantasyProsSnapshotCacheUnavailable
+        sleeper_id = record["sleeperId"]
+        yahoo_id = record["yahooId"]
+        if (
+            not isinstance(sleeper_id, str)
+            or not sleeper_id.isdigit()
+            or sleeper_id.startswith("0")
+            or not 1 <= int(sleeper_id) <= 10_000_000_000
+        ):
+            raise FantasyProsSnapshotCacheUnavailable
+        if yahoo_id is not None and (
+            not isinstance(yahoo_id, str)
+            or not yahoo_id.isdigit()
+            or yahoo_id.startswith("0")
+            or not 1 <= int(yahoo_id) <= 10_000_000_000
+        ):
+            raise FantasyProsSnapshotCacheUnavailable
+        if not cls._bounded_text(record["name"], 1, 120):
+            raise FantasyProsSnapshotCacheUnavailable
+        if record["position"] not in {"RB", "WR", "TE"}:
+            raise FantasyProsSnapshotCacheUnavailable
+        team = record["team"]
+        if not cls._bounded_text(team, 0, 5) or not all(
+            character.isupper() or character.isdigit() for character in team
+        ):
+            raise FantasyProsSnapshotCacheUnavailable
+        if not cls._bounded_int(record["yearsExperience"], 0, 30):
             raise FantasyProsSnapshotCacheUnavailable
 
     @classmethod
@@ -599,10 +706,24 @@ class FantasyProsSnapshotCache:
         )
 
 
+# Provider-neutral names for shared-cache consumers. The original names remain
+# public so existing callers do not need a coordinated migration.
+ProviderSnapshot = FantasyProsSnapshot
+ProviderSnapshotCache = FantasyProsSnapshotCache
+ProviderSnapshotCacheUnavailable = FantasyProsSnapshotCacheUnavailable
+ProviderSnapshotKey = FantasyProsSnapshotKey
+
+
 __all__ = [
+    "DEFAULT_PROVIDER_SNAPSHOT_CACHE_PATH",
     "DEFAULT_SNAPSHOT_CACHE_PATH",
     "FantasyProsSnapshot",
     "FantasyProsSnapshotCache",
     "FantasyProsSnapshotCacheUnavailable",
     "FantasyProsSnapshotKey",
+    "LEGACY_FANTASYPROS_SNAPSHOT_CACHE_PATH",
+    "ProviderSnapshot",
+    "ProviderSnapshotCache",
+    "ProviderSnapshotCacheUnavailable",
+    "ProviderSnapshotKey",
 ]

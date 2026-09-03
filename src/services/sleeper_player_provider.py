@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import os
 import re
-import tempfile
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -17,7 +15,18 @@ from typing import Any, Protocol
 
 import aiohttp
 
-DEFAULT_SLEEPER_PLAYER_CACHE_PATH = Path.home() / ".fantasy-football-mcp" / "sleeper-players.json"
+from src.services.fantasypros_snapshot_cache import (
+    DEFAULT_PROVIDER_SNAPSHOT_CACHE_PATH,
+    ProviderSnapshot,
+    ProviderSnapshotCache,
+    ProviderSnapshotCacheUnavailable,
+    ProviderSnapshotKey,
+)
+
+DEFAULT_SLEEPER_PLAYER_CACHE_PATH = DEFAULT_PROVIDER_SNAPSHOT_CACHE_PATH
+LEGACY_SLEEPER_PLAYER_CACHE_PATH = (
+    Path.home() / ".fantasy-football-mcp" / "sleeper-players.json"
+)
 
 _PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
 _CACHE_TTL_SECONDS = 86_400.0
@@ -217,6 +226,7 @@ class SleeperPlayerProvider:
         transport: SleeperJsonTransport | None = None,
         clock: Callable[[], datetime] | None = None,
         cache_path: str | Path | None = None,
+        legacy_json_cache_path: str | Path | None = None,
         timeout_seconds: float = 5.0,
         cache_ttl_seconds: float = _CACHE_TTL_SECONDS,
         max_stale_seconds: float = _MAX_STALE_SECONDS,
@@ -226,6 +236,14 @@ class SleeperPlayerProvider:
         self._transport = transport or AiohttpSleeperTransport()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._cache_path = Path(cache_path).expanduser() if cache_path is not None else None
+        self._legacy_json_cache_path = (
+            Path(legacy_json_cache_path).expanduser()
+            if legacy_json_cache_path is not None
+            else LEGACY_SLEEPER_PLAYER_CACHE_PATH
+            if cache_path is None
+            else None
+        )
+        self._snapshot_cache = ProviderSnapshotCache(path=self._cache_path)
         self._timeout_seconds = max(0.5, min(float(timeout_seconds), 10.0))
         self._cache_ttl_seconds = max(60.0, min(float(cache_ttl_seconds), 86_400.0))
         self._max_stale_seconds = max(
@@ -336,7 +354,35 @@ class SleeperPlayerProvider:
             return (), None, False, True
 
     def _read_cache(self) -> tuple[datetime, tuple[dict[str, Any], ...]] | None:
-        path = self.cache_path
+        try:
+            snapshot = self._snapshot_cache.load(self._snapshot_key())
+        except ProviderSnapshotCacheUnavailable:
+            return None
+        if snapshot is not None:
+            return snapshot.fetched_at, snapshot.records
+
+        legacy = self._read_legacy_json_cache()
+        if legacy is None:
+            return None
+        fetched_at, players = legacy
+        try:
+            self._write_cache(fetched_at, players)
+        except SleeperPlayerProviderError:
+            return legacy
+        legacy_path = self._legacy_json_cache_path
+        if legacy_path is not None:
+            try:
+                legacy_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return legacy
+
+    def _read_legacy_json_cache(
+        self,
+    ) -> tuple[datetime, tuple[dict[str, Any], ...]] | None:
+        path = self._legacy_json_cache_path
+        if path is None:
+            return None
         try:
             if (
                 not path.exists()
@@ -385,47 +431,30 @@ class SleeperPlayerProvider:
             return None
 
     def _write_cache(self, fetched_at: datetime, players: Sequence[Mapping[str, Any]]) -> None:
-        path = self.cache_path
-        parent = path.parent
         try:
-            if parent.is_symlink():
-                raise SleeperPlayerProviderError("Sleeper player cache is unavailable")
-            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if self._cache_path is None:
-                parent.chmod(0o700)
-            if path.is_symlink():
-                raise SleeperPlayerProviderError("Sleeper player cache is unavailable")
-            payload = json.dumps(
-                {
-                    "schemaVersion": 1,
-                    "fetchedAt": _iso(fetched_at),
-                    "players": list(players),
-                },
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
+            self._snapshot_cache.save(
+                self._snapshot_key(),
+                ProviderSnapshot(
+                    records=tuple(dict(player) for player in players),
+                    fetched_at=fetched_at,
+                    truncated=False,
+                    returned_count=len(players),
+                    reported_count=len(players),
+                    reported_limit=None,
+                    public_api_limited=False,
+                ),
             )
-            if len(payload.encode("utf-8")) > _MAX_CACHE_BYTES:
-                raise SleeperPlayerProviderError("Sleeper player cache exceeded the size limit")
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=".sleeper-players-", suffix=".json", dir=parent
-            )
-            try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
-                    temporary.write(payload)
-                    temporary.write("\n")
-                    temporary.flush()
-                    os.fsync(temporary.fileno())
-                os.chmod(temporary_name, 0o600)
-                os.replace(temporary_name, path)
-                path.chmod(0o600)
-            finally:
-                if os.path.exists(temporary_name):
-                    os.unlink(temporary_name)
         except SleeperPlayerProviderError:
             raise
-        except OSError as error:
+        except ProviderSnapshotCacheUnavailable as error:
             raise SleeperPlayerProviderError("Sleeper player cache is unavailable") from error
+
+    def _snapshot_key(self) -> ProviderSnapshotKey:
+        return ProviderSnapshotKey(
+            endpoint="sleeper_players",
+            variant="active",
+            record_limit=self._max_players,
+        )
 
     @staticmethod
     def _resolve(
@@ -475,6 +504,7 @@ class SleeperPlayerProvider:
 __all__ = [
     "AiohttpSleeperTransport",
     "DEFAULT_SLEEPER_PLAYER_CACHE_PATH",
+    "LEGACY_SLEEPER_PLAYER_CACHE_PATH",
     "SleeperJsonTransport",
     "SleeperPlayerProvider",
     "SleeperPlayerProviderError",

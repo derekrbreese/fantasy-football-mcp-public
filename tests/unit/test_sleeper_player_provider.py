@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import stat
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -74,7 +76,7 @@ async def test_fetches_normalizes_resolves_and_persists_private_daily_cache(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 9, 3, 18, 0, tzinfo=timezone.utc)
-    cache_path = tmp_path / "private" / "sleeper-players.json"
+    cache_path = tmp_path / "private" / "provider-snapshots.sqlite3"
     transport = FakeTransport(sleeper_catalog())
     provider = SleeperPlayerProvider(
         transport=transport,
@@ -105,6 +107,10 @@ async def test_fetches_normalizes_resolves_and_persists_private_daily_cache(
     assert result["players"][3]["identityResolved"] is False
     assert transport.calls[0][1]["params"] == {"active": "true"}
     assert stat.S_IMODE(cache_path.stat().st_mode) == 0o600
+    with sqlite3.connect(cache_path) as connection:
+        assert connection.execute(
+            "SELECT endpoint, variant FROM snapshots"
+        ).fetchall() == [("sleeper_players", "active")]
 
     no_network = FakeTransport(error=AssertionError("cache should prevent a request"))
     restarted = SleeperPlayerProvider(
@@ -126,7 +132,7 @@ async def test_cache_warmer_respects_ttl_and_supports_explicit_refresh(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 9, 3, 18, 0, tzinfo=timezone.utc)
-    cache_path = tmp_path / "sleeper-players.json"
+    cache_path = tmp_path / "provider-snapshots.sqlite3"
     transport = FakeTransport(sleeper_catalog())
     provider = SleeperPlayerProvider(
         transport=transport,
@@ -179,7 +185,7 @@ def test_cache_warmer_cli_prints_only_bounded_metadata(
 @pytest.mark.asyncio
 async def test_uses_bounded_stale_cache_when_refresh_fails(tmp_path: Path) -> None:
     now = datetime(2026, 9, 3, 18, 0, tzinfo=timezone.utc)
-    cache_path = tmp_path / "sleeper-players.json"
+    cache_path = tmp_path / "provider-snapshots.sqlite3"
     initial = SleeperPlayerProvider(
         transport=FakeTransport(sleeper_catalog()),
         clock=lambda: now,
@@ -208,7 +214,7 @@ async def test_fails_closed_after_cached_catalog_exceeds_freshness_bound(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 9, 3, 18, 0, tzinfo=timezone.utc)
-    cache_path = tmp_path / "sleeper-players.json"
+    cache_path = tmp_path / "provider-snapshots.sqlite3"
     initial = SleeperPlayerProvider(
         transport=FakeTransport(sleeper_catalog()),
         clock=lambda: now,
@@ -229,3 +235,51 @@ async def test_fails_closed_after_cached_catalog_exceeds_freshness_bound(
     assert result["identityResolvedPlayers"] == 0
     assert result["players"][0]["experience_years"] is None
     assert result["warnings"] == ["Sleeper player experience is temporarily unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_migrates_legacy_json_cache_into_shared_database(tmp_path: Path) -> None:
+    fetched_at = datetime(2026, 9, 3, 18, 0, tzinfo=timezone.utc)
+    legacy_path = tmp_path / "sleeper-players.json"
+    database_path = tmp_path / "provider-snapshots.sqlite3"
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "fetchedAt": "2026-09-03T18:00:00Z",
+                "players": [
+                    {
+                        "sleeperId": "100",
+                        "name": "Jordan Alpha",
+                        "position": "RB",
+                        "team": "SF",
+                        "yearsExperience": 2,
+                        "yahooId": "501",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_path.chmod(0o600)
+    transport = FakeTransport(error=AssertionError("migration should prevent a request"))
+    provider = SleeperPlayerProvider(
+        transport=transport,
+        clock=lambda: fetched_at + timedelta(hours=1),
+        cache_path=database_path,
+        legacy_json_cache_path=legacy_path,
+    )
+
+    result = await provider.get_player_experience(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    )
+
+    assert transport.calls == []
+    assert result["status"] == "success"
+    assert result["players"][0]["experience_years"] == 2
+    assert database_path.is_file()
+    assert not legacy_path.exists()
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT endpoint, returned_count FROM snapshots"
+        ).fetchall() == [("sleeper_players", 1)]
