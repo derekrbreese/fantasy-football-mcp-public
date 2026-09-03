@@ -25,13 +25,16 @@ from src.services.local_draft_profile_store import (
     bind_default_local_draft_profile,
     load_local_draft_profile,
 )
+from src.services.sleeper_player_provider import SleeperPlayerProvider
 from src.services.yahoo_player_identity import normalize_yahoo_player_key
 
 ToolCaller = Callable[..., Awaitable[dict[str, Any]]]
 _YAHOO_RECOMMENDATION_LOCK = asyncio.Lock()
 _DRAFT_IDENTITY_FIELDS = ("sport", "leagueId", "teamId", "sessionKey")
 _FANTASYPROS_ENRICHMENT_TIMEOUT_SECONDS = 10.0
+_SLEEPER_ENRICHMENT_TIMEOUT_SECONDS = 6.0
 _FANTASYPROS_PROVIDER = FantasyProsProvider()
+_SLEEPER_PLAYER_PROVIDER = SleeperPlayerProvider()
 _DATABRICKS_ADVISORY_CRITIC = DatabricksAdvisoryCritic()
 _FANTASYPROS_FIELDS = (
     "fantasypros_id",
@@ -64,6 +67,11 @@ _FANTASYPROS_FIELDS = (
     "adp_stale",
 )
 _POSITION_ALIASES = {"DEF": "DST", "D/ST": "DST"}
+_BREAKOUT_OPPORTUNITY_KINDS = {
+    "RB": {"touches"},
+    "WR": {"targets", "receptions"},
+    "TE": {"targets", "receptions"},
+}
 
 
 def _sanitize_ranking_player_keys(
@@ -75,9 +83,7 @@ def _sanitize_ranking_player_keys(
     for ranking in rankings:
         candidate = dict(ranking)
         supplied = [
-            candidate.pop(field)
-            for field in ("player_key", "playerKey")
-            if field in candidate
+            candidate.pop(field) for field in ("player_key", "playerKey") if field in candidate
         ]
         valid = {
             player_key
@@ -142,17 +148,11 @@ async def _run_advisory_critic(
     except asyncio.CancelledError:
         raise
     except asyncio.TimeoutError:
-        return DatabricksAdvisoryResult.unavailable(
-            "timeout", model=_advisory_model(critic)
-        )
+        return DatabricksAdvisoryResult.unavailable("timeout", model=_advisory_model(critic))
     except Exception:
-        return DatabricksAdvisoryResult.unavailable(
-            "provider_error", model=_advisory_model(critic)
-        )
+        return DatabricksAdvisoryResult.unavailable("provider_error", model=_advisory_model(critic))
     if not isinstance(advisory, DatabricksAdvisoryResult):
-        return DatabricksAdvisoryResult.unavailable(
-            "provider_error", model=_advisory_model(critic)
-        )
+        return DatabricksAdvisoryResult.unavailable("provider_error", model=_advisory_model(critic))
     return advisory
 
 
@@ -212,9 +212,7 @@ def _player_identity(value: Mapping[str, Any]) -> tuple[str, str, str]:
     return name, position, team
 
 
-def _same_enrichment_identity(
-    ranking: Mapping[str, Any], update: Mapping[str, Any]
-) -> bool:
+def _same_enrichment_identity(ranking: Mapping[str, Any], update: Mapping[str, Any]) -> bool:
     ranking_id = ranking.get("fantasypros_id") or ranking.get("fantasyProsId")
     update_id = update.get("fantasypros_id")
     if (
@@ -402,16 +400,11 @@ def _fantasypros_market_source(
         or type(adp_players) is not int
         or adp_players < 1
         or available_players < adp_players
-        or (
-            source_as_of is not None
-            and not _valid_provider_time(source_as_of, season)
-        )
+        or (source_as_of is not None and not _valid_provider_time(source_as_of, season))
     ):
         return None
 
-    provider_rows = [
-        item for item in enriched_rankings if "average_draft_position" in item
-    ]
+    provider_rows = [item for item in enriched_rankings if "average_draft_position" in item]
     if len(provider_rows) != adp_players:
         return None
     for item in provider_rows:
@@ -467,13 +460,10 @@ def _merge_fantasypros_updates(
         candidate = dict(ranking)
         update = updates[index] if index < len(updates) else None
         if isinstance(update, Mapping) and _same_enrichment_identity(candidate, update):
-            accept_provider_adp = (
-                imported_adp == 0 and update.get("identityResolved") is True
-            )
+            accept_provider_adp = imported_adp == 0 and update.get("identityResolved") is True
             for field in _FANTASYPROS_FIELDS:
-                if (
-                    not accept_provider_adp
-                    and (field == "average_draft_position" or field.startswith("adp_"))
+                if not accept_provider_adp and (
+                    field == "average_draft_position" or field.startswith("adp_")
                 ):
                     continue
                 if field in update:
@@ -531,9 +521,7 @@ async def _enrich_with_fantasypros(
             "status": "unavailable",
             "provider": "FantasyPros",
             "players": [],
-            "warnings": [
-                "FantasyPros evidence timed out; missing data remains unknown"
-            ],
+            "warnings": ["FantasyPros evidence timed out; missing data remains unknown"],
         }
     except Exception:
         raw_result = {
@@ -564,8 +552,161 @@ async def _enrich_with_fantasypros(
             if isinstance(warning, str) and warning.startswith("FantasyPros"):
                 warnings.append(warning[:240])
     if summary["status"] == "unavailable" and not warnings:
-        warnings.append(
-            "FantasyPros evidence is unavailable; missing data remains unknown"
+        warnings.append("FantasyPros evidence is unavailable; missing data remains unknown")
+    return merged, summary, warnings
+
+
+def _projection_as_of(candidate: Mapping[str, Any], season: int) -> str | None:
+    for field in ("projection_source_as_of", "projection_fetched_at"):
+        value = candidate.get(field)
+        if not isinstance(value, str) or not value or len(value) > 40:
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is not None and parsed.year == season:
+            return parsed.date().isoformat()
+    return None
+
+
+def _merge_sleeper_breakout_evidence(
+    rankings: list[dict[str, Any]],
+    provider_result: Mapping[str, Any],
+    *,
+    season: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Complete FantasyPros projection evidence with matched Sleeper experience."""
+
+    raw_updates = provider_result.get("players")
+    updates = raw_updates if isinstance(raw_updates, list) else []
+    merged: list[dict[str, Any]] = []
+    experience_players = 0
+    generated = 0
+    for index, ranking in enumerate(rankings):
+        candidate = dict(ranking)
+        update = updates[index] if index < len(updates) else None
+        if not isinstance(update, Mapping) or not _same_enrichment_identity(candidate, update):
+            merged.append(candidate)
+            continue
+        experience = update.get("experience_years")
+        experience_valid = (
+            update.get("identityResolved") is True
+            and update.get("experience_source") == "Sleeper"
+            and type(experience) is int
+            and 0 <= experience <= 30
+        )
+        if experience_valid:
+            experience_players += 1
+            candidate["experience_years"] = experience
+            candidate["experience_source"] = "Sleeper"
+        position = _player_identity(candidate)[1]
+        opportunity_kind = candidate.get("projection_opportunity_kind")
+        points = _positive_finite_number(candidate.get("projected_points"))
+        opportunities = _positive_finite_number(candidate.get("projected_opportunities"))
+        as_of = _projection_as_of(candidate, season)
+        if (
+            "breakout_evidence" not in candidate
+            and experience_valid
+            and candidate.get("identityResolved") is True
+            and candidate.get("projection_source") == "FantasyPros"
+            and candidate.get("projection_season") == season
+            and candidate.get("projection_stale") is False
+            and opportunity_kind in _BREAKOUT_OPPORTUNITY_KINDS.get(position, ())
+            and points is not None
+            and opportunities is not None
+            and as_of is not None
+        ):
+            candidate["breakout_evidence"] = {
+                "source": "FantasyPros + Sleeper",
+                "as_of": as_of,
+                "projected_points": points,
+                "projected_opportunities": opportunities,
+                "opportunity_kind": opportunity_kind,
+                "experience_years": experience,
+            }
+            generated += 1
+        merged.append(candidate)
+    status = provider_result.get("status")
+    return merged, {
+        "provider": "Sleeper",
+        "status": status if status in {"success", "degraded", "unavailable"} else "unavailable",
+        "catalogFetchedAt": (
+            provider_result.get("catalogFetchedAt")
+            if isinstance(provider_result.get("catalogFetchedAt"), str)
+            else None
+        ),
+        "cacheStale": provider_result.get("cacheStale") is True,
+        "refreshFailed": provider_result.get("refreshFailed") is True,
+        "catalogPlayers": (
+            provider_result.get("catalogPlayers")
+            if type(provider_result.get("catalogPlayers")) is int
+            else 0
+        ),
+        "identityResolvedPlayers": experience_players,
+        "generatedBreakoutEvidencePlayers": generated,
+    }
+
+
+async def _enrich_breakout_experience(
+    rankings: list[dict[str, Any]],
+    *,
+    season: int,
+    provider: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+    if not any(
+        ranking.get("projection_source") == "FantasyPros"
+        and "projected_points" in ranking
+        and "projected_opportunities" in ranking
+        for ranking in rankings
+    ):
+        return (
+            rankings,
+            {
+                "provider": "Sleeper",
+                "status": "not_needed",
+                "identityResolvedPlayers": 0,
+                "generatedBreakoutEvidencePlayers": 0,
+            },
+            [],
+        )
+    try:
+        raw_result = await asyncio.wait_for(
+            provider.get_player_experience(rankings),
+            timeout=_SLEEPER_ENRICHMENT_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        raw_result = {
+            "status": "unavailable",
+            "players": [],
+            "warnings": ["Sleeper player experience timed out; Breakout Watch may be unavailable"],
+        }
+    except Exception:
+        raw_result = {
+            "status": "unavailable",
+            "players": [],
+            "warnings": [
+                "Sleeper player experience is temporarily unavailable; Breakout Watch may be unavailable"
+            ],
+        }
+    if not isinstance(raw_result, Mapping):
+        raw_result = {
+            "status": "unavailable",
+            "players": [],
+            "warnings": [
+                "Sleeper player experience is temporarily unavailable; Breakout Watch may be unavailable"
+            ],
+        }
+    merged, summary = _merge_sleeper_breakout_evidence(rankings, raw_result, season=season)
+    warnings = []
+    raw_warnings = raw_result.get("warnings")
+    if isinstance(raw_warnings, list):
+        warnings.extend(
+            warning[:240]
+            for warning in raw_warnings[:2]
+            if isinstance(warning, str) and warning.startswith("Sleeper")
         )
     return merged, summary, warnings
 
@@ -623,9 +764,7 @@ def _resolve_league_key(result: Mapping[str, Any], league_id: str) -> str:
             "Yahoo league identity could not be resolved for the synced draft"
         )
     if len(unique_matches) != 1:
-        raise LiveDraftValidationError(
-            "Yahoo league identity is ambiguous for the synced draft"
-        )
+        raise LiveDraftValidationError("Yahoo league identity is ambiguous for the synced draft")
     return unique_matches[0]
 
 
@@ -670,6 +809,7 @@ async def get_live_draft_recommendation(
     store_path: str | Path | None = None,
     profile_path: str | Path | None = None,
     fantasypros_provider: Any | None = None,
+    sleeper_player_provider: Any | None = None,
     advisory_critic: Any | None = None,
     require_authenticated_team: bool = False,
 ) -> dict[str, Any]:
@@ -684,9 +824,7 @@ async def get_live_draft_recommendation(
         league_id = str(league_id)
     else:
         if marker not in league_key:
-            raise LiveDraftValidationError(
-                "league_key must contain a Yahoo .l. league identifier"
-            )
+            raise LiveDraftValidationError("league_key must contain a Yahoo .l. league identifier")
         derived_league_id = league_key.rsplit(marker, 1)[1]
         if not derived_league_id:
             raise LiveDraftValidationError("league_key must include a league identifier")
@@ -769,16 +907,10 @@ async def get_live_draft_recommendation(
                 count=ranking_limit,
             )
         raw_rankings = (
-            rankings_result.get("rankings", [])
-            if isinstance(rankings_result, Mapping)
-            else []
+            rankings_result.get("rankings", []) if isinstance(rankings_result, Mapping) else []
         )
         rankings = (
-            [
-                dict(item)
-                for item in raw_rankings[:ranking_limit]
-                if isinstance(item, Mapping)
-            ]
+            [dict(item) for item in raw_rankings[:ranking_limit] if isinstance(item, Mapping)]
             if isinstance(raw_rankings, list)
             else []
         )
@@ -803,6 +935,18 @@ async def get_live_draft_recommendation(
         league_info=league_info,
         provider=fantasypros_provider or _FANTASYPROS_PROVIDER,
     )
+    rankings, sleeper_enrichment, sleeper_warnings = await _enrich_breakout_experience(
+        rankings,
+        season=season,
+        provider=sleeper_player_provider or _SLEEPER_PLAYER_PROVIDER,
+    )
+    enrichment["sleeperExperience"] = sleeper_enrichment
+    enrichment_warnings.extend(sleeper_warnings)
+    projection_evidence = enrichment.get("projectionEvidence")
+    if isinstance(projection_evidence, dict):
+        projection_evidence["experienceYearsAvailable"] = (
+            sleeper_enrichment.get("identityResolvedPlayers", 0) > 0
+        )
     enrichment["seasonProvenance"] = season_provenance
     if season_provenance["defaulted"] is True:
         enrichment_warnings.append(
@@ -819,11 +963,8 @@ async def get_live_draft_recommendation(
     )
     if provider_market_source is not None:
         market_source = provider_market_source
-    elif (
-        enrichment.get("adpPlayers", 0) > 0
-        and not any(
-            _ranking_declares_adp(item) for item in rankings_before_enrichment
-        )
+    elif enrichment.get("adpPlayers", 0) > 0 and not any(
+        _ranking_declares_adp(item) for item in rankings_before_enrichment
     ):
         # Provider ADP without fully valid provenance must neither influence scores
         # nor inherit the label of an unrelated ranking source.
@@ -857,9 +998,7 @@ async def get_live_draft_recommendation(
         if not isinstance(roster_positions, list) or not roster_positions:
             roster_slots_available = False
             source_name = "Local profile" if profile is not None else "Yahoo league"
-            league_warning = (
-                f"{source_name} roster positions are unavailable; using 1QB defaults"
-            )
+            league_warning = f"{source_name} roster positions are unavailable; using 1QB defaults"
     if league_warning:
         warning_prefix = "Local profile" if profile is not None else "Yahoo league info"
         result["warnings"].append(f"{warning_prefix}: {league_warning}")
@@ -871,11 +1010,7 @@ async def get_live_draft_recommendation(
     capabilities = result.get("capabilities")
     if isinstance(capabilities, dict):
         capabilities["rosterSlotsAvailable"] = roster_slots_available
-    critic_provider = (
-        _DATABRICKS_ADVISORY_CRITIC
-        if advisory_critic is None
-        else advisory_critic
-    )
+    critic_provider = _DATABRICKS_ADVISORY_CRITIC if advisory_critic is None else advisory_critic
     advisory = await _run_advisory_critic(result, critic_provider)
     current_state = load_live_draft(
         league_id=league_id,
@@ -904,6 +1039,8 @@ async def get_live_draft_recommendation(
         "league": league_source,
         "injuryNews": "FantasyPros public API",
     }
+    if sleeper_enrichment.get("status") != "not_needed":
+        result["dataSources"]["playerExperience"] = "Sleeper player catalog"
     result["enrichment"] = enrichment
     if profile is not None:
         result["profile"] = {

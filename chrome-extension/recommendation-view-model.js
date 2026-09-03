@@ -141,6 +141,8 @@
     const projectedPoints = finiteNumber(rawProjection.projectedPoints);
     const projectedOpportunities = finiteNumber(rawProjection.projectedOpportunities);
     const opportunityKind = safeText(rawProjection.opportunityKind, 20).toLowerCase();
+    const experienceYears = finiteNumber(rawProjection.experienceYears);
+    const experienceSource = safeText(rawProjection.experienceSource, 80);
     const fetchedAt = isoTimestamp(rawProjection.fetchedAt);
     const suppliedSourceAsOf = rawProjection.sourceAsOf;
     const sourceAsOf = suppliedSourceAsOf === null || suppliedSourceAsOf === undefined
@@ -151,6 +153,11 @@
       projectedPoints === null || projectedPoints < 0 || projectedPoints > 1_000 ||
       projectedOpportunities === null || projectedOpportunities < 0 || projectedOpportunities > 1_000 ||
       !validKinds?.has(opportunityKind) ||
+      (experienceYears !== null && (
+        !Number.isInteger(experienceYears) || experienceYears < 0 || experienceYears > 30 ||
+        experienceSource !== 'Sleeper'
+      )) ||
+      (experienceSource && experienceYears === null) ||
       !fetchedAt ||
       (suppliedSourceAsOf !== null && suppliedSourceAsOf !== undefined && !sourceAsOf)
     ) return null;
@@ -164,13 +171,16 @@
         `${rawProjection.season} ${rawProjection.scoring}`,
         `${displayNumber(projectedPoints)} projected points`,
         `${displayNumber(projectedOpportunities)} ${opportunityKind}`,
+        experienceYears === null ? '' : `${experienceYears} years experience (${experienceSource})`,
         ...timing,
         rawProjection.stale ? 'stale cached snapshot' : 'fresh cached snapshot',
-      ].join(' · '),
-      caution: (
-        'Projection evidence only; FantasyPros does not supply experience years, so this ' +
-        'evidence alone does not create a Breakout Watch label.'
-      ),
+      ].filter(Boolean).join(' · '),
+      caution: experienceYears === null
+        ? (
+          'Projection evidence only; no matching Sleeper experience was available, so this ' +
+          'evidence alone does not create a Breakout Watch label.'
+        )
+        : 'FantasyPros projections are combined with conservatively matched Sleeper experience for Breakout Watch.',
     };
   }
 

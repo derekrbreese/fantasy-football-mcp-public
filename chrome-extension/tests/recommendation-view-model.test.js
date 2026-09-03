@@ -250,6 +250,19 @@ test('shows allowlisted FantasyPros projections as evidence, never as Breakout W
   assert.equal(model.recommendations[0].breakoutLabel, '');
   assert.doesNotMatch(JSON.stringify(model.recommendations[0]), /evil\.test|secret/);
 
+  const matchedExperience = createRecommendationViewModel(response({
+    capabilities: { injuryStatus: false, externalNews: false, breakoutWatch: true },
+    recommendations: [candidate(1, {
+      projectionEvidence: {
+        ...projectionEvidence,
+        experienceYears: 2,
+        experienceSource: 'Sleeper',
+      },
+    })],
+  }), { leagueId: '10462193' });
+  assert.match(matchedExperience.recommendations[0].projectionDetail, /2 years experience \(Sleeper\)/);
+  assert.match(matchedExperience.recommendations[0].projectionCaution, /combined.*Sleeper/i);
+
   const malformed = [
     { ...projectionEvidence, source: 'FantasyPros <script>' },
     { ...projectionEvidence, season: true },
