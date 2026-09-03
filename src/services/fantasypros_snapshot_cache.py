@@ -23,20 +23,21 @@ LEGACY_FANTASYPROS_SNAPSHOT_CACHE_PATH = (
 # Backward-compatible import name used by callers and tests.
 DEFAULT_SNAPSHOT_CACHE_PATH = DEFAULT_PROVIDER_SNAPSHOT_CACHE_PATH
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _MAX_SNAPSHOTS = 16
 _MAX_SNAPSHOT_BYTES = 2_000_000
 _MAX_TOTAL_RECORD_BYTES = 8_000_000
 _MAX_DATABASE_BYTES = 16_777_216
 _BUSY_TIMEOUT_MILLISECONDS = 250
 _ENDPOINTS = frozenset(
-    {"players", "injuries", "news", "projections", "sleeper_players"}
+    {"players", "injuries", "news", "projections", "adp", "sleeper_players"}
 )
 _VARIANTS = {
     "players": frozenset({"catalog", "catalog-season"}),
     "injuries": frozenset({"weekly"}),
     "news": frozenset({"recent"}),
     "projections": frozenset({"preseason-std", "preseason-half", "preseason-ppr"}),
+    "adp": frozenset({"preseason-std", "preseason-half", "preseason-ppr"}),
     "sleeper_players": frozenset({"active"}),
 }
 _RECORD_LIMITS = {
@@ -44,6 +45,7 @@ _RECORD_LIMITS = {
     "injuries": 2_000,
     "news": 100,
     "projections": 5_000,
+    "adp": 5_000,
     "sleeper_players": 10_000,
 }
 _POSITIONS = frozenset({"QB", "RB", "WR", "TE", "K", "DST"})
@@ -115,7 +117,7 @@ class FantasyProsSnapshotKey:
                 and self.season == self.week == 0
                 and 1 <= self.request_limit <= 100
             )
-        elif self.endpoint == "projections":
+        elif self.endpoint in {"projections", "adp"}:
             valid = (
                 valid
                 and 2012 <= self.season <= 2100
@@ -357,14 +359,14 @@ class FantasyProsSnapshotCache:
     @staticmethod
     def _initialize_schema(connection: sqlite3.Connection) -> None:
         version = connection.execute("PRAGMA user_version").fetchone()
-        if version is None or type(version[0]) is not int or version[0] not in (0, 1, 2, 3):
+        if version is None or type(version[0]) is not int or version[0] not in (0, 1, 2, 3, 4):
             raise FantasyProsSnapshotCacheUnavailable
-        if version[0] in (1, 2):
+        if version[0] in (1, 2, 3):
             with connection:
-                FantasyProsSnapshotCache._create_schema(connection, "snapshots_v3")
+                FantasyProsSnapshotCache._create_schema(connection, "snapshots_v4")
                 connection.execute(
                     """
-                    INSERT INTO snapshots_v3
+                    INSERT INTO snapshots_v4
                     SELECT endpoint, variant, season, week, request_limit, record_limit,
                            fetched_at, records_json, truncated, returned_count,
                            reported_count, reported_limit, public_api_limited
@@ -372,7 +374,7 @@ class FantasyProsSnapshotCache:
                     """
                 )
                 connection.execute("DROP TABLE snapshots")
-                connection.execute("ALTER TABLE snapshots_v3 RENAME TO snapshots")
+                connection.execute("ALTER TABLE snapshots_v4 RENAME TO snapshots")
                 connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
         FantasyProsSnapshotCache._create_schema(connection, "snapshots")
@@ -382,7 +384,7 @@ class FantasyProsSnapshotCache:
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection, table: str) -> None:
-        if table not in {"snapshots", "snapshots_v2", "snapshots_v3"}:
+        if table not in {"snapshots", "snapshots_v2", "snapshots_v3", "snapshots_v4"}:
             raise FantasyProsSnapshotCacheUnavailable
         connection.execute(
             f"""
@@ -404,7 +406,7 @@ class FantasyProsSnapshotCache:
                     endpoint, variant, season, week, request_limit, record_limit
                 ),
                 CHECK(endpoint IN (
-                    'players', 'injuries', 'news', 'projections', 'sleeper_players'
+                    'players', 'injuries', 'news', 'projections', 'adp', 'sleeper_players'
                 )),
                 CHECK(variant IN (
                     'catalog', 'catalog-season', 'weekly', 'recent',
@@ -504,6 +506,8 @@ class FantasyProsSnapshotCache:
                 cls._validate_news(copied)
             elif endpoint == "projections":
                 cls._validate_projection(copied)
+            elif endpoint == "adp":
+                cls._validate_adp(copied)
             elif endpoint == "sleeper_players":
                 cls._validate_sleeper_player(copied)
             else:
@@ -572,6 +576,14 @@ class FantasyProsSnapshotCache:
             raise FantasyProsSnapshotCacheUnavailable
         expected_kind = "touches" if record["position"] == "RB" else "receptions"
         if record["opportunityKind"] != expected_kind:
+            raise FantasyProsSnapshotCacheUnavailable
+
+    @classmethod
+    def _validate_adp(cls, record: dict[str, Any]) -> None:
+        if set(record) != {"id", "name", "position", "team", "adp"}:
+            raise FantasyProsSnapshotCacheUnavailable
+        cls._validate_identity_fields(record, allow_empty=False)
+        if not cls._bounded_number(record["adp"], 0.01, 10_000.0):
             raise FantasyProsSnapshotCacheUnavailable
 
     @classmethod

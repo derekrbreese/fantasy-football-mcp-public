@@ -646,14 +646,16 @@ async def test_stale_provider_adp_is_removed_before_scoring_or_market_signals(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scoring", ["PPR", "HALF"])
 async def test_service_uses_fantasypros_market_source_for_exclusive_fresh_adp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scoring: str,
 ) -> None:
     path = tmp_path / "drafts.json"
     save_live_draft(live_context(), path)
     profile = local_profile()
-    profile["leagueSettings"]["scoringFormat"] = "PPR"
+    profile["leagueSettings"]["scoringFormat"] = scoring
     for player in profile["rankings"]:
         player.pop("average_draft_position", None)
     monkeypatch.setattr(
@@ -669,7 +671,7 @@ async def test_service_uses_fantasypros_market_source_for_exclusive_fresh_adp(
                 "average_draft_position": float(70 + index),
                 "adp_source": "FantasyPros",
                 "adp_season": 2026,
-                "adp_scoring": "PPR",
+                "adp_scoring": scoring,
                 "adp_source_as_of": None,
                 "adp_fetched_at": fetched_at,
                 "adp_stale": False,
@@ -680,7 +682,7 @@ async def test_service_uses_fantasypros_market_source_for_exclusive_fresh_adp(
         "reason": None,
         "source": "FantasyPros",
         "season": 2026,
-        "scoring": "PPR",
+        "scoring": scoring,
         "sourceAsOf": None,
         "fetchedAt": fetched_at,
         "stale": False,

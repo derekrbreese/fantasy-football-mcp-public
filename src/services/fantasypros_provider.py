@@ -202,7 +202,16 @@ class _Projection:
     opportunity_kind: str
 
 
-_Record = TypeVar("_Record", _CatalogPlayer, _Injury, _News, _Projection)
+@dataclass(frozen=True)
+class _AdpPlayer:
+    fantasypros_id: int
+    name: str
+    position: str
+    team: str
+    adp: float
+
+
+_Record = TypeVar("_Record", _CatalogPlayer, _Injury, _News, _Projection, _AdpPlayer)
 
 
 @dataclass(frozen=True)
@@ -465,7 +474,7 @@ class FantasyProsProvider:
 
         request_year = self._bounded_year(year, now.year)
         request_week = max(0, min(int(week or 0), 25))
-        include_adp = scoring in {"STD", "PPR"}
+        include_catalog_adp = scoring in {"STD", "PPR"}
         async with self._request_lock:
             loads = [
                 self._safe_load(
@@ -476,12 +485,12 @@ class FantasyProsProvider:
                     self._player_cache_ttl_seconds,
                     (
                         lambda raw: self._catalog_player(raw, include_adp=True)
-                        if include_adp
+                        if include_catalog_adp
                         else self._catalog_player(raw)
                     ),
                     response_scope=(
                         {"season": request_year, "week": 0}
-                        if include_adp
+                        if include_catalog_adp
                         else None
                     ),
                 ),
@@ -521,6 +530,22 @@ class FantasyProsProvider:
                         lambda raw: self._projection(raw, scoring),
                     )
                 )
+            if scoring == "HALF":
+                loads.append(
+                    self._safe_load(
+                        f"{request_year}/consensus-rankings",
+                        {
+                            "position": "ALL",
+                            "scoring": scoring,
+                            "type": "ADP",
+                            "week": 0,
+                        },
+                        "players",
+                        self._max_players,
+                        self._player_cache_ttl_seconds,
+                        self._adp_player,
+                    )
+                )
             load_results = await asyncio.gather(*loads)
             catalog_result, injury_result, news_result = load_results[:3]
             projection_result = (
@@ -528,6 +553,14 @@ class FantasyProsProvider:
                 if scoring is not None
                 else _LoadResult((), failed=projection_requested, refresh_failed=projection_requested)
             )
+            if scoring == "HALF":
+                adp_result = load_results[4]
+            elif scoring in {"STD", "PPR"}:
+                adp_result = catalog_result
+            else:
+                adp_result = _LoadResult(
+                    (), failed=projection_requested, refresh_failed=projection_requested
+                )
 
             catalog = [
                 record for record in catalog_result.records if isinstance(record, _CatalogPlayer)
@@ -537,10 +570,42 @@ class FantasyProsProvider:
             projections = [
                 record for record in projection_result.records if isinstance(record, _Projection)
             ]
+            if scoring == "HALF":
+                adp_players = [
+                    record for record in adp_result.records if isinstance(record, _AdpPlayer)
+                ]
+            else:
+                adp_players = [
+                    _AdpPlayer(
+                        player.fantasypros_id,
+                        player.name,
+                        player.position,
+                        player.team,
+                        adp,
+                    )
+                    for player in catalog
+                    if (
+                        adp := player.adp_std if scoring == "STD" else player.adp_ppr
+                    )
+                    is not None
+                ]
             injury_players = self._injury_players(injuries)
             projection_players = self._projection_players(projections)
+            adp_catalog = (
+                [
+                    _CatalogPlayer(
+                        player.fantasypros_id,
+                        player.name,
+                        player.position,
+                        player.team,
+                    )
+                    for player in adp_players
+                ]
+                if scoring == "HALF"
+                else []
+            )
             base_catalog = list(
-                dict.fromkeys((*catalog, *injury_players, *projection_players))
+                dict.fromkeys((*catalog, *injury_players, *projection_players, *adp_catalog))
             )
             base_resolved = self._resolve_identities(identities, base_catalog)
             needs_targeted_identity = any(player is None for player in base_resolved)
@@ -584,6 +649,7 @@ class FantasyProsProvider:
             injury_result,
             news_result,
             projection_result if projection_requested else None,
+            adp_result if projection_requested and scoring == "HALF" else None,
         )
         if projection_requested and scoring is None:
             warnings.append("FantasyPros preseason projections require STD, HALF, or PPR scoring")
@@ -627,6 +693,7 @@ class FantasyProsProvider:
         injuries_by_id = self._latest_injuries(injuries)
         news_by_id = self._news_by_id(news)
         projections_by_id = self._unique_projections(projections)
+        adp_by_id = self._unique_adp(adp_players)
         enriched = [
             self._enrichment(
                 identity,
@@ -642,10 +709,11 @@ class FantasyProsProvider:
                 projection_scoring=scoring,
                 projection_fetched_at=projection_result.fetched_at,
                 projection_stale=projection_result.stale,
+                adp=adp_by_id.get(player.fantasypros_id) if player else None,
                 adp_scoring=scoring,
                 adp_season=request_year,
-                adp_fetched_at=catalog_result.fetched_at,
-                adp_stale=catalog_result.stale,
+                adp_fetched_at=adp_result.fetched_at,
+                adp_stale=adp_result.stale,
             )
             for identity, player in zip(identities, resolved, strict=True)
         ]
@@ -668,6 +736,7 @@ class FantasyProsProvider:
         }
         if projection_requested:
             result["coverage"]["projections"] = self._coverage(projection_result)
+            result["coverage"]["adp"] = self._coverage(adp_result)
             result["projectionEvidence"] = self._projection_evidence(
                 projection_result,
                 request_year,
@@ -675,10 +744,13 @@ class FantasyProsProvider:
                 available_players=len(projections_by_id),
             )
             result["adpEvidence"] = self._adp_evidence(
-                catalog_result,
+                adp_result,
                 request_year,
                 scoring,
-                catalog,
+                adp_players,
+                unavailable_reason=(
+                    "adp_unavailable" if scoring == "HALF" else "catalog_unavailable"
+                ),
             )
         return result
 
@@ -982,6 +1054,18 @@ class FantasyProsProvider:
             ):
                 raise FantasyProsProviderError("FantasyPros returned an invalid response scope")
             return
+        adp_match = re.fullmatch(r"(\d{4})/consensus-rankings", endpoint)
+        if adp_match is not None:
+            expected_scoring = params.get("scoring")
+            if (
+                int(adp_match.group(1)) != _positive_int(payload.get("year"))
+                or str(payload.get("week")) != "0"
+                or payload.get("position_id") != "ALL"
+                or payload.get("scoring") != expected_scoring
+                or str(payload.get("type") or "").upper() != "ADP"
+            ):
+                raise FantasyProsProviderError("FantasyPros returned an invalid response scope")
+            return
         match = re.fullmatch(r"(\d{4})/projections", endpoint)
         if match is None:
             return
@@ -1135,6 +1219,28 @@ class FantasyProsProvider:
                 week=0,
                 record_limit=record_limit,
             )
+        adp_match = re.fullmatch(r"(\d{4})/consensus-rankings", endpoint)
+        if adp_match is not None and set(params) == {
+            "position",
+            "scoring",
+            "type",
+            "week",
+        }:
+            scoring = params.get("scoring")
+            if (
+                params.get("position") != "ALL"
+                or scoring not in _PROJECTION_SCORING
+                or params.get("type") != "ADP"
+                or params.get("week") != 0
+            ):
+                return None
+            return FantasyProsSnapshotKey(
+                "adp",
+                f"preseason-{str(scoring).lower()}",
+                season=int(adp_match.group(1)),
+                week=0,
+                record_limit=record_limit,
+            )
         return None
 
     def _load_persistent_snapshot(
@@ -1244,6 +1350,18 @@ class FantasyProsProvider:
                 for record in records
                 if isinstance(record, _Projection)
             )
+        if endpoint == "adp":
+            return tuple(
+                {
+                    "id": record.fantasypros_id,
+                    "name": record.name,
+                    "position": record.position,
+                    "team": record.team,
+                    "adp": record.adp,
+                }
+                for record in records
+                if isinstance(record, _AdpPlayer)
+            )
         return ()
 
     @staticmethod
@@ -1303,6 +1421,17 @@ class FantasyProsProvider:
                 )
                 for record in records
             )
+        if endpoint == "adp":
+            return tuple(
+                _AdpPlayer(
+                    int(record["id"]),
+                    str(record["name"]),
+                    str(record["position"]),
+                    str(record["team"]),
+                    float(record["adp"]),
+                )
+                for record in records
+            )
         raise ValueError("invalid cached endpoint")
 
     @staticmethod
@@ -1327,6 +1456,17 @@ class FantasyProsProvider:
             if include_adp
             else None,
         )
+
+    @staticmethod
+    def _adp_player(raw: Mapping[str, Any]) -> _AdpPlayer | None:
+        fantasypros_id = _positive_int(raw.get("player_id"))
+        name = _safe_text(raw.get("player_name"), 120)
+        position = _position(raw.get("player_position_id"))
+        team = _team(raw.get("player_team_id"))
+        adp = FantasyProsProvider._positive_adp_number(raw.get("rank_ave"))
+        if fantasypros_id is None or not name or not position or not team or adp is None:
+            return None
+        return _AdpPlayer(fantasypros_id, name, position, team, adp)
 
     @staticmethod
     def _injury(raw: Mapping[str, Any]) -> _Injury | None:
@@ -1411,6 +1551,15 @@ class FantasyProsProvider:
     def _positive_projection_number(value: Any) -> float | None:
         result = FantasyProsProvider._projection_number(value)
         return result if result is not None and result > 0.0 else None
+
+    @staticmethod
+    def _positive_adp_number(value: Any) -> float | None:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not re.fullmatch(r"\d{1,4}(?:\.\d{1,4})?", stripped):
+                return None
+            value = float(stripped)
+        return FantasyProsProvider._positive_projection_number(value)
 
     @staticmethod
     def _optional_projection_number(value: Any) -> float | None:
@@ -1524,6 +1673,17 @@ class FantasyProsProvider:
             if len(records) == 1
         }
 
+    @staticmethod
+    def _unique_adp(players: Sequence[_AdpPlayer]) -> dict[int, _AdpPlayer]:
+        grouped: dict[int, list[_AdpPlayer]] = defaultdict(list)
+        for player in players:
+            grouped[player.fantasypros_id].append(player)
+        return {
+            fantasypros_id: records[0]
+            for fantasypros_id, records in grouped.items()
+            if len(records) == 1
+        }
+
     def _enrichment(
         self,
         identity: Mapping[str, Any],
@@ -1540,6 +1700,7 @@ class FantasyProsProvider:
         projection_scoring: str | None,
         projection_fetched_at: datetime | None,
         projection_stale: bool,
+        adp: _AdpPlayer | None,
         adp_scoring: str | None,
         adp_season: int,
         adp_fetched_at: datetime | None,
@@ -1611,17 +1772,10 @@ class FantasyProsProvider:
                     "projection_stale": projection_stale,
                 }
             )
-        adp = (
-            player.adp_std
-            if adp_scoring == "STD"
-            else player.adp_ppr
-            if adp_scoring == "PPR"
-            else None
-        )
-        if adp is not None:
+        if adp is not None and adp.fantasypros_id == player.fantasypros_id:
             result.update(
                 {
-                    "average_draft_position": adp,
+                    "average_draft_position": adp.adp,
                     "adp_source": _PROVIDER,
                     "adp_season": adp_season,
                     "adp_scoring": adp_scoring,
@@ -1663,16 +1817,17 @@ class FantasyProsProvider:
         injuries: _LoadResult,
         news: _LoadResult,
         projections: _LoadResult | None = None,
+        adp: _LoadResult | None = None,
     ) -> list[str]:
-        results = (
-            ("player catalog", catalog),
-            ("injuries", injuries),
-            ("news", news),
-        ) + (("preseason projections", projections),) if projections is not None else (
+        results: tuple[tuple[str, _LoadResult], ...] = (
             ("player catalog", catalog),
             ("injuries", injuries),
             ("news", news),
         )
+        if projections is not None:
+            results += (("preseason projections", projections),)
+        if adp is not None:
+            results += (("preseason ADP", adp),)
         warnings: list[str] = []
         budget_warning = FantasyProsProvider._daily_budget_warning(
             tuple(result for _label, result in results)
@@ -1746,22 +1901,17 @@ class FantasyProsProvider:
         result: _LoadResult,
         season: int,
         scoring: str | None,
-        catalog: Sequence[_CatalogPlayer],
+        players: Sequence[_AdpPlayer],
+        *,
+        unavailable_reason: str = "catalog_unavailable",
     ) -> dict[str, Any]:
-        if scoring == "HALF":
-            reason = "half_ppr_adp_unavailable"
-            available = 0
-        elif scoring not in {"STD", "PPR"}:
+        if scoring not in _PROJECTION_SCORING:
             reason = "scoring_unavailable"
             available = 0
         else:
-            values = (
-                (player.adp_std if scoring == "STD" else player.adp_ppr)
-                for player in catalog
-            )
-            available = sum(value is not None for value in values)
+            available = len(players)
             reason = None if available else (
-                "catalog_unavailable" if result.failed else "explicit_adp_field_unavailable"
+                unavailable_reason if result.failed else "explicit_adp_field_unavailable"
             )
         status = "unavailable"
         if result.stale and available:

@@ -334,8 +334,8 @@ def _market_signals(
     elif not source_ready or real_adp_count == 0:
         status = "unavailable"
         message = (
-            "Sleeper Watch needs dated same-season ranking metadata and explicitly "
-            "supplied real ADP values."
+            "Sleeper Watch needs dated same-season market provenance and validated "
+            "real ADP values."
         )
     else:
         status = "available"

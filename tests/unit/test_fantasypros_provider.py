@@ -254,6 +254,7 @@ def source_payloads() -> dict[str, dict[str, Any]]:
                 },
             ],
         },
+        "consensus-rankings": _adp_payload(),
     }
 
 
@@ -304,6 +305,137 @@ def _projection_payload(*, scoring: str = "HALF") -> dict[str, Any]:
             },
         ],
     }
+
+
+def _adp_payload(*, scoring: str = "HALF") -> dict[str, Any]:
+    return {
+        "sport": "NFL",
+        "type": "ADP",
+        "year": "2026",
+        "week": "0",
+        "position_id": "ALL",
+        "scoring": scoring,
+        "count": 2,
+        "last_updated": "8/31",
+        "players": [
+            {
+                "player_id": 101,
+                "player_name": "Jordan Alpha",
+                "player_position_id": "RB",
+                "player_team_id": "SF",
+                "rank_ave": "18.5",
+                "player_page_url": "must-not-escape",
+            },
+            {
+                "player_id": 202,
+                "player_name": "Case O'Neil",
+                "player_position_id": "WR",
+                "player_team_id": "NYJ",
+                "rank_ave": 73,
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_half_ppr_adp_uses_scoring_specific_consensus_snapshot(
+    source_payloads: dict[str, dict[str, Any]],
+) -> None:
+    source_payloads["projections"] = _projection_payload()
+    source_payloads["consensus-rankings"] = _adp_payload()
+    transport = FakeTransport(source_payloads)
+
+    result = await _provider(
+        api_key="secret",
+        transport=transport,
+        clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
+    ).get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
+        year=2026,
+        projection_scoring="HALF",
+    )
+
+    adp_call = next(
+        call for call in transport.calls if call["url"].endswith("/consensus-rankings")
+    )
+    assert adp_call["url"] == (
+        "https://api.fantasypros.com/public/v2/json/nfl/2026/consensus-rankings"
+    )
+    assert adp_call["params"] == {
+        "position": "ALL",
+        "scoring": "HALF",
+        "type": "ADP",
+        "week": 0,
+    }
+    assert result["players"][0]["average_draft_position"] == 18.5
+    assert result["players"][0]["adp_scoring"] == "HALF"
+    assert result["adpEvidence"] == {
+        "status": "available",
+        "reason": None,
+        "source": "FantasyPros",
+        "season": 2026,
+        "scoring": "HALF",
+        "sourceAsOf": None,
+        "fetchedAt": "2026-09-01T00:00:00Z",
+        "stale": False,
+        "refreshFailed": False,
+        "availablePlayers": 2,
+        "publicApiLimited": False,
+    }
+    assert "must-not-escape" not in repr(result)
+    cache_path = snapshot_cache_module.DEFAULT_SNAPSHOT_CACHE_PATH
+    with sqlite3.connect(cache_path) as connection:
+        assert connection.execute(
+            "SELECT endpoint, variant, season FROM snapshots WHERE endpoint = 'adp'"
+        ).fetchall() == [("adp", "preseason-half", 2026)]
+
+    restarted_transport = FakeTransport({})
+    restarted = await _provider(
+        api_key="different-secret",
+        transport=restarted_transport,
+        clock=lambda: datetime(2026, 9, 1, 0, 4, tzinfo=timezone.utc),
+    ).get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
+        year=2026,
+        projection_scoring="HALF",
+    )
+
+    assert restarted_transport.calls == []
+    assert restarted["players"][0]["average_draft_position"] == 18.5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"year": "2025"},
+        {"week": "1"},
+        {"position_id": "RB"},
+        {"scoring": "PPR"},
+        {"type": "Preseason"},
+    ],
+)
+async def test_half_ppr_adp_response_scope_mismatch_fails_closed(
+    source_payloads: dict[str, dict[str, Any]],
+    mutation: dict[str, Any],
+) -> None:
+    source_payloads["projections"] = _projection_payload()
+    source_payloads["consensus-rankings"] = {**_adp_payload(), **mutation}
+
+    result = await _provider(
+        api_key="secret",
+        transport=FakeTransport(source_payloads),
+        clock=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
+    ).get_player_updates(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}],
+        year=2026,
+        projection_scoring="HALF",
+    )
+
+    assert "average_draft_position" not in result["players"][0]
+    assert result["adpEvidence"]["status"] == "unavailable"
+    assert result["adpEvidence"]["reason"] == "adp_unavailable"
+    assert any("preseason ADP is temporarily unavailable" in item for item in result["warnings"])
 
 
 @pytest.mark.asyncio
@@ -364,8 +496,9 @@ async def test_preseason_projections_use_explicit_contract_and_strict_allowlist(
         "reportedLimit": None,
         "publicApiLimited": False,
     }
-    assert result["adpEvidence"]["status"] == "unavailable"
-    assert result["adpEvidence"]["reason"] == "half_ppr_adp_unavailable"
+    assert result["adpEvidence"]["status"] == "available"
+    assert result["adpEvidence"]["reason"] is None
+    assert result["players"][0]["average_draft_position"] == 18.5
     expected_projection = {
         "projected_points": 221.5,
         "projected_opportunities": 222.75,
@@ -389,7 +522,6 @@ async def test_preseason_projections_use_explicit_contract_and_strict_allowlist(
         "filename",
         "raw_note",
         "experience_years",
-        "average_draft_position",
     ):
         assert forbidden not in serialized
 
@@ -400,10 +532,10 @@ async def test_preseason_projections_use_explicit_contract_and_strict_allowlist(
     [
         ("STD", 18.0, "available", None),
         ("PPR", 23.0, "available", None),
-        ("HALF", None, "unavailable", "half_ppr_adp_unavailable"),
+        ("HALF", 18.5, "available", None),
     ],
 )
-async def test_catalog_adp_uses_only_explicit_scoring_field_and_same_season(
+async def test_adp_uses_only_explicit_scoring_field_and_same_season(
     source_payloads: dict[str, dict[str, Any]],
     scoring: str,
     expected_adp: float | None,
@@ -451,7 +583,7 @@ async def test_catalog_adp_uses_only_explicit_scoring_field_and_same_season(
         assert player["adp_stale"] is False
     assert result["adpEvidence"]["status"] == expected_status
     assert result["adpEvidence"]["reason"] == expected_reason
-    assert result["adpEvidence"]["publicApiLimited"] is True
+    assert result["adpEvidence"]["publicApiLimited"] is (scoring != "HALF")
     assert "rank_ecr" not in repr(result)
 
 
@@ -529,7 +661,7 @@ async def test_projection_snapshot_schema_migration_preserves_existing_snapshots
     with sqlite3.connect(cache_path) as connection:
         connection.executescript(
             """
-            PRAGMA user_version = 2;
+            PRAGMA user_version = 3;
             CREATE TABLE snapshots (
                 endpoint TEXT NOT NULL,
                 variant TEXT NOT NULL,
@@ -545,10 +677,12 @@ async def test_projection_snapshot_schema_migration_preserves_existing_snapshots
                 reported_limit INTEGER CHECK(reported_limit BETWEEN 1 AND 100000),
                 public_api_limited INTEGER NOT NULL CHECK(public_api_limited IN (0, 1)),
                 PRIMARY KEY (endpoint, variant, season, week, request_limit, record_limit),
-                CHECK(endpoint IN ('players', 'injuries', 'news', 'projections')),
+                CHECK(endpoint IN (
+                    'players', 'injuries', 'news', 'projections', 'sleeper_players'
+                )),
                 CHECK(variant IN (
                     'catalog', 'catalog-season', 'weekly', 'recent',
-                    'preseason-std', 'preseason-half', 'preseason-ppr'
+                    'preseason-std', 'preseason-half', 'preseason-ppr', 'active'
                 ))
             ) WITHOUT ROWID;
             """
@@ -610,7 +744,7 @@ async def test_projection_snapshot_schema_migration_preserves_existing_snapshots
     )
     assert cache.load(projection_key) is not None
     with sqlite3.connect(cache_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert connection.execute("SELECT count(*) FROM snapshots").fetchone()[0] == 2
 
     source_payloads["projections"] = _projection_payload()
@@ -629,10 +763,12 @@ async def test_projection_snapshot_schema_migration_preserves_existing_snapshots
     assert {call["url"].rsplit("/", 1)[-1] for call in transport.calls} == {
         "injuries",
         "news",
+        "consensus-rankings",
     }
     assert result["players"][0]["identityResolved"] is True
     assert result["players"][0]["projected_points"] == 221.5
-    assert result["adpEvidence"]["reason"] == "half_ppr_adp_unavailable"
+    assert result["players"][0]["average_draft_position"] == 18.5
+    assert result["adpEvidence"]["reason"] is None
 
 
 def test_default_cache_copies_legacy_fantasypros_database_to_provider_path(
