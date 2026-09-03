@@ -9,7 +9,6 @@
   if (!metadata) return;
 
   const contentLoadedAt = new Date().toISOString();
-  let scanTimer;
   let scanInProgress = null;
   let lastSyncedSignature;
   let lastSyncAttemptAt = 0;
@@ -431,36 +430,30 @@
     };
   }
 
+  function beginScanAfter(precedingOperation = null) {
+    const operation = (precedingOperation
+      ? precedingOperation.catch(() => undefined)
+      : Promise.resolve())
+      .then(() => operationLock.run(metadata.sessionKey, performScan))
+      .catch((error) => {
+        console.warn('[Yahoo Draft Recorder] Scan failed:', error);
+        return { ...diagnostics, error: error.message };
+      })
+      .finally(() => {
+        if (scanInProgress === operation) scanInProgress = null;
+      });
+    scanInProgress = operation;
+    return operation;
+  }
+
   function scanNow(options = {}) {
     if (options.forceSync === true) {
       lastSyncedSignature = undefined;
       diagnostics.syncStatus = 'not-attempted';
-      const precedingOperation = scanInProgress;
-      const operation = (precedingOperation
-        ? precedingOperation.catch(() => undefined)
-        : Promise.resolve())
-        .then(() => operationLock.run(metadata.sessionKey, performScan))
-        .catch((error) => {
-          console.warn('[Yahoo Draft Recorder] Scan failed:', error);
-          return { ...diagnostics, error: error.message };
-        })
-        .finally(() => {
-          if (scanInProgress === operation) scanInProgress = null;
-        });
-      scanInProgress = operation;
-      return operation;
+      return beginScanAfter(scanInProgress);
     }
-    if (!scanInProgress) {
-      const operation = operationLock.run(metadata.sessionKey, performScan)
-        .catch((error) => {
-          console.warn('[Yahoo Draft Recorder] Scan failed:', error);
-          return { ...diagnostics, error: error.message };
-        })
-        .finally(() => {
-          if (scanInProgress === operation) scanInProgress = null;
-        });
-      scanInProgress = operation;
-    }
+    if (options.queueAfterCurrent === true) return beginScanAfter(scanInProgress);
+    if (!scanInProgress) return beginScanAfter();
     return scanInProgress;
   }
 
@@ -491,12 +484,14 @@
     return operation;
   }
 
-  function scheduleScan() {
-    window.clearTimeout(scanTimer);
-    scanTimer = window.setTimeout(scanNow, 400);
-  }
+  const automaticScanScheduler = YahooDraftScanScheduler.createBoundedScanScheduler({
+    quietDelayMs: 400,
+    maximumWaitMs: 1000,
+    run: () => scanNow({ queueAfterCurrent: true }),
+    onError: (error) => console.warn('[Yahoo Draft Recorder] Scheduled scan failed:', error),
+  });
 
-  const observer = new MutationObserver(scheduleScan);
+  const observer = new MutationObserver(() => automaticScanScheduler.request());
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 
   webext.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -542,5 +537,5 @@
     return false;
   });
 
-  scanNow();
+  automaticScanScheduler.runNow();
 })();

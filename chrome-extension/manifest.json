@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Yahoo Fantasy Draft Recorder",
   "description": "Records Yahoo Fantasy Football draft picks locally and shows private recommendations from a local MCP server.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "icons": {
     "16": "icons/football-16.png",
     "32": "icons/football-32.png",
@@ -63,6 +63,7 @@
         "sync-client.js",
         "draft-storage.js",
         "session-store.js",
+        "scan-scheduler.js",
         "content.js"
       ],
       "run_at": "document_idle"

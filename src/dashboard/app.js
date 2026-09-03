@@ -6,6 +6,7 @@
   const renderer = globalThis.YahooDraftRecommendationRenderer;
   const cockpit = globalThis.YahooDraftCockpit;
   const profileClient = globalThis.YahooDraftProfileClient;
+  const liveRefresh = globalThis.YahooDraftDashboardLiveRefresh;
   const form = document.getElementById('recommendation-form');
   const profileForm = document.getElementById('draft-profile-form');
   const profileReuseForm = document.getElementById('draft-profile-reuse-form');
@@ -14,6 +15,7 @@
   const profileDefaultSport = document.getElementById('profile-default-sport');
   const profileDefaultSource = document.getElementById('profile-default-source');
   const leagueInput = document.getElementById('league-id');
+  const liveRefreshToggle = document.getElementById('live-refresh');
   const requestStatus = document.getElementById('request-status');
   const recommendationView = document.getElementById('recommendation-view');
   const formControls = [...form.elements];
@@ -31,6 +33,9 @@
   let selectedPosition = 'OVERALL';
   let activeCockpitLeagueId = null;
   let activeCockpitSessionKey = null;
+  let livePoller = null;
+  let analysisGeneration = 0;
+  let activeAnalysisController = null;
 
   function clear(node) {
     node.replaceChildren();
@@ -97,6 +102,7 @@
 
   function setControlsDisabled(disabled) {
     formControls.forEach((control) => {
+      if (control === liveRefreshToggle) return;
       control.disabled = disabled;
     });
   }
@@ -423,7 +429,7 @@
     const leagueId = params.get('leagueId') || '';
     if (/^\d{1,32}$/.test(leagueId)) {
       leagueInput.value = leagueId;
-      setStatus(`League ${leagueId} selected from the extension. Refresh when ready.`, 'idle');
+      setStatus(`League ${leagueId} selected from the extension. Live refresh will start automatically.`, 'idle');
     }
   }
 
@@ -956,34 +962,136 @@
     return message;
   }
 
+  function selectedRecommendationOptions() {
+    return {
+      endpoint: '/draft-recommendation',
+      strategy: document.getElementById('strategy').value,
+      count: document.getElementById('count').value,
+      rankingCount: document.getElementById('ranking-count').value,
+      simulations: document.getElementById('simulations').value,
+      timeoutMs: 30000,
+    };
+  }
+
+  function analysisSelectionKey(leagueId) {
+    const options = selectedRecommendationOptions();
+    return JSON.stringify([
+      leagueId,
+      options.strategy,
+      options.count,
+      options.rankingCount,
+      options.simulations,
+    ]);
+  }
+
+  function cancelActiveAnalysis() {
+    analysisGeneration += 1;
+    activeAnalysisController?.abort();
+    activeAnalysisController = null;
+  }
+
+  function beginAnalysis(leagueId) {
+    cancelActiveAnalysis();
+    activeAnalysisController = typeof AbortController === 'function'
+      ? new AbortController()
+      : null;
+    return {
+      controller: activeAnalysisController,
+      generation: analysisGeneration,
+      leagueId,
+      selectionKey: analysisSelectionKey(leagueId),
+    };
+  }
+
+  function analysisStillCurrent(operation) {
+    return operation?.generation === analysisGeneration &&
+      operation.leagueId === leagueInput.value.trim() &&
+      operation.selectionKey === analysisSelectionKey(operation.leagueId) &&
+      operation.controller?.signal?.aborted !== true;
+  }
+
+  function finishAnalysis(operation) {
+    if (analysisStillCurrent(operation)) activeAnalysisController = null;
+  }
+
+  function responseNeedsFreshRevision(data) {
+    return data?.refreshRequired === true &&
+      ['draft_state_changed', 'draft_profile_changed'].includes(data?.errorCode);
+  }
+
+  async function requestAnalysisForRevision(leagueId, revision, operation) {
+    const data = await client.fetchDraftRecommendationsForLeagueId(leagueId, {
+      ...selectedRecommendationOptions(),
+      signal: operation.controller?.signal,
+    });
+    if (!analysisStillCurrent(operation)) return { ignored: true };
+    if (responseNeedsFreshRevision(data)) {
+      setStatus('Draft state changed during analysis; waiting briefly for the newest revision…', 'loading');
+      return { retry: true };
+    }
+    if (data?.generatedAt !== revision.generatedAt) {
+      setStatus('Recommendation revision did not match the recorded draft; waiting for a current result…', 'warning');
+      return { retry: true };
+    }
+    const confirmedRevision = await liveRefresh.fetchDraftRevision(leagueId, {
+      signal: operation.controller?.signal,
+    });
+    if (!analysisStillCurrent(operation)) return { ignored: true };
+    if (!liveRefresh.sameRevision(revision, confirmedRevision)) {
+      setStatus('A newer pick arrived during analysis; the older result was discarded.', 'loading');
+      return { retry: true };
+    }
+    return { applied: true, data, leagueId, operation, revision };
+  }
+
+  async function requestAutomaticAnalysis(revision) {
+    const operation = beginAnalysis(revision.leagueId);
+    setStatus(
+      `Pick ${revision.latestOverallPick || '—'} recorded; refreshing while current recommendations remain visible…`,
+      'loading',
+    );
+    return requestAnalysisForRevision(revision.leagueId, revision, operation);
+  }
+
+  function applyAnalysisOutcome(outcome) {
+    if (!outcome?.applied || !analysisStillCurrent(outcome.operation)) return false;
+    const { data, leagueId } = outcome;
+    const model = render(data, leagueId);
+    setStatus(...requestStatusForModel(model, leagueId));
+    finishAnalysis(outcome.operation);
+    return true;
+  }
+
   async function refreshAnalysis(leagueId) {
+    livePoller?.stop();
+    const operation = beginAnalysis(leagueId);
     resetAnalysisPanels({ preserveCockpit: activeCockpitLeagueId === leagueId });
+    livePoller?.forgetRendered();
     setControlsDisabled(true);
     setProfileControlsDisabled(true);
     setStatus('Refreshing live context and running bounded specialist scoring…', 'loading');
     try {
-      const data = await client.fetchDraftRecommendationsForLeagueId(leagueId, {
-        endpoint: '/draft-recommendation',
-        strategy: document.getElementById('strategy').value,
-        count: document.getElementById('count').value,
-        rankingCount: document.getElementById('ranking-count').value,
-        simulations: document.getElementById('simulations').value,
-        timeoutMs: 30000,
+      const revision = await liveRefresh.fetchDraftRevision(leagueId, {
+        signal: operation.controller?.signal,
       });
-      if (leagueInput.value.trim() !== leagueId) {
-        setStatus('League selection changed; the prior response was discarded.', 'warning');
+      const outcome = await requestAnalysisForRevision(leagueId, revision, operation);
+      if (!analysisStillCurrent(operation)) return;
+      if (outcome.retry) {
+        setStatus('Draft state changed during analysis; live refresh will retry shortly.', 'warning');
         return;
       }
-      const model = render(data, leagueId);
-      setStatus(...requestStatusForModel(model, leagueId));
+      if (applyAnalysisOutcome(outcome)) livePoller?.markRendered(revision);
     } catch (error) {
+      if (!analysisStillCurrent(operation)) return;
       const message = recommendationErrorMessage(error, leagueId);
       resetAnalysisPanels();
       renderClientError(message, leagueId);
       setStatus(message, 'error');
     } finally {
+      if (analysisStillCurrent(operation)) finishAnalysis(operation);
       setControlsDisabled(false);
       setProfileControlsDisabled(false);
+      if (liveRefreshToggle.checked) livePoller?.restart();
     }
   }
 
@@ -1005,6 +1113,8 @@
     }
 
     let shouldRefresh = false;
+    cancelActiveAnalysis();
+    livePoller?.stop();
     setControlsDisabled(true);
     setProfileControlsDisabled(true);
     setProfileStatus(
@@ -1042,6 +1152,7 @@
       setProfileControlsDisabled(false);
     }
     if (shouldRefresh) await refreshAnalysis(leagueId);
+    else livePoller?.invalidate();
   });
 
   profileDefaultForm.addEventListener('submit', async (event) => {
@@ -1137,6 +1248,9 @@
       return;
     }
 
+    let shouldRefresh = false;
+    cancelActiveAnalysis();
+    livePoller?.stop();
     setControlsDisabled(true);
     setProfileControlsDisabled(true);
     setProfileStatus(
@@ -1186,6 +1300,7 @@
       await loadSavedProfiles();
       setProfileStatus(profileSourceTitle(format), detailParts.join(' · '), freshness);
       fileInput.value = '';
+      shouldRefresh = true;
     } catch (error) {
       setProfileStatus(
         'Profile import failed',
@@ -1196,6 +1311,8 @@
       setControlsDisabled(false);
       setProfileControlsDisabled(false);
     }
+    if (shouldRefresh) await refreshAnalysis(leagueId);
+    else livePoller?.invalidate();
   });
 
   document.getElementById('queue-add').addEventListener('click', () => {
@@ -1243,6 +1360,34 @@
     renderPositionBoard(latestCockpitData);
   });
 
+  if (liveRefresh) {
+    livePoller = liveRefresh.createLiveDraftPoller({
+      enabled: () => liveRefreshToggle.checked,
+      visible: () => document.hidden !== true,
+      leagueId: () => leagueInput.value.trim(),
+      fetchRevision: (leagueId) => liveRefresh.fetchDraftRevision(leagueId),
+      refresh: requestAutomaticAnalysis,
+      applied: (_revision, outcome) => applyAnalysisOutcome(outcome),
+      pending: (revision, detail) => setStatus(
+        detail?.superseded
+          ? `Draft is moving quickly through pick ${revision.latestOverallPick || '—'}; waiting briefly for the latest picks…`
+          : `New draft revision detected at pick ${revision.latestOverallPick || '—'}; refreshing shortly…`,
+        'loading',
+      ),
+      onError: (error) => {
+        if (error?.name === 'AbortError') return;
+        setStatus(
+          `Live refresh is waiting to retry: ${String(error?.message || error).slice(0, 240)}`,
+          'warning',
+        );
+      },
+      terminal: (error) => setStatus(
+        `Live refresh paused for this draft revision: ${String(error?.message || error).slice(0, 200)}. Update the draft profile or settings, refresh manually, or wait for the next pick.`,
+        'error',
+      ),
+    });
+  }
+
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!form.reportValidity()) return;
@@ -1257,12 +1402,35 @@
   });
   profileDefaultSource.addEventListener('change', updateProfileDefaultControls);
   leagueInput.addEventListener('input', () => {
+    cancelActiveAnalysis();
+    resetAnalysisPanels();
+    livePoller?.invalidate();
     renderSavedProfileChoices();
     if (savedProfilesLoaded) showSelectedProfileStatus();
   });
+  ['strategy', 'count', 'ranking-count', 'simulations'].forEach((identifier) => {
+    document.getElementById(identifier).addEventListener('change', () => {
+      cancelActiveAnalysis();
+      livePoller?.invalidate();
+    });
+  });
+  liveRefreshToggle.addEventListener('change', () => {
+    cancelActiveAnalysis();
+    if (liveRefreshToggle.checked) {
+      setStatus('Live refresh enabled; checking the selected draft revision…', 'idle');
+      livePoller?.restart();
+    } else {
+      livePoller?.stop();
+      setStatus('Live refresh paused. Existing recommendations remain visible.', 'idle');
+    }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) cancelActiveAnalysis();
+    livePoller?.visibilityChanged();
+  });
   prefillLeagueFromFragment();
 
-  if (!client || !viewModels || !renderer || !cockpit) {
+  if (!client || !viewModels || !renderer || !cockpit || !liveRefresh) {
     setStatus('Shared recommendation UI modules are unavailable.', 'error');
     setControlsDisabled(true);
     return;
@@ -1277,4 +1445,5 @@
   } else {
     void loadSavedProfiles();
   }
+  livePoller?.start();
 }());

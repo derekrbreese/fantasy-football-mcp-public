@@ -94,12 +94,39 @@ test('new league selection aborts A and generation guards both A success and A e
 test('recognizes storage changes only for the explicitly selected league', () => {
   const selected = 'f1:111';
   const encoded = encodeURIComponent(selected);
+  const selectedSession = {
+    sport: 'f1', leagueId: '111', sessionKey: selected,
+    updatedAt: '2026-08-31T23:00:00.000Z',
+  };
 
   assert.equal(storageChangeAffectsSession({
-    [`yahooDraftRecorderSession:${encoded}`]: { newValue: { updatedAt: 'later' } },
+    [`yahooDraftRecorderSession:${encoded}`]: {
+      oldValue: selectedSession,
+      newValue: { ...selectedSession, updatedAt: '2026-08-31T23:00:01.000Z' },
+    },
+  }, selected), true);
+  assert.equal(storageChangeAffectsSession({
+    [`yahooDraftRecorderSession:${encoded}`]: {
+      oldValue: selectedSession,
+      newValue: { ...selectedSession, lastSyncedAt: selectedSession.updatedAt },
+    },
+  }, selected), false, 'sync bookkeeping alone does not change the draft revision');
+  assert.equal(storageChangeAffectsSession({
+    [`yahooDraftRecorderSession:${encoded}`]: {
+      oldValue: selectedSession,
+      newValue: null,
+    },
+  }, selected), true, 'deleting the selected session remains actionable');
+  assert.equal(storageChangeAffectsSession({
+    [`yahooDraftRecorderSessionDeleted:${encoded}`]: {
+      newValue: { clearedAt: '2026-08-31T23:00:02.000Z' },
+    },
   }, selected), true);
   assert.equal(storageChangeAffectsSession({
     [`yahooDraftRecorderPendingRepair:${encoded}`]: { newValue: { state: 'intent' } },
+  }, selected), true);
+  assert.equal(storageChangeAffectsSession({
+    [`yahooDraftRecorderPendingReset:${encoded}`]: { newValue: { state: 'accepted' } },
   }, selected), true);
   assert.equal(storageChangeAffectsSession({
     yahooDraftRecorderSessions: {
@@ -134,6 +161,38 @@ test('recognizes storage changes only for the explicitly selected league', () =>
   assert.equal(storageChangeAffectsSession({
     [`yahooDraftRecorderSession:${encoded}`]: {},
   }, null), false);
+});
+
+test('last-synced bookkeeping does not cancel in-flight work or queue a duplicate refresh', () => {
+  const selected = 'f1:111';
+  const encoded = encodeURIComponent(selected);
+  const session = {
+    sport: 'f1', leagueId: '111', sessionKey: selected,
+    updatedAt: '2026-08-31T23:00:00.000Z',
+  };
+  let cancelCount = 0;
+  let scheduledCallback = null;
+  const scheduler = createRecommendationAutoRefreshScheduler({
+    setTimeoutImpl(callback) { scheduledCallback = callback; return 1; },
+    clearTimeoutImpl() {},
+    selectedSessionKey: () => selected,
+    sessionForKey: () => session,
+    cancelInFlight() { cancelCount += 1; },
+    async reloadSessions() { return true; },
+    async refresh() { throw new Error('must not refresh an unchanged revision'); },
+  });
+  scheduler.markRequested(session);
+
+  const changes = {
+    [`yahooDraftRecorderSession:${encoded}`]: {
+      oldValue: session,
+      newValue: { ...session, lastSyncedAt: session.updatedAt },
+    },
+  };
+  if (storageChangeAffectsSession(changes, selected)) scheduler.schedule(selected);
+
+  assert.equal(cancelCount, 0);
+  assert.equal(scheduledCallback, null);
 });
 
 test('selected-league updates debounce, abort stale work, reload, and refresh one new revision', async () => {

@@ -107,6 +107,229 @@ def structured_profile_payload() -> dict:
     }
 
 
+@pytest.mark.asyncio
+async def test_draft_revision_route_returns_only_exact_private_revision(monkeypatch) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "_load_bound_live_draft",
+        lambda league_id: {
+            "schemaVersion": 1,
+            "source": "yahoo-draft-recorder",
+            "generatedAt": "2026-09-03T18:00:00Z",
+            "draft": {
+                "sport": "nfl",
+                "leagueId": league_id,
+                "teamId": "6",
+                "sessionKey": f"nfl:{league_id}",
+            },
+            "picks": [
+                {
+                    "pickNumber": 1,
+                    "player": "Private Player",
+                    "isUserPick": True,
+                }
+            ],
+            "captureBlocked": True,
+        },
+    )
+
+    response = await fastmcp_server.receive_live_draft_revision(
+        request_for(
+            "POST",
+            "/draft-revision",
+            payload={"schemaVersion": 1, "leagueId": "10462193"},
+            origin="http://127.0.0.1:8765",
+        )
+    )
+
+    assert response.status_code == 200
+    assert response_json(response) == {
+        "schemaVersion": 1,
+        "status": "success",
+        "leagueId": "10462193",
+        "sessionKey": "nfl:10462193",
+        "generatedAt": "2026-09-03T18:00:00Z",
+        "pickCount": 1,
+        "latestOverallPick": 1,
+        "captureBlocked": True,
+    }
+    assert b"Private Player" not in response.body
+    assert b"teamId" not in response.body
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changes", "status", "message"),
+    [
+        ({"origin": None}, 403, "Origin required"),
+        ({"origin": "https://evil.example"}, 403, "Origin not allowed"),
+        ({"client": "192.168.1.20"}, 403, "Loopback access required"),
+        ({"content_type": "text/plain"}, 415, "application/json"),
+        ({"ui_header": None}, 403, "UI header required"),
+        ({"content_length": "not-a-number"}, 400, "Invalid content length"),
+        ({"content_length": "-1"}, 400, "Invalid content length"),
+        ({"content_length": "257"}, 413, "Payload too large"),
+    ],
+)
+async def test_draft_revision_route_rejects_unsafe_requests(
+    monkeypatch, changes, status, message
+) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "_load_bound_live_draft",
+        lambda _league_id: pytest.fail("unsafe request reached the draft store"),
+    )
+    response = await fastmcp_server.receive_live_draft_revision(
+        request_for(
+            "POST",
+            "/draft-revision",
+            payload={"schemaVersion": 1, "leagueId": "10462193"},
+            **changes,
+        )
+    )
+    assert response.status_code == status
+    assert message in response_json(response)["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"schemaVersion": 1, "leagueId": "10462193", "teamId": "6"}, "Unsupported field"),
+        ({"schemaVersion": 1, "leagueId": "../10462193"}, "leagueId"),
+        ({"schemaVersion": True, "leagueId": "10462193"}, "schemaVersion 1"),
+        ({"leagueId": "10462193"}, "schemaVersion 1"),
+        (["10462193"], "JSON object"),
+    ],
+)
+async def test_draft_revision_route_allowlists_json(monkeypatch, payload, message) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "_load_bound_live_draft",
+        lambda _league_id: pytest.fail("invalid request reached the draft store"),
+    )
+    response = await fastmcp_server.receive_live_draft_revision(
+        request_for("POST", "/draft-revision", payload=payload)
+    )
+    assert response.status_code == 400
+    assert message in response_json(response)["message"]
+
+
+@pytest.mark.asyncio
+async def test_draft_revision_route_bounds_actual_streamed_body(monkeypatch) -> None:
+    monkeypatch.setattr(
+        fastmcp_server,
+        "_load_bound_live_draft",
+        lambda _league_id: pytest.fail("oversized body reached the draft store"),
+    )
+    response = await fastmcp_server.receive_live_draft_revision(
+        request_for(
+            "POST",
+            "/draft-revision",
+            body=b"{" + b" " * 256 + b"}",
+            content_length="0",
+        )
+    )
+    assert response.status_code == 413
+    assert response_json(response)["message"] == "Payload too large"
+
+
+@pytest.mark.asyncio
+async def test_draft_revision_preflight_is_strict_and_private_network_safe() -> None:
+    response = await fastmcp_server.receive_live_draft_revision(
+        request_for(
+            "OPTIONS",
+            "/draft-revision",
+            origin="chrome-extension://abcdefghijklmnop",
+            content_type=None,
+            ui_header=None,
+        )
+    )
+    assert response.status_code == 204
+    assert response.headers["access-control-allow-origin"] == (
+        "chrome-extension://abcdefghijklmnop"
+    )
+    assert response.headers["access-control-allow-private-network"] == "true"
+    assert "X-Fantasy-Draft-UI" in response.headers["access-control-allow-headers"]
+
+
+@pytest.mark.asyncio
+async def test_draft_revision_route_returns_404_for_missing_exact_league(monkeypatch) -> None:
+    monkeypatch.setattr(fastmcp_server, "_load_bound_live_draft", lambda _league_id: None)
+    response = await fastmcp_server.receive_live_draft_revision(
+        request_for(
+            "POST",
+            "/draft-revision",
+            payload={"schemaVersion": 1, "leagueId": "10462193"},
+        )
+    )
+    assert response.status_code == 404
+    assert response_json(response) == {
+        "status": "error",
+        "message": "No synced live draft state was found",
+    }
+
+
+@pytest.mark.asyncio
+async def test_draft_revision_route_rejects_malformed_stored_state(monkeypatch) -> None:
+    private_detail = "secret-player https://example.invalid/?token=private"
+    monkeypatch.setattr(
+        fastmcp_server,
+        "_load_bound_live_draft",
+        lambda league_id: {
+            "schemaVersion": 1,
+            "source": "yahoo-draft-recorder",
+            "generatedAt": "not-a-timestamp",
+            "draft": {
+                "sport": "nfl",
+                "leagueId": league_id,
+                "teamId": "6",
+                "sessionKey": f"nfl:{league_id}",
+            },
+            "picks": [{"player": private_detail, "isUserPick": False}],
+        },
+    )
+    response = await fastmcp_server.receive_live_draft_revision(
+        request_for(
+            "POST",
+            "/draft-revision",
+            payload={"schemaVersion": 1, "leagueId": "10462193"},
+        )
+    )
+    assert response.status_code == 500
+    assert response_json(response) == {
+        "status": "error",
+        "message": "Draft revision service unavailable",
+    }
+    assert private_detail.encode() not in response.body
+
+
+@pytest.mark.asyncio
+async def test_draft_revision_route_never_echoes_private_store_errors(monkeypatch) -> None:
+    private_detail = "/Users/private/.fantasy-football/live-drafts.json"
+
+    def fail_load(_league_id: str) -> None:
+        raise fastmcp_server.LiveDraftValidationError(
+            f"could not read live draft store: {private_detail}"
+        )
+
+    monkeypatch.setattr(fastmcp_server, "_load_bound_live_draft", fail_load)
+    response = await fastmcp_server.receive_live_draft_revision(
+        request_for(
+            "POST",
+            "/draft-revision",
+            payload={"schemaVersion": 1, "leagueId": "10462193"},
+        )
+    )
+    assert response.status_code == 500
+    assert response_json(response) == {
+        "status": "error",
+        "message": "Draft revision service unavailable",
+    }
+    assert private_detail.encode() not in response.body
+
+
 def profile_summary(league_id: str = "498589") -> dict:
     return {
         "sport": "nfl",
@@ -1616,6 +1839,15 @@ async def test_dashboard_assets_are_loopback_only_and_no_store() -> None:
             ui_header=None,
         )
     )
+    live_refresh = await fastmcp_server.serve_draft_dashboard_live_refresh(
+        request_for(
+            "GET",
+            "/draft-dashboard/live-refresh.js",
+            body=b"",
+            content_type=None,
+            ui_header=None,
+        )
+    )
     shared = await fastmcp_server.serve_draft_recommendation_client(
         request_for(
             "GET",
@@ -1654,6 +1886,8 @@ async def test_dashboard_assets_are_loopback_only_and_no_store() -> None:
     assert script.headers["content-type"].startswith("text/javascript")
     assert profile_client.status_code == 200
     assert b"saveDraftProfileXlsx" in profile_client.body
+    assert live_refresh.status_code == 200
+    assert b"createLiveDraftPoller" in live_refresh.body
     assert shared.status_code == 200
     assert shared.body == (
         fastmcp_server._DRAFT_SHARED_UI_DIRECTORY / "recommendation-client.js"
@@ -1694,7 +1928,11 @@ def test_dashboard_uses_shared_ui_contract_without_inline_or_remote_code() -> No
 
     assert all(name in index for name in shared_scripts)
     assert "/draft-dashboard/draft-profile-client.js" in index
+    assert "/draft-dashboard/live-refresh.js" in index
     assert max(index.index(name) for name in shared_scripts) < index.index(
+        "/draft-dashboard/app.js"
+    )
+    assert index.index("/draft-dashboard/live-refresh.js") < index.index(
         "/draft-dashboard/app.js"
     )
     assert "fetchDraftRecommendationsForLeagueId" in script
@@ -1714,11 +1952,62 @@ def test_dashboard_uses_shared_ui_contract_without_inline_or_remote_code() -> No
     assert "window.location.hash" in script
     assert "window.location.search" not in script
     assert "innerHTML" not in script
+    assert 'id="live-refresh"' in index
+    assert 'type="checkbox" checked' in index
+    assert "createLiveDraftPoller" in script
+    assert "document.hidden !== true" in script
+    assert "responseNeedsFreshRevision" in script
+    assert "liveRefresh.sameRevision(revision, confirmedRevision)" in script
+    assert "Draft is moving quickly through pick" in script
+    assert "Live refresh paused for this draft revision" in script
+    assert script.index("prefillLeagueFromFragment();") < script.index("livePoller?.start();")
+    automatic_start = script.index("async function requestAutomaticAnalysis(revision)")
+    automatic_end = script.index("function applyAnalysisOutcome", automatic_start)
+    assert "resetAnalysisPanels" not in script[automatic_start:automatic_end]
+    manual_start = script.index("async function refreshAnalysis(leagueId)")
+    manual_end = script.index("profileReuseForm.addEventListener", manual_start)
+    manual_refresh = script[manual_start:manual_end]
+    assert manual_refresh.index("resetAnalysisPanels") < manual_refresh.index(
+        "livePoller?.forgetRendered();"
+    )
+    reuse_start = script.index("profileReuseForm.addEventListener")
+    reuse_end = script.index("profileDefaultForm.addEventListener", reuse_start)
+    reuse_flow = script[reuse_start:reuse_end]
+    assert reuse_flow.index("cancelActiveAnalysis();") < reuse_flow.index(
+        "bindDraftProfile"
+    )
+    assert reuse_flow.index("livePoller?.stop();") < reuse_flow.index(
+        "bindDraftProfile"
+    )
+    assert "if (shouldRefresh) await refreshAnalysis(leagueId);" in reuse_flow
+    assert "else livePoller?.invalidate();" in reuse_flow
+    import_start = script.index("profileForm.addEventListener")
+    import_end = script.index("document.getElementById('queue-add')", import_start)
+    import_flow = script[import_start:import_end]
+    first_profile_write = min(
+        import_flow.index("saveDraftProfileXlsx"),
+        import_flow.index("saveDraftProfile({"),
+    )
+    assert import_flow.index("cancelActiveAnalysis();") < first_profile_write
+    assert import_flow.index("livePoller?.stop();") < first_profile_write
+    assert "if (shouldRefresh) await refreshAnalysis(leagueId);" in import_flow
+    assert "else livePoller?.invalidate();" in import_flow
     assert "function resetAnalysisPanels({ preserveCockpit = false } = {})" in script
     assert "resetAnalysisPanels({ preserveCockpit: activeCockpitLeagueId === leagueId })" in script
     assert script.count("resetAnalysisPanels();") >= 2
     assert "setControlsDisabled(true);" in script
     assert "leagueInput.value.trim() !== leagueId" in script
+    league_input_start = script.index("leagueInput.addEventListener('input'")
+    settings_input_start = script.index(
+        "['strategy', 'count', 'ranking-count', 'simulations']",
+        league_input_start,
+    )
+    toggle_start = script.index(
+        "liveRefreshToggle.addEventListener('change'",
+        settings_input_start,
+    )
+    assert "livePoller?.invalidate();" in script[league_input_start:settings_input_start]
+    assert "livePoller?.invalidate();" in script[settings_input_start:toggle_start]
     assert "typeof value === 'number' && Number.isFinite(value)" in script
     assert "scoring latency unavailable" in script
     assert "unavailable-score" in script

@@ -74,7 +74,7 @@ h3 { margin: 8px 0 2px; font-size: 1.25rem; }
 .control-panel, .profile-panel, .content-section, .quality-panel { padding: 22px; }
 .section-heading { display: flex; justify-content: space-between; gap: 24px; align-items: flex-end; margin-bottom: 20px; }
 
-#recommendation-form { display: grid; grid-template-columns: 1.4fr repeat(4, minmax(110px, 0.7fr)) auto; gap: 12px; align-items: end; }
+#recommendation-form { display: grid; grid-template-columns: 1.4fr repeat(4, minmax(110px, 0.7fr)) minmax(105px, auto) auto; gap: 12px; align-items: end; }
 label { display: grid; gap: 7px; color: var(--muted); font-size: 0.78rem; font-weight: 700; }
 input, select, button {
   width: 100%;
@@ -90,6 +90,9 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--lime)
 button { cursor: pointer; border-color: var(--lime); background: var(--lime); color: #13200e; font-weight: 850; white-space: nowrap; }
 button:hover { filter: brightness(1.06); }
 button:disabled { cursor: wait; opacity: 0.58; }
+.live-refresh-control { display: flex; min-height: 42px; flex-direction: row; align-items: center; gap: 8px; }
+.live-refresh-control input { width: 18px; min-height: 18px; margin: 0; padding: 0; accent-color: var(--lime); }
+.live-refresh-control span { font-size: 0.78rem; font-weight: 800; white-space: nowrap; }
 
 .profile-panel { margin-top: 14px; }
 .profile-reuse-form {

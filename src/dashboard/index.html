@@ -10,6 +10,7 @@
     <script src="/draft-dashboard/shared/recommendation-renderer.js" defer></script>
     <script src="/draft-dashboard/shared/draft-cockpit.js" defer></script>
     <script src="/draft-dashboard/draft-profile-client.js" defer></script>
+    <script src="/draft-dashboard/live-refresh.js" defer></script>
     <script src="/draft-dashboard/app.js" defer></script>
   </head>
   <body>
@@ -63,6 +64,10 @@
               <option value="256" selected>256 · standard</option>
               <option value="512">512 · detailed</option>
             </select>
+          </label>
+          <label class="live-refresh-control">
+            <input id="live-refresh" name="liveRefresh" type="checkbox" checked>
+            <span>Live refresh</span>
           </label>
           <button id="refresh-button" type="submit">Refresh analysis</button>
         </form>

@@ -108,13 +108,21 @@
       !/^[a-z0-9_-]{1,16}:\d{1,32}$/i.test(sessionKey)
     ) return false;
     const encoded = encodeURIComponent(sessionKey);
-    const perSessionKeys = [
-      'yahooDraftRecorderSession:',
+    const sessionStorageKey = `yahooDraftRecorderSession:${encoded}`;
+    const stateTransitionKeys = [
       'yahooDraftRecorderSessionDeleted:',
       'yahooDraftRecorderPendingRepair:',
       'yahooDraftRecorderPendingReset:',
     ];
-    if (perSessionKeys.some((prefix) => `${prefix}${encoded}` in changes)) return true;
+    if (stateTransitionKeys.some((prefix) => `${prefix}${encoded}` in changes)) return true;
+    if (
+      sessionStorageKey in changes &&
+      !sameSessionRevision(
+        changes[sessionStorageKey]?.oldValue,
+        changes[sessionStorageKey]?.newValue,
+        sessionKey,
+      )
+    ) return true;
     const legacy = changes.yahooDraftRecorderSessions;
     const oldSessions = legacy?.oldValue;
     const newSessions = legacy?.newValue;
@@ -130,7 +138,11 @@
     );
     if (hadSession !== hasSession) return true;
     if (!hadSession) return false;
-    return sessionSnapshot(oldSessions[sessionKey]) !== sessionSnapshot(newSessions[sessionKey]);
+    return !sameSessionRevision(
+      oldSessions[sessionKey],
+      newSessions[sessionKey],
+      sessionKey,
+    );
   }
 
   function sessionSnapshot(session) {
@@ -142,6 +154,14 @@
       !Number.isFinite(Date.parse(updatedAt))
     ) return null;
     return `${session.sessionKey}\u0000${updatedAt}`;
+  }
+
+  function sameSessionRevision(oldSession, newSession, sessionKey) {
+    const oldSnapshot = sessionSnapshot(oldSession);
+    return oldSession?.sessionKey === sessionKey &&
+      newSession?.sessionKey === sessionKey &&
+      oldSnapshot !== null &&
+      oldSnapshot === sessionSnapshot(newSession);
   }
 
   function createRecommendationAutoRefreshScheduler(options = {}) {

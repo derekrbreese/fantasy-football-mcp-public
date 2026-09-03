@@ -155,7 +155,27 @@ test('rejects non-loopback endpoints and reports bounded server errors', async (
         json: async () => ({ message: '<b>invalid league</b>' }),
       }),
     }),
-    /HTTP 422: <b>invalid league<\/b>/,
+    (error) => {
+      assert.match(error.message, /HTTP 422: <b>invalid league<\/b>/);
+      assert.equal(error.status, 422);
+      assert.equal(error.retryable, false);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    fetchDraftRecommendations(session, {
+      fetchImpl: async () => ({
+        ok: false,
+        status: 503,
+        json: async () => ({ message: 'temporarily unavailable' }),
+      }),
+    }),
+    (error) => {
+      assert.equal(error.status, 503);
+      assert.equal(error.retryable, true);
+      return true;
+    },
   );
 });
 

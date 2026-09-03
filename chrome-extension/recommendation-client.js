@@ -81,6 +81,13 @@
     return message ? message.slice(0, 240) : '';
   }
 
+  function responseError(message, status = null, retryable = false) {
+    const error = new Error(message);
+    if (Number.isInteger(status)) error.status = status;
+    error.retryable = retryable;
+    return error;
+  }
+
   async function fetchDraftRecommendationsForLeagueId(value, options = {}) {
     const leagueId = explicitLeagueId(value);
     const endpoint = safeRecommendationEndpoint(options.endpoint);
@@ -115,13 +122,18 @@
       }
       if (!response.ok) {
         const detail = shortErrorMessage(result?.message || result?.error);
-        throw new Error(`Recommendation server returned HTTP ${response.status || 'error'}${detail ? `: ${detail}` : ''}`);
+        const status = Number.isInteger(response.status) ? response.status : null;
+        throw responseError(
+          `Recommendation server returned HTTP ${status || 'error'}${detail ? `: ${detail}` : ''}`,
+          status,
+          status === null || status >= 500,
+        );
       }
       if (!result || typeof result !== 'object' || Array.isArray(result)) {
-        throw new Error('Recommendation server returned an invalid JSON response.');
+        throw responseError('Recommendation server returned an invalid JSON response.');
       }
       if (String(result.leagueId || '') !== leagueId) {
-        throw new Error('Recommendation response did not match the selected Yahoo league.');
+        throw responseError('Recommendation response did not match the selected Yahoo league.');
       }
       return result;
     } finally {

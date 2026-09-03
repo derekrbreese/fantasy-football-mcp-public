@@ -39,11 +39,13 @@ from src.services.local_draft_profile_store import (
     set_default_local_draft_profile,
 )
 from src.services.live_draft_store import (
+    MAX_PICKS,
     LiveDraftConflictError,
     LiveDraftNotFoundError,
     LiveDraftValidationError,
     load_live_draft,
     reset_live_draft,
+    sanitize_live_draft_context,
     save_live_draft,
 )
 
@@ -712,6 +714,7 @@ _ALLOWED_DRAFT_SYNC_ORIGINS = (
 )
 
 _DRAFT_RECOMMENDATION_MAX_BODY = 4_096
+_DRAFT_REVISION_MAX_BODY = 256
 _DRAFT_RESET_MAX_BODY = 4_096
 _DRAFT_PROFILE_MAX_BODY = 512_000
 _DRAFT_PROFILE_BIND_MAX_BODY = 4_096
@@ -720,6 +723,7 @@ _DRAFT_PROFILE_XLSX_MAX_BODY = 2_000_000
 _DRAFT_RECOMMENDATION_FIELDS = frozenset(
     {"schemaVersion", "leagueId", "strategy", "count", "rankingCount", "simulations"}
 )
+_DRAFT_REVISION_FIELDS = frozenset({"schemaVersion", "leagueId"})
 _DRAFT_PROFILE_FIELDS = frozenset(
     {
         "schemaVersion",
@@ -1449,6 +1453,111 @@ async def receive_draft_profile_xlsx(request: Request) -> Response:
 
 
 @server.custom_route(
+    "/draft-revision", methods=["POST", "OPTIONS"], include_in_schema=False
+)
+async def receive_live_draft_revision(request: Request) -> Response:
+    """Return only the selected draft's opaque timestamp revision to local UIs."""
+
+    headers = _draft_ui_headers(request)
+    if not _is_loopback_request(request):
+        return _draft_json_error(request, "Loopback access required", 403)
+
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return _draft_json_error(request, "Origin required", 403)
+    if not _is_allowed_draft_ui_origin(request, origin):
+        return _draft_json_error(request, "Origin not allowed", 403)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=headers)
+
+    if request.headers.get("x-fantasy-draft-ui") != "1":
+        return _draft_json_error(request, "UI header required", 403)
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        return _draft_json_error(request, "Content-Type must be application/json", 415)
+    try:
+        content_length = int(request.headers.get("content-length", "0") or 0)
+    except ValueError:
+        return _draft_json_error(request, "Invalid content length", 400)
+    if content_length < 0:
+        return _draft_json_error(request, "Invalid content length", 400)
+    if content_length > _DRAFT_REVISION_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+
+    body = await request.body()
+    if len(body) > _DRAFT_REVISION_MAX_BODY:
+        return _draft_json_error(request, "Payload too large", 413)
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _draft_json_error(request, "Request body must be valid JSON", 400)
+    if not isinstance(payload, dict):
+        return _draft_json_error(request, "Request body must be a JSON object", 400)
+    if set(payload) - _DRAFT_REVISION_FIELDS:
+        return _draft_json_error(request, "Unsupported field in revision request", 400)
+    schema_version = payload.get("schemaVersion")
+    if isinstance(schema_version, bool) or schema_version != 1:
+        return _draft_json_error(request, "schemaVersion 1 is required", 400)
+    league_id = payload.get("leagueId")
+    if not isinstance(league_id, str) or not _DRAFT_LEAGUE_ID.fullmatch(league_id):
+        return _draft_json_error(request, "leagueId has an invalid format", 400)
+
+    try:
+        context = _load_bound_live_draft(league_id)
+    except Exception:
+        return _draft_json_error(request, "Draft revision service unavailable", 500)
+    if context is None:
+        return _draft_json_error(request, "No synced live draft state was found", 404)
+    try:
+        context = sanitize_live_draft_context(context)
+    except LiveDraftValidationError:
+        return _draft_json_error(request, "Draft revision service unavailable", 500)
+    generated_at = context.get("generatedAt")
+    if not isinstance(generated_at, str) or not generated_at or len(generated_at) > 64:
+        return _draft_json_error(request, "Draft revision service unavailable", 500)
+    try:
+        parsed_generated_at = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return _draft_json_error(request, "Draft revision service unavailable", 500)
+    if parsed_generated_at.tzinfo is None or parsed_generated_at.utcoffset() is None:
+        return _draft_json_error(request, "Draft revision service unavailable", 500)
+    draft = context["draft"]
+    session_key = draft.get("sessionKey")
+    sport = draft.get("sport")
+    if (
+        not isinstance(sport, str)
+        or not _DRAFT_SPORT.fullmatch(sport)
+        or not isinstance(session_key, str)
+        or session_key != f"{sport}:{league_id}"
+    ):
+        return _draft_json_error(request, "Draft revision service unavailable", 500)
+    picks = context.get("picks")
+    if not isinstance(picks, list) or len(picks) > MAX_PICKS:
+        return _draft_json_error(request, "Draft revision service unavailable", 500)
+    capture_blocked = context.get("captureBlocked", False)
+    if not isinstance(capture_blocked, bool):
+        return _draft_json_error(request, "Draft revision service unavailable", 500)
+    pick_numbers = [
+        pick.get("pickNumber")
+        for pick in picks
+        if isinstance(pick, dict) and isinstance(pick.get("pickNumber"), int)
+    ]
+    return JSONResponse(
+        {
+            "schemaVersion": 1,
+            "status": "success",
+            "leagueId": league_id,
+            "sessionKey": session_key,
+            "generatedAt": generated_at,
+            "pickCount": len(picks),
+            "latestOverallPick": max(pick_numbers, default=0),
+            "captureBlocked": capture_blocked,
+        },
+        headers=headers,
+    )
+
+
+@server.custom_route(
     "/draft-recommendation", methods=["POST", "OPTIONS"], include_in_schema=False
 )
 async def receive_live_draft_recommendation(request: Request) -> Response:
@@ -1575,6 +1684,15 @@ async def serve_draft_profile_client(request: Request) -> Response:
     return _serve_draft_dashboard_asset(
         request, "draft-profile-client.js", "text/javascript"
     )
+
+
+@server.custom_route(
+    "/draft-dashboard/live-refresh.js",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def serve_draft_dashboard_live_refresh(request: Request) -> Response:
+    return _serve_draft_dashboard_asset(request, "live-refresh.js", "text/javascript")
 
 
 @server.custom_route(
