@@ -37,6 +37,15 @@ test_*.py
 .cache/
 logs/
 *.log
+provider-snapshots.sqlite3
+provider-snapshots.sqlite3-journal
+provider-snapshots.sqlite3-shm
+provider-snapshots.sqlite3-wal
+fantasypros-snapshots.sqlite3
+fantasypros-snapshots.sqlite3-journal
+fantasypros-snapshots.sqlite3-shm
+fantasypros-snapshots.sqlite3-wal
+sleeper-players.json
 
 # Coverage reports
 htmlcov/

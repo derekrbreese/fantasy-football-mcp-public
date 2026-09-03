@@ -9,7 +9,6 @@ import re
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
-from itertools import islice
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -31,7 +30,8 @@ LEGACY_SLEEPER_PLAYER_CACHE_PATH = (
 _PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
 _CACHE_TTL_SECONDS = 86_400.0
 _MAX_STALE_SECONDS = 3_888_000.0  # 45 days, matching Breakout Watch freshness.
-_MAX_BODY_BYTES = 10_000_000
+_MAX_BODY_BYTES = 16 * 1024 * 1024
+_MAX_SOURCE_PLAYERS = 12_000
 _MAX_PLAYERS = 10_000
 _MAX_CACHE_BYTES = 2_000_000
 _POSITIONS = frozenset({"RB", "WR", "TE"})
@@ -231,6 +231,7 @@ class SleeperPlayerProvider:
         cache_ttl_seconds: float = _CACHE_TTL_SECONDS,
         max_stale_seconds: float = _MAX_STALE_SECONDS,
         max_body_bytes: int = _MAX_BODY_BYTES,
+        max_source_players: int = _MAX_SOURCE_PLAYERS,
         max_players: int = _MAX_PLAYERS,
     ) -> None:
         self._transport = transport or AiohttpSleeperTransport()
@@ -251,6 +252,9 @@ class SleeperPlayerProvider:
             min(float(max_stale_seconds), _MAX_STALE_SECONDS),
         )
         self._max_body_bytes = max(65_536, min(int(max_body_bytes), _MAX_BODY_BYTES))
+        self._max_source_players = max(
+            1, min(int(max_source_players), _MAX_SOURCE_PLAYERS)
+        )
         self._max_players = max(1, min(int(max_players), _MAX_PLAYERS))
         self._lock = asyncio.Lock()
         self._memory_cache: tuple[datetime, tuple[dict[str, Any], ...]] | None = None
@@ -330,15 +334,21 @@ class SleeperPlayerProvider:
                 timeout_seconds=self._timeout_seconds,
                 max_body_bytes=self._max_body_bytes,
             )
-            if len(payload) > self._max_players:
+            if len(payload) > self._max_source_players:
                 raise SleeperPlayerProviderError(
-                    "Sleeper player catalog exceeded the record limit"
+                    "Sleeper player catalog exceeded the source record limit"
                 )
-            records = tuple(
-                player
-                for sleeper_id, raw in islice(payload.items(), self._max_players)
-                if (player := _normalize_player(sleeper_id, raw)) is not None
-            )
+            normalized = []
+            for sleeper_id, raw in payload.items():
+                player = _normalize_player(sleeper_id, raw)
+                if player is None:
+                    continue
+                normalized.append(player)
+                if len(normalized) > self._max_players:
+                    raise SleeperPlayerProviderError(
+                        "Sleeper player catalog exceeded the normalized record limit"
+                    )
+            records = tuple(normalized)
             if not records:
                 raise SleeperPlayerProviderError(
                     "Sleeper returned no usable player experience records"

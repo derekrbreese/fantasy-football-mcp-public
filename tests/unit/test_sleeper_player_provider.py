@@ -12,7 +12,14 @@ from pathlib import Path
 import pytest
 
 import cache_sleeper_players
-from src.services.sleeper_player_provider import SleeperPlayerProvider
+from src.services import sleeper_player_provider as sleeper_provider_module
+from src.services.sleeper_player_provider import (
+    AiohttpSleeperTransport,
+    SleeperPlayerProvider,
+)
+
+_OLD_BODY_LIMIT = 10_000_000
+_EXPECTED_BODY_LIMIT = 16 * 1024 * 1024
 
 
 class FakeTransport:
@@ -71,6 +78,222 @@ def sleeper_catalog() -> dict:
     }
 
 
+class FakeResponseContent:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    async def iter_chunked(self, size: int):
+        for offset in range(0, len(self.body), size):
+            yield self.body[offset : offset + size]
+
+
+class FakeHttpResponse:
+    def __init__(self, body: bytes, *, content_length: int | None = None) -> None:
+        self.status = 200
+        self.content_length = len(body) if content_length is None else content_length
+        self.content = FakeResponseContent(body)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
+        return None
+
+
+class FakeClientSession:
+    def __init__(self, response: FakeHttpResponse) -> None:
+        self.response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
+        return None
+
+    def get(self, _url, **_kwargs):
+        return self.response
+
+
+def install_http_response(
+    monkeypatch: pytest.MonkeyPatch,
+    response: FakeHttpResponse,
+) -> None:
+    monkeypatch.setattr(
+        sleeper_provider_module.aiohttp,
+        "ClientSession",
+        lambda **_kwargs: FakeClientSession(response),
+    )
+
+
+@pytest.mark.asyncio
+async def test_transport_accepts_catalog_over_old_body_limit_and_normalizes_before_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_private_padding = "x" * _OLD_BODY_LIMIT
+    body = json.dumps(
+        {
+            "100": {
+                "player_id": "100",
+                "full_name": "Jordan Alpha",
+                "position": "RB",
+                "team": "SF",
+                "years_exp": 2,
+                "private_padding": raw_private_padding,
+            }
+        },
+        separators=(",", ":"),
+    ).encode()
+    assert _OLD_BODY_LIMIT < len(body) < _EXPECTED_BODY_LIMIT
+    install_http_response(monkeypatch, FakeHttpResponse(body))
+    cache_path = tmp_path / "provider-snapshots.sqlite3"
+    provider = SleeperPlayerProvider(
+        transport=AiohttpSleeperTransport(),
+        clock=lambda: datetime(2026, 9, 3, 18, 0, tzinfo=timezone.utc),
+        cache_path=cache_path,
+    )
+
+    result = await provider.get_player_experience(
+        [{"name": "Jordan Alpha", "position": "RB", "team": "SF"}]
+    )
+
+    assert result["status"] == "success"
+    assert result["catalogPlayers"] == 1
+    assert result["players"][0]["experience_years"] == 2
+    with sqlite3.connect(cache_path) as connection:
+        records_json, record_limit = connection.execute(
+            "SELECT records_json, record_limit FROM snapshots"
+        ).fetchone()
+    assert "private_padding" not in records_json
+    assert len(records_json.encode()) < 1_000
+    assert record_limit == 10_000
+
+
+@pytest.mark.asyncio
+async def test_transport_rejects_catalog_over_new_body_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = json.dumps(sleeper_catalog(), separators=(",", ":")).encode()
+    install_http_response(
+        monkeypatch,
+        FakeHttpResponse(body, content_length=_EXPECTED_BODY_LIMIT + 1),
+    )
+    provider = SleeperPlayerProvider(
+        transport=AiohttpSleeperTransport(),
+        cache_path=tmp_path / "provider-snapshots.sqlite3",
+    )
+
+    result = await provider.get_player_experience([])
+
+    assert result["status"] == "unavailable"
+    assert result["catalogPlayers"] == 0
+    assert result["refreshFailed"] is True
+    with sqlite3.connect(provider.cache_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (0,)
+
+
+@pytest.mark.asyncio
+async def test_transport_rejects_stream_that_exceeds_reported_content_length(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body_limit = 65_536
+    install_http_response(
+        monkeypatch,
+        FakeHttpResponse(b"x" * (body_limit + 1), content_length=1),
+    )
+    provider = SleeperPlayerProvider(
+        transport=AiohttpSleeperTransport(),
+        cache_path=tmp_path / "provider-snapshots.sqlite3",
+        max_body_bytes=body_limit,
+    )
+
+    result = await provider.get_player_experience([])
+
+    assert result["status"] == "unavailable"
+    assert result["catalogPlayers"] == 0
+    assert result["refreshFailed"] is True
+    with sqlite3.connect(provider.cache_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (0,)
+
+
+@pytest.mark.asyncio
+async def test_source_catalog_over_normalized_limit_is_allowed_and_keeps_cache_key(
+    tmp_path: Path,
+) -> None:
+    payload = {
+        str(index): {
+            "player_id": str(index),
+            "full_name": f"Ignored Quarterback {index}",
+            "position": "QB",
+            "team": "SEA",
+            "years_exp": 1,
+        }
+        for index in range(1, 10_001)
+    }
+    payload["10001"] = sleeper_catalog()["100"]
+    cache_path = tmp_path / "provider-snapshots.sqlite3"
+    provider = SleeperPlayerProvider(
+        transport=FakeTransport(payload),
+        cache_path=cache_path,
+    )
+
+    result = await provider.get_player_experience([])
+
+    assert len(payload) == 10_001
+    assert result["status"] == "success"
+    assert result["catalogPlayers"] == 1
+    with sqlite3.connect(cache_path) as connection:
+        assert connection.execute(
+            "SELECT endpoint, variant, record_limit FROM snapshots"
+        ).fetchall() == [("sleeper_players", "active", 10_000)]
+
+
+@pytest.mark.asyncio
+async def test_source_catalog_over_source_record_limit_fails_closed(tmp_path: Path) -> None:
+    payload = {str(index): {} for index in range(1, 12_002)}
+    payload["1"] = sleeper_catalog()["100"]
+    provider = SleeperPlayerProvider(
+        transport=FakeTransport(payload),
+        cache_path=tmp_path / "provider-snapshots.sqlite3",
+    )
+
+    result = await provider.get_player_experience([])
+
+    assert len(payload) == 12_001
+    assert result["status"] == "unavailable"
+    assert result["catalogPlayers"] == 0
+    with sqlite3.connect(provider.cache_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (0,)
+
+
+@pytest.mark.asyncio
+async def test_catalog_over_normalized_record_limit_fails_closed(tmp_path: Path) -> None:
+    payload = {
+        str(index): {
+            "player_id": str(index),
+            "full_name": f"Running Back {index}",
+            "position": "RB",
+            "team": "SF",
+            "years_exp": 1,
+        }
+        for index in range(1, 10_002)
+    }
+    provider = SleeperPlayerProvider(
+        transport=FakeTransport(payload),
+        cache_path=tmp_path / "provider-snapshots.sqlite3",
+    )
+
+    result = await provider.get_player_experience([])
+
+    assert len(payload) == 10_001
+    assert result["status"] == "unavailable"
+    assert result["catalogPlayers"] == 0
+    with sqlite3.connect(provider.cache_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (0,)
+
+
 @pytest.mark.asyncio
 async def test_fetches_normalizes_resolves_and_persists_private_daily_cache(
     tmp_path: Path,
@@ -106,6 +329,7 @@ async def test_fetches_normalizes_resolves_and_persists_private_daily_cache(
     assert result["players"][2]["identityResolved"] is False
     assert result["players"][3]["identityResolved"] is False
     assert transport.calls[0][1]["params"] == {"active": "true"}
+    assert transport.calls[0][1]["max_body_bytes"] == _EXPECTED_BODY_LIMIT
     assert stat.S_IMODE(cache_path.stat().st_mode) == 0o600
     with sqlite3.connect(cache_path) as connection:
         assert connection.execute(
