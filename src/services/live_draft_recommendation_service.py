@@ -72,6 +72,51 @@ _BREAKOUT_OPPORTUNITY_KINDS = {
     "WR": {"targets", "receptions"},
     "TE": {"targets", "receptions"},
 }
+_INTERNAL_PLAYER_IDENTITY_FIELDS = frozenset({"yahoo_player_id"})
+_SLEEPER_IDENTITY_MATCH_METHODS = (
+    "yahoo_id_position",
+    "exact_name_position_team",
+    "suffix_name_position_team",
+    "free_agent_name_position",
+    "unresolved",
+)
+
+
+def _provider_yahoo_player_id(value: Any) -> str | None:
+    """Accept only the normalized scalar contract emitted by the provider."""
+
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text.isdigit() or text.startswith("0"):
+        return None
+    parsed = int(text)
+    return text if 1 <= parsed <= 10_000_000_000 else None
+
+
+def _without_internal_player_identity(
+    rankings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            key: value
+            for key, value in ranking.items()
+            if key not in _INTERNAL_PLAYER_IDENTITY_FIELDS
+        }
+        for ranking in rankings
+    ]
+
+
+def _sleeper_identity_match_method(value: Mapping[str, Any]) -> str | None:
+    """Validate one provider match label against its resolution decision."""
+
+    method = value.get("identityMatchMethod")
+    if method not in _SLEEPER_IDENTITY_MATCH_METHODS:
+        return None
+    resolved = value.get("identityResolved") is True
+    if (method == "unresolved") != (not resolved):
+        return None
+    return str(method)
 
 
 def _sanitize_ranking_player_keys(
@@ -468,6 +513,9 @@ def _merge_fantasypros_updates(
                     continue
                 if field in update:
                     candidate[field] = update[field]
+            yahoo_player_id = _provider_yahoo_player_id(update.get("yahoo_player_id"))
+            if update.get("identityResolved") is True and yahoo_player_id is not None:
+                candidate["yahoo_player_id"] = yahoo_player_id
             if update.get("identityResolved") is True:
                 resolved += 1
             if update.get("injury_fresh") is True:
@@ -583,12 +631,24 @@ def _merge_sleeper_breakout_evidence(
     merged: list[dict[str, Any]] = []
     experience_players = 0
     generated = 0
+    match_counts = dict.fromkeys(_SLEEPER_IDENTITY_MATCH_METHODS, 0)
+    match_counts_valid = len(updates) == len(rankings)
+    match_count_eligible_players = 0
     for index, ranking in enumerate(rankings):
         candidate = dict(ranking)
         update = updates[index] if index < len(updates) else None
         if not isinstance(update, Mapping) or not _same_enrichment_identity(candidate, update):
+            match_counts_valid = False
             merged.append(candidate)
             continue
+        position = _player_identity(candidate)[1]
+        if position in _BREAKOUT_OPPORTUNITY_KINDS:
+            match_count_eligible_players += 1
+            match_method = _sleeper_identity_match_method(update)
+            if match_method is None:
+                match_counts_valid = False
+            else:
+                match_counts[match_method] += 1
         experience = update.get("experience_years")
         experience_valid = (
             update.get("identityResolved") is True
@@ -600,7 +660,6 @@ def _merge_sleeper_breakout_evidence(
             experience_players += 1
             candidate["experience_years"] = experience
             candidate["experience_source"] = "Sleeper"
-        position = _player_identity(candidate)[1]
         opportunity_kind = candidate.get("projection_opportunity_kind")
         points = _positive_finite_number(candidate.get("projected_points"))
         opportunities = _positive_finite_number(candidate.get("projected_opportunities"))
@@ -628,7 +687,7 @@ def _merge_sleeper_breakout_evidence(
             generated += 1
         merged.append(candidate)
     status = provider_result.get("status")
-    return merged, {
+    summary = {
         "provider": "Sleeper",
         "status": status if status in {"success", "degraded", "unavailable"} else "unavailable",
         "catalogFetchedAt": (
@@ -646,6 +705,13 @@ def _merge_sleeper_breakout_evidence(
         "identityResolvedPlayers": experience_players,
         "generatedBreakoutEvidencePlayers": generated,
     }
+    if (
+        match_counts_valid
+        and match_count_eligible_players > 0
+        and sum(match_counts.values()) == match_count_eligible_players
+    ):
+        summary["identityMatchMethodCounts"] = match_counts
+    return merged, summary
 
 
 async def _enrich_breakout_experience(
@@ -661,7 +727,7 @@ async def _enrich_breakout_experience(
         for ranking in rankings
     ):
         return (
-            rankings,
+            _without_internal_player_identity(rankings),
             {
                 "provider": "Sleeper",
                 "status": "not_needed",
@@ -700,6 +766,7 @@ async def _enrich_breakout_experience(
             ],
         }
     merged, summary = _merge_sleeper_breakout_evidence(rankings, raw_result, season=season)
+    merged = _without_internal_player_identity(merged)
     warnings = []
     raw_warnings = raw_result.get("warnings")
     if isinstance(raw_warnings, list):

@@ -37,6 +37,61 @@ _MAX_CACHE_BYTES = 2_000_000
 _POSITIONS = frozenset({"RB", "WR", "TE"})
 _POSITION_ALIASES = {"FB": "RB"}
 _TEAM_ALIASES = {"JAC": "JAX", "WSH": "WAS"}
+_NFL_TEAMS = frozenset(
+    {
+        "ARI",
+        "ATL",
+        "BAL",
+        "BUF",
+        "CAR",
+        "CHI",
+        "CIN",
+        "CLE",
+        "DAL",
+        "DEN",
+        "DET",
+        "GB",
+        "HOU",
+        "IND",
+        "JAX",
+        "KC",
+        "LAC",
+        "LAR",
+        "LV",
+        "MIA",
+        "MIN",
+        "NE",
+        "NO",
+        "NYG",
+        "NYJ",
+        "PHI",
+        "PIT",
+        "SEA",
+        "SF",
+        "TB",
+        "TEN",
+        "WAS",
+    }
+)
+_GENERATIONAL_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
+_IDENTITY_MATCH_METHODS = (
+    "yahoo_id_position",
+    "exact_name_position_team",
+    "suffix_name_position_team",
+    "free_agent_name_position",
+    "unresolved",
+)
+_IDENTITY_MATCH_REASONS = frozenset(
+    {
+        "matched",
+        "stable_id_conflict",
+        "stable_id_request_collision",
+        "stable_id_not_found",
+        "stable_id_ambiguous",
+        "name_ambiguous",
+        "no_conservative_match",
+    }
+)
 _PLAYER_FIELDS = frozenset({"sleeperId", "name", "position", "team", "yearsExperience", "yahooId"})
 
 
@@ -147,10 +202,20 @@ def _name_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", ascii_name.casefold())
 
 
+def _suffix_name_key(value: Any) -> str:
+    text = _safe_text(value, 120)
+    ascii_name = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    parts = re.findall(r"[a-z0-9]+", ascii_name.casefold())
+    if parts and parts[-1] in _GENERATIONAL_SUFFIXES:
+        parts.pop()
+    return "".join(parts)
+
+
 def _is_initialed_name(value: Any) -> bool:
     text = _safe_text(value, 120)
     first = re.split(r"[\s.-]+", text, maxsplit=1)[0]
-    return len(re.sub(r"[^A-Za-z]", "", first)) <= 1
+    letters = re.sub(r"[^A-Za-z]", "", first)
+    return len(letters) <= 1 or (len(letters) <= 3 and letters.isupper())
 
 
 def _position(value: Any) -> str:
@@ -185,12 +250,21 @@ def _positive_id(value: Any, maximum: int = 10_000_000_000) -> str | None:
     return text if parsed <= maximum else None
 
 
-def _ranking_yahoo_id(value: Mapping[str, Any]) -> str | None:
-    player_key = value.get("player_key") or value.get("playerKey")
-    if not isinstance(player_key, str):
-        return None
-    match = re.fullmatch(r"[1-9]\d{0,9}\.p\.([1-9]\d{0,9})", player_key.strip())
-    return match.group(1) if match else None
+def _ranking_yahoo_ids(value: Mapping[str, Any]) -> frozenset[str]:
+    declared_ids: set[str] = set()
+    for field in ("player_key", "playerKey"):
+        player_key = value.get(field)
+        if not isinstance(player_key, str):
+            continue
+        match = re.fullmatch(r"[1-9]\d{0,9}\.p\.([1-9]\d{0,9})", player_key.strip())
+        if match is not None:
+            declared_ids.add(match.group(1))
+    internal_id = value.get("yahoo_player_id")
+    if isinstance(internal_id, str):
+        normalized_internal_id = _positive_id(internal_id)
+        if normalized_internal_id is not None:
+            declared_ids.add(normalized_internal_id)
+    return frozenset(declared_ids)
 
 
 def _normalize_player(sleeper_id: Any, raw: Any) -> dict[str, Any] | None:
@@ -269,6 +343,12 @@ class SleeperPlayerProvider:
             catalog, fetched_at, stale, refresh_failed = await self._catalog(now)
         resolved = self._resolve(players, catalog)
         resolved_count = sum(item.get("identityResolved") is True for item in resolved)
+        method_counts = dict.fromkeys(_IDENTITY_MATCH_METHODS, 0)
+        for item in resolved:
+            method = item.get("identityMatchMethod")
+            if method not in method_counts:
+                method = "unresolved"
+            method_counts[method] += 1
         warnings = []
         if refresh_failed:
             warnings.append(
@@ -286,6 +366,7 @@ class SleeperPlayerProvider:
             "catalogPlayers": len(catalog),
             "requestedPlayers": len(players),
             "identityResolvedPlayers": resolved_count,
+            "identityMatchMethodCounts": method_counts,
             "players": resolved,
             "warnings": warnings,
         }
@@ -473,37 +554,107 @@ class SleeperPlayerProvider:
     ) -> list[dict[str, Any]]:
         by_yahoo: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
         by_identity: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
+        by_suffix_identity: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
+        by_name_position: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
         for player in catalog:
             position = _position(player.get("position"))
+            team = _team(player.get("team"))
             yahoo_id = _positive_id(player.get("yahooId"))
             if yahoo_id is not None:
                 by_yahoo.setdefault((yahoo_id, position), []).append(player)
-            identity = (_name_key(player.get("name")), position, _team(player.get("team")))
+            name = _name_key(player.get("name"))
+            identity = (name, position, team)
             by_identity.setdefault(identity, []).append(player)
+            suffix_identity = (_suffix_name_key(player.get("name")), position, team)
+            by_suffix_identity.setdefault(suffix_identity, []).append(player)
+            by_name_position.setdefault((name, position), []).append(player)
+
+        requested_stable_ids = [_ranking_yahoo_ids(value) for value in requested]
+        requested_claims: dict[tuple[str, str], list[int]] = {}
+        for index, (value, stable_ids) in enumerate(
+            zip(requested, requested_stable_ids, strict=True)
+        ):
+            position = _position(value.get("position"))
+            for stable_id in stable_ids:
+                requested_claims.setdefault((stable_id, position), []).append(index)
+        request_collisions = {
+            index
+            for claimants in requested_claims.values()
+            if len(claimants) > 1
+            for index in claimants
+        }
 
         result: list[dict[str, Any]] = []
-        for value in requested:
+        for request_index, (value, stable_ids) in enumerate(
+            zip(requested, requested_stable_ids, strict=True)
+        ):
             position = _position(value.get("position"))
+            team = _team(value.get("team"))
+            name = _name_key(value.get("name"))
             match: Mapping[str, Any] | None = None
-            yahoo_id = _ranking_yahoo_id(value)
-            if yahoo_id is not None:
+            match_method = "unresolved"
+            match_reason = "no_conservative_match"
+            identity_ambiguous = False
+            if request_index in request_collisions:
+                identity_ambiguous = True
+                match_reason = "stable_id_request_collision"
+            elif len(stable_ids) > 1:
+                identity_ambiguous = True
+                match_reason = "stable_id_conflict"
+            yahoo_id = next(iter(stable_ids)) if len(stable_ids) == 1 else None
+            if yahoo_id is not None and not identity_ambiguous:
                 matches = by_yahoo.get((yahoo_id, position), [])
                 if len(matches) == 1:
                     match = matches[0]
-            if match is None and not _is_initialed_name(value.get("name")):
-                identity = (
-                    _name_key(value.get("name")),
-                    position,
-                    _team(value.get("team")),
-                )
+                    match_method = "yahoo_id_position"
+                    match_reason = "matched"
+                elif len(matches) > 1:
+                    identity_ambiguous = True
+                    match_reason = "stable_id_ambiguous"
+                else:
+                    identity_ambiguous = True
+                    match_reason = "stable_id_not_found"
+            initialed = _is_initialed_name(value.get("name"))
+            if match is None and not identity_ambiguous:
+                identity = (name, position, team)
                 matches = by_identity.get(identity, [])
-                if len(matches) == 1 and all(identity):
+                exact_allowed = all(identity) and (not initialed or team in _NFL_TEAMS)
+                if len(matches) == 1 and exact_allowed:
                     match = matches[0]
+                    match_method = "exact_name_position_team"
+                    match_reason = "matched"
+                elif len(matches) > 1 and exact_allowed:
+                    identity_ambiguous = True
+                    match_reason = "name_ambiguous"
+            if match is None and not identity_ambiguous and not initialed:
+                suffix_identity = (_suffix_name_key(value.get("name")), position, team)
+                matches = by_suffix_identity.get(suffix_identity, [])
+                if len(matches) == 1 and all(suffix_identity):
+                    match = matches[0]
+                    match_method = "suffix_name_position_team"
+                    match_reason = "matched"
+                elif len(matches) > 1 and all(suffix_identity):
+                    identity_ambiguous = True
+                    match_reason = "name_ambiguous"
+            if match is None and not identity_ambiguous and not initialed:
+                matches = by_name_position.get((name, position), [])
+                if len(matches) == 1 and name and position:
+                    catalog_team = _team(matches[0].get("team"))
+                    if {team, catalog_team} == {"", "FA"}:
+                        match = matches[0]
+                        match_method = "free_agent_name_position"
+                        match_reason = "matched"
+                elif len(matches) > 1 and name and position and team in {"", "FA"}:
+                    match_reason = "name_ambiguous"
+            if match_reason not in _IDENTITY_MATCH_REASONS:
+                match_reason = "no_conservative_match"
             output = {
                 "name": str(value.get("name") or ""),
                 "position": str(value.get("position") or ""),
                 "team": str(value.get("team") or ""),
                 "identityResolved": match is not None,
+                "identityMatchMethod": match_method,
+                "identityMatchReason": match_reason,
                 "experience_years": (match.get("yearsExperience") if match is not None else None),
                 "experience_source": "Sleeper" if match is not None else None,
             }

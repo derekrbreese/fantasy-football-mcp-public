@@ -342,6 +342,41 @@ test('renders one FantasyPros coverage marker as a singular bounded snapshot', (
   );
 });
 
+test('summarizes only a complete bounded Sleeper identity match count map', () => {
+  const coverage = {
+    yahoo_id_position: 2,
+    exact_name_position_team: 4,
+    suffix_name_position_team: 1,
+    free_agent_name_position: 1,
+    unresolved: 2,
+  };
+  const model = createRecommendationViewModel(response({
+    enrichment: {
+      provider: 'FantasyPros',
+      status: 'success',
+      freshInjuryPlayers: 1,
+      sleeperExperience: { identityMatchMethodCounts: coverage },
+    },
+  }), { leagueId: '10462193' });
+
+  assert.ok(model.degradations.includes(
+    'Sleeper catalog identity matched 8 of 10 eligible RB/WR/TE ranking rows; 2 remain unresolved under conservative matching.',
+  ));
+
+  const malformed = createRecommendationViewModel(response({
+    enrichment: {
+      provider: 'FantasyPros',
+      status: 'success',
+      freshInjuryPlayers: 1,
+      sleeperExperience: {
+        identityMatchMethodCounts: { ...coverage, unresolved: '<img src=x>', extra: 1 },
+      },
+    },
+  }), { leagueId: '10462193' });
+
+  assert.ok(!malformed.degradations.some((message) => message.includes('Sleeper catalog identity')));
+});
+
 test('keeps generic injury wording when FantasyPros enrichment is unavailable', () => {
   const model = createRecommendationViewModel(response({
     capabilities: { injuryStatus: false, externalNews: true },

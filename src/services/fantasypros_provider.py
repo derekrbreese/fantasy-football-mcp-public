@@ -209,6 +209,7 @@ class _AdpPlayer:
     position: str
     team: str
     adp: float
+    yahoo_id: str | None = None
 
 
 _Record = TypeVar("_Record", _CatalogPlayer, _Injury, _News, _Projection, _AdpPlayer)
@@ -279,6 +280,23 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return result if result > 0 else None
+
+
+def _positive_external_id(value: Any, maximum: int = 10_000_000_000) -> str | None:
+    """Normalize one provider ID without accepting floats, booleans, or URL-like text."""
+
+    if isinstance(value, bool):
+        return None
+    if type(value) is int:
+        text = str(value)
+    elif isinstance(value, str):
+        text = value.strip()
+    else:
+        return None
+    if not text.isdigit() or text.startswith("0"):
+        return None
+    parsed = int(text)
+    return text if 1 <= parsed <= maximum else None
 
 
 def _nonnegative_int(value: Any) -> int | None:
@@ -1351,17 +1369,21 @@ class FantasyProsProvider:
                 if isinstance(record, _Projection)
             )
         if endpoint == "adp":
-            return tuple(
-                {
+            result = []
+            for record in records:
+                if not isinstance(record, _AdpPlayer):
+                    continue
+                stored = {
                     "id": record.fantasypros_id,
                     "name": record.name,
                     "position": record.position,
                     "team": record.team,
                     "adp": record.adp,
                 }
-                for record in records
-                if isinstance(record, _AdpPlayer)
-            )
+                if record.yahoo_id is not None:
+                    stored["yahooId"] = record.yahoo_id
+                result.append(stored)
+            return tuple(result)
         return ()
 
     @staticmethod
@@ -1429,6 +1451,7 @@ class FantasyProsProvider:
                     str(record["position"]),
                     str(record["team"]),
                     float(record["adp"]),
+                    _positive_external_id(record.get("yahooId")),
                 )
                 for record in records
             )
@@ -1466,7 +1489,14 @@ class FantasyProsProvider:
         adp = FantasyProsProvider._positive_adp_number(raw.get("rank_ave"))
         if fantasypros_id is None or not name or not position or not team or adp is None:
             return None
-        return _AdpPlayer(fantasypros_id, name, position, team, adp)
+        return _AdpPlayer(
+            fantasypros_id,
+            name,
+            position,
+            team,
+            adp,
+            _positive_external_id(raw.get("player_yahoo_id")),
+        )
 
     @staticmethod
     def _injury(raw: Mapping[str, Any]) -> _Injury | None:
@@ -1784,6 +1814,8 @@ class FantasyProsProvider:
                     "adp_stale": adp_stale,
                 }
             )
+            if adp.yahoo_id is not None:
+                result["yahoo_player_id"] = adp.yahoo_id
         return result
 
     @staticmethod

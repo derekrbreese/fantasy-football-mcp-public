@@ -31,6 +31,13 @@
     WR: new Set(['targets', 'receptions']),
     TE: new Set(['targets', 'receptions']),
   };
+  const SLEEPER_IDENTITY_MATCH_METHODS = [
+    'yahoo_id_position',
+    'exact_name_position_team',
+    'suffix_name_position_team',
+    'free_agent_name_position',
+    'unresolved',
+  ];
 
   function safeText(value, maximum = 300, fallback = '') {
     if (typeof value !== 'string' && typeof value !== 'number') return fallback;
@@ -588,6 +595,23 @@
     return issues;
   }
 
+  function sleeperIdentityCoverageMessage(response) {
+    const counts = response?.enrichment?.sleeperExperience?.identityMatchMethodCounts;
+    if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return '';
+    if (Object.keys(counts).length !== SLEEPER_IDENTITY_MATCH_METHODS.length) return '';
+    const values = [];
+    for (const method of SLEEPER_IDENTITY_MATCH_METHODS) {
+      const count = counts[method];
+      if (!Number.isInteger(count) || count < 0 || count > 500) return '';
+      values.push(count);
+    }
+    const total = values.reduce((sum, count) => sum + count, 0);
+    const unresolved = counts.unresolved;
+    if (total < 1 || total > 500 || unresolved < 1) return '';
+    return `Sleeper catalog identity matched ${total - unresolved} of ${total} eligible RB/WR/TE ranking rows; ` +
+      `${unresolved} remain unresolved under conservative matching.`;
+  }
+
   function degradationMessages(response, health) {
     const messages = [];
     const enrichmentProvider = safeText(response?.enrichment?.provider, 40).toLowerCase();
@@ -611,6 +635,8 @@
     if (response?.critic?.checks?.allDraftedPlayersResolved === false) {
       messages.push('Some drafted player identities are unresolved.');
     }
+    const sleeperCoverage = sleeperIdentityCoverageMessage(response);
+    if (sleeperCoverage) messages.push(sleeperCoverage);
     if (response?.capabilities?.injuryStatus === false) {
       messages.push(noFreshFantasyProsInjuries
         ? 'No fresh FantasyPros injury record matched this player pool; missing status does not mean healthy.'

@@ -230,6 +230,7 @@ def test_fantasypros_merge_preserves_local_breakout_evidence() -> None:
                 "team": "SEA",
                 "identityResolved": True,
                 "injury_status": "unknown",
+                "yahoo_player_id": "501",
             }
         ],
     }
@@ -240,6 +241,82 @@ def test_fantasypros_merge_preserves_local_breakout_evidence() -> None:
 
     assert merged[0]["breakout_evidence"] == evidence
     assert merged[0]["injury_status"] == "unknown"
+    assert merged[0]["yahoo_player_id"] == "501"
+
+
+@pytest.mark.parametrize(
+    "provider_id",
+    [True, 501, "0501", "501.0", "https://example.invalid/501?auth=secret", "10000000001"],
+)
+def test_fantasypros_merge_rejects_untrusted_yahoo_player_ids(provider_id: object) -> None:
+    ranking = {"name": "Young Receiver", "position": "WR", "team": "SEA"}
+    update = {
+        **ranking,
+        "identityResolved": True,
+        "yahoo_player_id": provider_id,
+    }
+
+    merged, _summary = recommendation_service._merge_fantasypros_updates(
+        [ranking], {"status": "success", "players": [update]}
+    )
+
+    assert "yahoo_player_id" not in merged[0]
+
+
+def test_fantasypros_merge_does_not_trust_id_from_unresolved_update() -> None:
+    ranking = {"name": "Young Receiver", "position": "WR", "team": "SEA"}
+    update = {
+        **ranking,
+        "identityResolved": False,
+        "yahoo_player_id": "501",
+    }
+
+    merged, _summary = recommendation_service._merge_fantasypros_updates(
+        [ranking], {"status": "degraded", "players": [update]}
+    )
+
+    assert "yahoo_player_id" not in merged[0]
+
+
+@pytest.mark.asyncio
+async def test_stable_yahoo_id_is_forwarded_to_sleeper_then_removed() -> None:
+    ranking = {
+        "name": "Young Receiver",
+        "position": "WR",
+        "team": "SEA",
+        "identityResolved": True,
+        "projected_points": 190.0,
+        "projected_opportunities": 75.0,
+        "projection_opportunity_kind": "receptions",
+        "projection_source": "FantasyPros",
+        "projection_season": 2026,
+        "projection_fetched_at": "2026-09-01T16:00:00Z",
+        "projection_stale": False,
+        "yahoo_player_id": "501",
+    }
+    sleeper = FakeSleeperPlayerProvider(
+        {
+            "status": "success",
+            "players": [
+                {
+                    "name": "Young Receiver",
+                    "position": "WR",
+                    "team": "SEA",
+                    "identityResolved": True,
+                    "experience_years": 2,
+                    "experience_source": "Sleeper",
+                }
+            ],
+        }
+    )
+
+    merged, _summary, _warnings = await recommendation_service._enrich_breakout_experience(
+        [ranking], season=2026, provider=sleeper
+    )
+
+    assert sleeper.calls[0][0]["yahoo_player_id"] == "501"
+    assert "yahoo_player_id" not in merged[0]
+    assert "501" not in repr(merged)
 
 
 def test_sleeper_experience_completes_fresh_fantasypros_breakout_evidence() -> None:
@@ -269,6 +346,7 @@ def test_sleeper_experience_completes_fresh_fantasypros_breakout_evidence() -> N
                 "position": "RB",
                 "team": "SF",
                 "identityResolved": True,
+                "identityMatchMethod": "exact_name_position_team",
                 "experience_years": index,
                 "experience_source": "Sleeper",
             }
@@ -281,12 +359,26 @@ def test_sleeper_experience_completes_fresh_fantasypros_breakout_evidence() -> N
             "players": updates,
             "catalogFetchedAt": fetched_at,
             "catalogPlayers": 1000,
+            "identityMatchMethodCounts": {
+                "yahoo_id_position": 5,
+                "exact_name_position_team": 0,
+                "suffix_name_position_team": 0,
+                "free_agent_name_position": 0,
+                "unresolved": 0,
+            },
         },
         season=2026,
     )
 
     assert summary["identityResolvedPlayers"] == 5
     assert summary["generatedBreakoutEvidencePlayers"] == 5
+    assert summary["identityMatchMethodCounts"] == {
+        "yahoo_id_position": 0,
+        "exact_name_position_team": 5,
+        "suffix_name_position_team": 0,
+        "free_agent_name_position": 0,
+        "unresolved": 0,
+    }
     assert merged[0]["breakout_evidence"] == {
         "source": "FantasyPros + Sleeper",
         "as_of": "2026-09-01",
@@ -298,6 +390,229 @@ def test_sleeper_experience_completes_fresh_fantasypros_breakout_evidence() -> N
     breakout = evaluate_breakout_watch(merged, now=datetime(2026, 9, 3, tzinfo=timezone.utc))
     assert breakout["status"] == "available"
     assert any(label is not None for label in breakout["labels"])
+
+
+@pytest.mark.parametrize(
+    ("method", "identity_resolved"),
+    [
+        (None, True),
+        ("loose_name", True),
+        ("exact_name_position_team", False),
+        ("unresolved", True),
+    ],
+)
+def test_sleeper_identity_match_counts_reject_invalid_aligned_rows(
+    method: str | None,
+    identity_resolved: bool,
+) -> None:
+    ranking = {"name": "Young Runner", "position": "RB", "team": "SF"}
+    update = {
+        **ranking,
+        "identityResolved": identity_resolved,
+        "identityMatchMethod": method,
+    }
+
+    _merged, summary = recommendation_service._merge_sleeper_breakout_evidence(
+        [ranking],
+        {
+            "status": "success",
+            "players": [update],
+            "identityMatchMethodCounts": {
+                "yahoo_id_position": 1,
+                "exact_name_position_team": 0,
+                "suffix_name_position_team": 0,
+                "free_agent_name_position": 0,
+                "unresolved": 0,
+            },
+        },
+        season=2026,
+    )
+
+    assert "identityMatchMethodCounts" not in summary
+
+
+@pytest.mark.parametrize("identity_resolved", [False, None])
+def test_sleeper_identity_match_counts_accept_aligned_unresolved_rows(
+    identity_resolved: bool | None,
+) -> None:
+    ranking = {"name": "Young Runner", "position": "RB", "team": "SF"}
+    update = {
+        **ranking,
+        "identityMatchMethod": "unresolved",
+    }
+    if identity_resolved is not None:
+        update["identityResolved"] = identity_resolved
+
+    _merged, summary = recommendation_service._merge_sleeper_breakout_evidence(
+        [ranking],
+        {
+            "status": "success",
+            "players": [update],
+            "identityMatchMethodCounts": {
+                "yahoo_id_position": 1,
+                "exact_name_position_team": 0,
+                "suffix_name_position_team": 0,
+                "free_agent_name_position": 0,
+                "unresolved": 0,
+            },
+        },
+        season=2026,
+    )
+
+    assert summary["identityMatchMethodCounts"] == {
+        "yahoo_id_position": 0,
+        "exact_name_position_team": 0,
+        "suffix_name_position_team": 0,
+        "free_agent_name_position": 0,
+        "unresolved": 1,
+    }
+
+
+def test_sleeper_identity_match_counts_only_eligible_normalized_positions() -> None:
+    rankings = [
+        {"name": "Runner", "position": "RB", "team": "SF"},
+        {"name": "Receiver", "position": "WR", "team": "SEA"},
+        {"name": "Tight End", "position": "TE", "team": "DAL"},
+        {"name": "Quarterback", "position": "QB", "team": "BUF"},
+        {"name": "Kicker", "position": "K", "team": "BAL"},
+        {"name": "Defense", "position": "D/ST", "team": "NYJ"},
+    ]
+    updates = [
+        {
+            **rankings[0],
+            "identityResolved": True,
+            "identityMatchMethod": "exact_name_position_team",
+        },
+        {
+            **rankings[1],
+            "identityResolved": True,
+            "identityMatchMethod": "suffix_name_position_team",
+        },
+        {
+            **rankings[2],
+            "identityResolved": False,
+            "identityMatchMethod": "unresolved",
+        },
+        {**rankings[3], "identityResolved": True, "identityMatchMethod": "not-applicable"},
+        {**rankings[4]},
+        {**rankings[5], "identityResolved": False, "identityMatchMethod": "unresolved"},
+    ]
+
+    _merged, summary = recommendation_service._merge_sleeper_breakout_evidence(
+        rankings,
+        {"status": "success", "players": updates},
+        season=2026,
+    )
+
+    assert summary["identityMatchMethodCounts"] == {
+        "yahoo_id_position": 0,
+        "exact_name_position_team": 1,
+        "suffix_name_position_team": 1,
+        "free_agent_name_position": 0,
+        "unresolved": 1,
+    }
+
+
+def test_sleeper_identity_match_counts_omit_zero_eligible_total() -> None:
+    rankings = [
+        {"name": "Quarterback", "position": "QB", "team": "BUF"},
+        {"name": "Kicker", "position": "K", "team": "BAL"},
+        {"name": "Defense", "position": "DST", "team": "NYJ"},
+    ]
+    updates = [
+        {
+            **ranking,
+            "identityResolved": False,
+            "identityMatchMethod": "unresolved",
+        }
+        for ranking in rankings
+    ]
+
+    _merged, summary = recommendation_service._merge_sleeper_breakout_evidence(
+        rankings,
+        {"status": "success", "players": updates},
+        season=2026,
+    )
+
+    assert "identityMatchMethodCounts" not in summary
+
+
+def test_sleeper_identity_match_counts_still_require_ineligible_rows_to_align() -> None:
+    rankings = [
+        {"name": "Runner", "position": "RB", "team": "SF"},
+        {"name": "Quarterback", "position": "QB", "team": "BUF"},
+    ]
+    updates = [
+        {
+            **rankings[0],
+            "identityResolved": True,
+            "identityMatchMethod": "exact_name_position_team",
+        },
+        {"name": "Different Quarterback", "position": "QB", "team": "BUF"},
+    ]
+
+    _merged, summary = recommendation_service._merge_sleeper_breakout_evidence(
+        rankings,
+        {"status": "success", "players": updates},
+        season=2026,
+    )
+
+    assert "identityMatchMethodCounts" not in summary
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        [],
+        [
+            {
+                "name": "Different Runner",
+                "position": "RB",
+                "team": "SF",
+                "identityResolved": True,
+                "identityMatchMethod": "exact_name_position_team",
+            }
+        ],
+        [
+            {
+                "name": "Young Runner",
+                "position": "RB",
+                "team": "SF",
+                "identityResolved": True,
+                "identityMatchMethod": "exact_name_position_team",
+            },
+            {
+                "name": "Extra Runner",
+                "position": "RB",
+                "team": "SF",
+                "identityResolved": True,
+                "identityMatchMethod": "exact_name_position_team",
+            },
+        ],
+    ],
+)
+def test_sleeper_identity_match_counts_require_one_aligned_update_per_ranking(
+    updates: list[dict[str, object]],
+) -> None:
+    ranking = {"name": "Young Runner", "position": "RB", "team": "SF"}
+
+    _merged, summary = recommendation_service._merge_sleeper_breakout_evidence(
+        [ranking],
+        {
+            "status": "success",
+            "players": updates,
+            "identityMatchMethodCounts": {
+                "yahoo_id_position": 0,
+                "exact_name_position_team": 1,
+                "suffix_name_position_team": 0,
+                "free_agent_name_position": 0,
+                "unresolved": 0,
+            },
+        },
+        season=2026,
+    )
+
+    assert "identityMatchMethodCounts" not in summary
 
 
 def test_sleeper_breakout_join_preserves_imports_and_fails_closed() -> None:
@@ -911,7 +1226,9 @@ async def test_local_profile_avoids_yahoo_and_adds_fantasypros_evidence(
         return deepcopy(profile)
 
     monkeypatch.setattr(recommendation_service, "load_local_draft_profile", load_profile)
-    provider = FakeFantasyProsProvider(fantasypros_result(profile))
+    provider_result = fantasypros_result(profile)
+    provider_result["players"][0]["yahoo_player_id"] = "501"
+    provider = FakeFantasyProsProvider(provider_result)
 
     async def no_yahoo(name: str, **arguments):
         raise AssertionError(f"Yahoo must not be called when a local profile exists: {name}")
@@ -929,6 +1246,7 @@ async def test_local_profile_avoids_yahoo_and_adds_fantasypros_evidence(
     )
 
     assert result["status"] == "success"
+    assert "yahoo_player_id" not in repr(result)
     assert result["leagueId"] == "10462193"
     assert result["leagueKey"] is None
     assert result["state"]["teamCount"] == 12

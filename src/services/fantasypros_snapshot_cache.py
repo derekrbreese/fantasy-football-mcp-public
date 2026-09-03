@@ -580,11 +580,21 @@ class FantasyProsSnapshotCache:
 
     @classmethod
     def _validate_adp(cls, record: dict[str, Any]) -> None:
-        if set(record) != {"id", "name", "position", "team", "adp"}:
+        base_fields = {"id", "name", "position", "team", "adp"}
+        if set(record) not in (base_fields, base_fields | {"yahooId"}):
             raise FantasyProsSnapshotCacheUnavailable
         cls._validate_identity_fields(record, allow_empty=False)
         if not cls._bounded_number(record["adp"], 0.01, 10_000.0):
             raise FantasyProsSnapshotCacheUnavailable
+        if "yahooId" in record:
+            yahoo_id = record["yahooId"]
+            if (
+                not isinstance(yahoo_id, str)
+                or not yahoo_id.isdigit()
+                or yahoo_id.startswith("0")
+                or not 1 <= int(yahoo_id) <= 10_000_000_000
+            ):
+                raise FantasyProsSnapshotCacheUnavailable
 
     @classmethod
     def _validate_sleeper_player(cls, record: dict[str, Any]) -> None:

@@ -352,6 +352,541 @@ async def test_fetches_normalizes_resolves_and_persists_private_daily_cache(
 
 
 @pytest.mark.asyncio
+async def test_reports_bounded_conservative_identity_match_methods(tmp_path: Path) -> None:
+    payload = {
+        "100": {
+            "player_id": "100",
+            "full_name": "A.J. Exact",
+            "position": "WR",
+            "team": "SF",
+            "years_exp": 2,
+            "yahoo_id": 501,
+        },
+        "200": {
+            "player_id": "200",
+            "full_name": "Jordan Suffix",
+            "position": "RB",
+            "team": "DAL",
+            "years_exp": 1,
+            "yahoo_id": 502,
+        },
+        "300": {
+            "player_id": "300",
+            "full_name": "Taylor Free Agent",
+            "position": "TE",
+            "team": None,
+            "years_exp": 3,
+        },
+    }
+    provider = SleeperPlayerProvider(
+        transport=FakeTransport(payload),
+        cache_path=tmp_path / "provider-snapshots.sqlite3",
+    )
+
+    result = await provider.get_player_experience(
+        [
+            {
+                "name": "Different Name",
+                "position": "WR",
+                "team": "NE",
+                "player_key": "461.p.501",
+            },
+            {"name": "A.J. Exact", "position": "WR", "team": "SF"},
+            {"name": "Jordan Suffix Jr.", "position": "RB", "team": "DAL"},
+            {"name": "Taylor Free Agent", "position": "TE", "team": "FA"},
+            {"name": "Unknown Player", "position": "RB", "team": "BUF"},
+        ]
+    )
+
+    assert [item["identityMatchMethod"] for item in result["players"]] == [
+        "yahoo_id_position",
+        "exact_name_position_team",
+        "suffix_name_position_team",
+        "free_agent_name_position",
+        "unresolved",
+    ]
+    assert [item["identityMatchReason"] for item in result["players"]] == [
+        "matched",
+        "matched",
+        "matched",
+        "matched",
+        "no_conservative_match",
+    ]
+    assert result["identityResolvedPlayers"] == 4
+    assert result["identityMatchMethodCounts"] == {
+        "yahoo_id_position": 1,
+        "exact_name_position_team": 1,
+        "suffix_name_position_team": 1,
+        "free_agent_name_position": 1,
+        "unresolved": 1,
+    }
+
+
+def test_exact_initialed_name_requires_unique_position_and_nfl_team() -> None:
+    catalog = [
+        {
+            "sleeperId": "100",
+            "name": "A.J. Exact",
+            "position": "WR",
+            "team": "SF",
+            "yearsExperience": 2,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "200",
+            "name": "J. Ambiguous",
+            "position": "RB",
+            "team": "DAL",
+            "yearsExperience": 1,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "201",
+            "name": "J. Ambiguous",
+            "position": "RB",
+            "team": "DAL",
+            "yearsExperience": 3,
+            "yahooId": None,
+        },
+    ]
+
+    resolved = SleeperPlayerProvider._resolve(
+        [
+            {"name": "A.J. Exact", "position": "WR", "team": "SF"},
+            {"name": "A.J. Exact", "position": "WR", "team": "NE"},
+            {"name": "A.J. Exact", "position": "WR", "team": "FA"},
+            {"name": "J. Ambiguous", "position": "RB", "team": "DAL"},
+        ],
+        catalog,
+    )
+
+    assert [item["identityResolved"] for item in resolved] == [True, False, False, False]
+    assert [item["identityMatchMethod"] for item in resolved] == [
+        "exact_name_position_team",
+        "unresolved",
+        "unresolved",
+        "unresolved",
+    ]
+
+
+def test_compact_initials_only_use_exact_identity_with_an_nfl_team() -> None:
+    catalog = [
+        {
+            "sleeperId": "100",
+            "name": "AJ Exact",
+            "position": "WR",
+            "team": "SF",
+            "yearsExperience": 2,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "200",
+            "name": "JK Available",
+            "position": "RB",
+            "team": "",
+            "yearsExperience": 1,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "300",
+            "name": "CJ Suffix",
+            "position": "TE",
+            "team": "DAL",
+            "yearsExperience": 3,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "400",
+            "name": "Bo Available",
+            "position": "RB",
+            "team": "",
+            "yearsExperience": 1,
+            "yahooId": None,
+        },
+    ]
+
+    resolved = SleeperPlayerProvider._resolve(
+        [
+            {"name": "AJ Exact", "position": "WR", "team": "SF"},
+            {"name": "AJ Exact", "position": "WR", "team": "FA"},
+            {"name": "JK Available", "position": "RB", "team": "FA"},
+            {"name": "CJ Suffix Jr.", "position": "TE", "team": "DAL"},
+            {"name": "Bo Available", "position": "RB", "team": "FA"},
+        ],
+        catalog,
+    )
+
+    assert [item["identityMatchMethod"] for item in resolved] == [
+        "exact_name_position_team",
+        "unresolved",
+        "unresolved",
+        "unresolved",
+        "free_agent_name_position",
+    ]
+
+
+def test_declared_stable_yahoo_identity_is_authoritative_and_fail_closed() -> None:
+    catalog = [
+        {
+            "sleeperId": "100",
+            "name": "Exact Named Player",
+            "position": "WR",
+            "team": "SF",
+            "yearsExperience": 2,
+            "yahooId": "501",
+        },
+        {
+            "sleeperId": "200",
+            "name": "Other Player",
+            "position": "WR",
+            "team": "NE",
+            "yearsExperience": 4,
+            "yahooId": "502",
+        },
+        {
+            "sleeperId": "300",
+            "name": "First Duplicate Id",
+            "position": "WR",
+            "team": "DAL",
+            "yearsExperience": 1,
+            "yahooId": "503",
+        },
+        {
+            "sleeperId": "301",
+            "name": "Second Duplicate Id",
+            "position": "WR",
+            "team": "SEA",
+            "yearsExperience": 3,
+            "yahooId": "503",
+        },
+        {
+            "sleeperId": "400",
+            "name": "Agreement Player",
+            "position": "WR",
+            "team": "ARI",
+            "yearsExperience": 2,
+            "yahooId": "504",
+        },
+    ]
+
+    resolved = SleeperPlayerProvider._resolve(
+        [
+            {
+                "name": "Different Name",
+                "position": "WR",
+                "team": "NE",
+                "yahoo_player_id": "501",
+            },
+            {
+                "name": "Different Name",
+                "position": "WR",
+                "team": "NE",
+                "player_key": "461.p.504",
+                "yahoo_player_id": "504",
+            },
+            {
+                "name": "Exact Named Player",
+                "position": "WR",
+                "team": "SF",
+                "yahoo_player_id": "999",
+            },
+            {
+                "name": "Exact Named Player",
+                "position": "WR",
+                "team": "SF",
+                "player_key": "461.p.998",
+            },
+            {
+                "name": "Exact Named Player",
+                "position": "WR",
+                "team": "SF",
+                "player_key": "461.p.503",
+            },
+            {
+                "name": "Exact Named Player",
+                "position": "WR",
+                "team": "SF",
+                "player_key": "461.p.505",
+                "yahoo_player_id": "506",
+            },
+            {
+                "name": "Exact Named Player",
+                "position": "RB",
+                "team": "SF",
+                "yahoo_player_id": "501",
+            },
+        ],
+        catalog,
+    )
+
+    assert [item["identityResolved"] for item in resolved] == [
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert [item["identityMatchMethod"] for item in resolved] == [
+        "yahoo_id_position",
+        "yahoo_id_position",
+        "unresolved",
+        "unresolved",
+        "unresolved",
+        "unresolved",
+        "unresolved",
+    ]
+    assert [item["identityMatchReason"] for item in resolved] == [
+        "matched",
+        "matched",
+        "stable_id_not_found",
+        "stable_id_not_found",
+        "stable_id_ambiguous",
+        "stable_id_conflict",
+        "stable_id_not_found",
+    ]
+
+
+def test_request_side_stable_id_collisions_fail_all_claimants_closed() -> None:
+    catalog = [
+        {
+            "sleeperId": "100",
+            "name": "First Exact Player",
+            "position": "WR",
+            "team": "SF",
+            "yearsExperience": 2,
+            "yahooId": "501",
+        },
+        {
+            "sleeperId": "200",
+            "name": "Second Exact Player",
+            "position": "RB",
+            "team": "DAL",
+            "yearsExperience": 1,
+            "yahooId": "502",
+        },
+        {
+            "sleeperId": "300",
+            "name": "Unique Player",
+            "position": "TE",
+            "team": "BUF",
+            "yearsExperience": 3,
+            "yahooId": "503",
+        },
+    ]
+
+    resolved = SleeperPlayerProvider._resolve(
+        [
+            {
+                "name": "First Exact Player",
+                "position": "WR",
+                "team": "SF",
+                "player_key": "461.p.501",
+            },
+            {
+                "name": "Different Receiver",
+                "position": "WR",
+                "team": "NE",
+                "player_key": "461.p.501",
+            },
+            {
+                "name": "Second Exact Player",
+                "position": "RB",
+                "team": "DAL",
+                "player_key": "461.p.502",
+            },
+            {
+                "name": "Different Runner",
+                "position": "RB",
+                "team": "MIA",
+                "yahoo_player_id": "502",
+            },
+            {
+                "name": "Different Tight End",
+                "position": "TE",
+                "team": "NE",
+                "yahoo_player_id": "503",
+            },
+        ],
+        catalog,
+    )
+
+    assert [item["identityResolved"] for item in resolved] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert [item["identityMatchReason"] for item in resolved] == [
+        "stable_id_request_collision",
+        "stable_id_request_collision",
+        "stable_id_request_collision",
+        "stable_id_request_collision",
+        "matched",
+    ]
+
+
+@pytest.mark.parametrize("suffix", ["Jr.", "Sr.", "II", "III", "IV", "V"])
+def test_generational_suffix_fallback_requires_unique_same_team(
+    suffix: str,
+) -> None:
+    catalog = [
+        {
+            "sleeperId": "100",
+            "name": "Jordan Suffix",
+            "position": "RB",
+            "team": "DAL",
+            "yearsExperience": 1,
+            "yahooId": None,
+        }
+    ]
+
+    resolved = SleeperPlayerProvider._resolve(
+        [
+            {"name": f"Jordan Suffix {suffix}", "position": "RB", "team": "DAL"},
+            {"name": f"Jordan Suffix {suffix}", "position": "RB", "team": "NYG"},
+        ],
+        catalog,
+    )
+
+    assert resolved[0]["identityResolved"] is True
+    assert resolved[0]["identityMatchMethod"] == "suffix_name_position_team"
+    assert resolved[1]["identityResolved"] is False
+    assert resolved[1]["identityMatchMethod"] == "unresolved"
+
+
+def test_generational_suffix_fallback_rejects_ambiguous_catalog_identity() -> None:
+    catalog = [
+        {
+            "sleeperId": "100",
+            "name": "Jordan Suffix",
+            "position": "RB",
+            "team": "DAL",
+            "yearsExperience": 1,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "200",
+            "name": "Jordan Suffix Sr.",
+            "position": "RB",
+            "team": "DAL",
+            "yearsExperience": 8,
+            "yahooId": None,
+        },
+    ]
+
+    resolved = SleeperPlayerProvider._resolve(
+        [{"name": "Jordan Suffix Jr.", "position": "RB", "team": "DAL"}],
+        catalog,
+    )
+
+    assert resolved[0]["identityResolved"] is False
+    assert resolved[0]["identityMatchMethod"] == "unresolved"
+
+
+def test_generational_suffix_fallback_does_not_strip_multiple_suffixes() -> None:
+    catalog = [
+        {
+            "sleeperId": "100",
+            "name": "Jordan Suffix",
+            "position": "RB",
+            "team": "DAL",
+            "yearsExperience": 1,
+            "yahooId": None,
+        }
+    ]
+
+    resolved = SleeperPlayerProvider._resolve(
+        [{"name": "Jordan Suffix Jr. II", "position": "RB", "team": "DAL"}],
+        catalog,
+    )
+
+    assert resolved[0]["identityResolved"] is False
+    assert resolved[0]["identityMatchMethod"] == "unresolved"
+
+
+def test_free_agent_fallback_only_accepts_unique_exact_name_position_fa_blank_pair() -> None:
+    catalog = [
+        {
+            "sleeperId": "100",
+            "name": "Taylor Available",
+            "position": "WR",
+            "team": "",
+            "yearsExperience": 2,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "200",
+            "name": "Reverse Available",
+            "position": "TE",
+            "team": "FA",
+            "yearsExperience": 1,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "300",
+            "name": "Assigned Blank",
+            "position": "RB",
+            "team": "",
+            "yearsExperience": 3,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "400",
+            "name": "Conflicting Team",
+            "position": "RB",
+            "team": "BUF",
+            "yearsExperience": 2,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "500",
+            "name": "Ambiguous Available",
+            "position": "WR",
+            "team": "",
+            "yearsExperience": 1,
+            "yahooId": None,
+        },
+        {
+            "sleeperId": "501",
+            "name": "Ambiguous Available",
+            "position": "WR",
+            "team": "SEA",
+            "yearsExperience": 4,
+            "yahooId": None,
+        },
+    ]
+
+    resolved = SleeperPlayerProvider._resolve(
+        [
+            {"name": "Taylor Available", "position": "WR", "team": "FA"},
+            {"name": "Reverse Available", "position": "TE", "team": ""},
+            {"name": "Assigned Blank", "position": "RB", "team": "ARI"},
+            {"name": "Conflicting Team", "position": "RB", "team": "MIA"},
+            {"name": "Ambiguous Available", "position": "WR", "team": "FA"},
+        ],
+        catalog,
+    )
+
+    assert [item["identityResolved"] for item in resolved] == [
+        True,
+        True,
+        False,
+        False,
+        False,
+    ]
+    assert [item["identityMatchMethod"] for item in resolved] == [
+        "free_agent_name_position",
+        "free_agent_name_position",
+        "unresolved",
+        "unresolved",
+        "unresolved",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_cache_warmer_respects_ttl_and_supports_explicit_refresh(
     tmp_path: Path,
 ) -> None:

@@ -323,6 +323,7 @@ def _adp_payload(*, scoring: str = "HALF") -> dict[str, Any]:
                 "player_name": "Jordan Alpha",
                 "player_position_id": "RB",
                 "player_team_id": "SF",
+                "player_yahoo_id": 501,
                 "rank_ave": "18.5",
                 "player_page_url": "must-not-escape",
             },
@@ -331,6 +332,7 @@ def _adp_payload(*, scoring: str = "HALF") -> dict[str, Any]:
                 "player_name": "Case O'Neil",
                 "player_position_id": "WR",
                 "player_team_id": "NYJ",
+                "player_yahoo_id": "502",
                 "rank_ave": 73,
             },
         ],
@@ -369,6 +371,7 @@ async def test_half_ppr_adp_uses_scoring_specific_consensus_snapshot(
     }
     assert result["players"][0]["average_draft_position"] == 18.5
     assert result["players"][0]["adp_scoring"] == "HALF"
+    assert result["players"][0]["yahoo_player_id"] == "501"
     assert result["adpEvidence"] == {
         "status": "available",
         "reason": None,
@@ -388,6 +391,23 @@ async def test_half_ppr_adp_uses_scoring_specific_consensus_snapshot(
         assert connection.execute(
             "SELECT endpoint, variant, season FROM snapshots WHERE endpoint = 'adp'"
         ).fetchall() == [("adp", "preseason-half", 2026)]
+        stored_adp = json.loads(
+            connection.execute(
+                "SELECT records_json FROM snapshots WHERE endpoint = 'adp'"
+            ).fetchone()[0]
+        )
+    assert stored_adp[0] == {
+        "id": 101,
+        "name": "Jordan Alpha",
+        "position": "RB",
+        "team": "SF",
+        "adp": 18.5,
+        "yahooId": "501",
+    }
+    assert all(
+        set(record) <= {"id", "name", "position", "team", "adp", "yahooId"}
+        for record in stored_adp
+    )
 
     restarted_transport = FakeTransport({})
     restarted = await _provider(
@@ -402,6 +422,57 @@ async def test_half_ppr_adp_uses_scoring_specific_consensus_snapshot(
 
     assert restarted_transport.calls == []
     assert restarted["players"][0]["average_draft_position"] == 18.5
+    assert restarted["players"][0]["yahoo_player_id"] == "501"
+
+
+@pytest.mark.parametrize(
+    ("raw_id", "expected"),
+    [
+        (501, "501"),
+        ("502", "502"),
+        (None, None),
+        (True, None),
+        (0, None),
+        (-1, None),
+        (1.5, None),
+        ("0501", None),
+        ("501.0", None),
+        ("https://example.invalid/501?token=secret", None),
+        (10_000_000_001, None),
+    ],
+)
+def test_consensus_adp_yahoo_id_is_strictly_bounded(raw_id: object, expected: str | None) -> None:
+    raw = _adp_payload()["players"][0]
+    raw["player_yahoo_id"] = raw_id
+
+    player = FantasyProsProvider._adp_player(raw)
+
+    assert player is not None
+    assert player.yahoo_id == expected
+
+
+def test_legacy_adp_snapshot_without_yahoo_id_remains_compatible() -> None:
+    records = FantasyProsProvider._records_from_snapshot(
+        "adp",
+        ({"id": 101, "name": "Jordan Alpha", "position": "RB", "team": "SF", "adp": 18.5},),
+    )
+
+    assert records[0].yahoo_id is None
+
+
+@pytest.mark.parametrize("bad_id", [501, "0501", "501.0", "10000000001"])
+def test_adp_snapshot_rejects_noncanonical_yahoo_id(bad_id: object) -> None:
+    record = {
+        "id": 101,
+        "name": "Jordan Alpha",
+        "position": "RB",
+        "team": "SF",
+        "adp": 18.5,
+        "yahooId": bad_id,
+    }
+
+    with pytest.raises(snapshot_cache_module.FantasyProsSnapshotCacheUnavailable):
+        snapshot_cache_module.FantasyProsSnapshotCache._validate_records("adp", (record,))
 
 
 @pytest.mark.asyncio
