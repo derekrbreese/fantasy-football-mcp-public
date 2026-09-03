@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import src.services.live_draft_recommendation_service as recommendation_service
+from src.agents.breakout_watch import evaluate_breakout_watch
 from src.agents.live_draft_recommender import LiveDraftRecommendationEngine
 from src.services.databricks_advisory_critic import DatabricksAdvisoryResult
 from src.services.live_draft_recommendation_service import get_live_draft_recommendation
@@ -57,7 +58,8 @@ def local_profile() -> dict:
             {
                 key: value
                 for key, value in player.items()
-                if key in {
+                if key
+                in {
                     "name",
                     "position",
                     "team",
@@ -99,6 +101,16 @@ class FakeFantasyProsProvider:
 
     async def get_player_updates(self, players, **arguments):
         self.calls.append((deepcopy(list(players)), dict(arguments)))
+        return deepcopy(self.result)
+
+
+class FakeSleeperPlayerProvider:
+    def __init__(self, result: dict) -> None:
+        self.result = result
+        self.calls = []
+
+    async def get_player_experience(self, players):
+        self.calls.append(deepcopy(list(players)))
         return deepcopy(self.result)
 
 
@@ -230,6 +242,133 @@ def test_fantasypros_merge_preserves_local_breakout_evidence() -> None:
     assert merged[0]["injury_status"] == "unknown"
 
 
+def test_sleeper_experience_completes_fresh_fantasypros_breakout_evidence() -> None:
+    fetched_at = "2026-09-01T16:00:00Z"
+    rankings = []
+    updates = []
+    for index in range(5):
+        rankings.append(
+            {
+                "name": f"Young Runner {index}",
+                "position": "RB",
+                "team": "SF",
+                "rank": index + 1,
+                "identityResolved": True,
+                "projected_points": 200.0 + index,
+                "projected_opportunities": 240.0 + index,
+                "projection_opportunity_kind": "touches",
+                "projection_source": "FantasyPros",
+                "projection_season": 2026,
+                "projection_fetched_at": fetched_at,
+                "projection_stale": False,
+            }
+        )
+        updates.append(
+            {
+                "name": f"Young Runner {index}",
+                "position": "RB",
+                "team": "SF",
+                "identityResolved": True,
+                "experience_years": index,
+                "experience_source": "Sleeper",
+            }
+        )
+
+    merged, summary = recommendation_service._merge_sleeper_breakout_evidence(
+        rankings,
+        {
+            "status": "success",
+            "players": updates,
+            "catalogFetchedAt": fetched_at,
+            "catalogPlayers": 1000,
+        },
+        season=2026,
+    )
+
+    assert summary["identityResolvedPlayers"] == 5
+    assert summary["generatedBreakoutEvidencePlayers"] == 5
+    assert merged[0]["breakout_evidence"] == {
+        "source": "FantasyPros + Sleeper",
+        "as_of": "2026-09-01",
+        "projected_points": 200.0,
+        "projected_opportunities": 240.0,
+        "opportunity_kind": "touches",
+        "experience_years": 0,
+    }
+    breakout = evaluate_breakout_watch(merged, now=datetime(2026, 9, 3, tzinfo=timezone.utc))
+    assert breakout["status"] == "available"
+    assert any(label is not None for label in breakout["labels"])
+
+
+def test_sleeper_breakout_join_preserves_imports_and_fails_closed() -> None:
+    imported = {
+        "source": "Imported Source",
+        "as_of": "2026-09-01",
+        "projected_points": 210.0,
+        "projected_opportunities": 250.0,
+        "opportunity_kind": "touches",
+        "experience_years": 2,
+    }
+    base = {
+        "name": "Young Runner",
+        "position": "RB",
+        "team": "SF",
+        "identityResolved": True,
+        "projected_points": 210.0,
+        "projected_opportunities": 250.0,
+        "projection_opportunity_kind": "touches",
+        "projection_source": "FantasyPros",
+        "projection_season": 2026,
+        "projection_fetched_at": "2026-09-01T16:00:00Z",
+        "projection_stale": False,
+    }
+    update = {
+        "name": "Young Runner",
+        "position": "RB",
+        "team": "SF",
+        "identityResolved": True,
+        "experience_years": 2,
+        "experience_source": "Sleeper",
+    }
+
+    imported_result, _ = recommendation_service._merge_sleeper_breakout_evidence(
+        [{**base, "breakout_evidence": imported}],
+        {"status": "success", "players": [update]},
+        season=2026,
+    )
+    stale_result, _ = recommendation_service._merge_sleeper_breakout_evidence(
+        [{**base, "projection_stale": True}],
+        {"status": "success", "players": [update]},
+        season=2026,
+    )
+    unresolved_result, _ = recommendation_service._merge_sleeper_breakout_evidence(
+        [base],
+        {"status": "success", "players": [{**update, "identityResolved": False}]},
+        season=2026,
+    )
+
+    assert imported_result[0]["breakout_evidence"] == imported
+    assert "breakout_evidence" not in stale_result[0]
+    assert "breakout_evidence" not in unresolved_result[0]
+
+
+@pytest.mark.asyncio
+async def test_breakout_experience_provider_is_skipped_without_projections() -> None:
+    provider = FakeSleeperPlayerProvider({"status": "success", "players": []})
+    rankings = [{"name": "Young Runner", "position": "RB", "team": "SF"}]
+
+    merged, summary, warnings = await recommendation_service._enrich_breakout_experience(
+        rankings,
+        season=2026,
+        provider=provider,
+    )
+
+    assert merged == rankings
+    assert summary["status"] == "not_needed"
+    assert warnings == []
+    assert provider.calls == []
+
+
 def test_fantasypros_adp_market_source_uses_fresh_exact_provider_provenance() -> None:
     fetched_at = "2026-08-28T16:00:00Z"
     source = [{"name": "Young Receiver", "position": "WR", "team": "SEA", "rank": 1}]
@@ -326,9 +465,30 @@ def test_fantasypros_adp_market_source_fails_closed_for_mixed_or_untrusted_data(
             2026,
             "PPR",
         ),
-        (source, enriched, {**base_summary, "adpEvidence": {**evidence, "stale": True}}, 2026, "PPR"),
-        (source, enriched, {**base_summary, "adpEvidence": {**evidence, "season": 2025}}, 2026, "PPR"),
-        (source, enriched, {**base_summary, "adpEvidence": {**evidence, "fetchedAt": "https://evil.test/?token=secret"}}, 2026, "PPR"),
+        (
+            source,
+            enriched,
+            {**base_summary, "adpEvidence": {**evidence, "stale": True}},
+            2026,
+            "PPR",
+        ),
+        (
+            source,
+            enriched,
+            {**base_summary, "adpEvidence": {**evidence, "season": 2025}},
+            2026,
+            "PPR",
+        ),
+        (
+            source,
+            enriched,
+            {
+                **base_summary,
+                "adpEvidence": {**evidence, "fetchedAt": "https://evil.test/?token=secret"},
+            },
+            2026,
+            "PPR",
+        ),
         (
             source,
             enriched,
@@ -349,13 +509,16 @@ def test_fantasypros_adp_market_source_fails_closed_for_mixed_or_untrusted_data(
     ]
 
     for original, merged, summary, season, scoring in cases:
-        assert recommendation_service._fantasypros_market_source(
-            original,
-            merged,
-            summary,
-            season=season,
-            scoring=scoring,
-        ) is None
+        assert (
+            recommendation_service._fantasypros_market_source(
+                original,
+                merged,
+                summary,
+                season=season,
+                scoring=scoring,
+            )
+            is None
+        )
 
 
 def test_fantasypros_merge_never_mixes_imported_and_provider_adp() -> None:
@@ -478,10 +641,7 @@ async def test_stale_provider_adp_is_removed_before_scoring_or_market_signals(
     assert [item["overallScore"] for item in result["recommendations"]] == [
         item["overallScore"] for item in expected["recommendations"]
     ]
-    assert all(
-        item["player"]["adpAvailable"] is False
-        for item in result["recommendations"]
-    )
+    assert all(item["player"]["adpAvailable"] is False for item in result["recommendations"])
     assert result["marketSignals"]["status"] == "unavailable"
 
 
@@ -552,9 +712,7 @@ async def test_service_uses_fantasypros_market_source_for_exclusive_fresh_adp(
         "asOf": fetched_at,
         "asOfBasis": "retrieved",
     }
-    assert all(
-        item["player"]["adpAvailable"] is True for item in result["recommendations"]
-    )
+    assert all(item["player"]["adpAvailable"] is True for item in result["recommendations"])
     assert result["enrichment"]["adpEvidence"]["publicApiLimited"] is True
 
 
@@ -733,9 +891,7 @@ async def test_fantasypros_enrichment_has_a_bounded_outer_deadline(
     assert provider.cancelled is True
     assert merged == source
     assert summary["status"] == "unavailable"
-    assert warnings == [
-        "FantasyPros evidence timed out; missing data remains unknown"
-    ]
+    assert warnings == ["FantasyPros evidence timed out; missing data remains unknown"]
 
 
 @pytest.mark.asyncio
@@ -840,9 +996,7 @@ async def test_unbound_recorder_draft_atomically_uses_same_sport_default_before_
         "sessionKey": "nfl:111",
     }
     source = save_local_draft_profile(source, profile_path)
-    set_default_local_draft_profile(
-        "nfl", "111", profile_path=profile_path
-    )
+    set_default_local_draft_profile("nfl", "111", profile_path=profile_path)
     provider = FakeFantasyProsProvider(fantasypros_result(source))
 
     async def no_yahoo(name: str, **arguments):
@@ -869,9 +1023,7 @@ async def test_unbound_recorder_draft_atomically_uses_same_sport_default_before_
 
 
 @pytest.mark.asyncio
-async def test_broken_default_fails_closed_before_yahoo(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_broken_default_fails_closed_before_yahoo(tmp_path: Path, monkeypatch) -> None:
     live_path = tmp_path / "live-drafts.json"
     save_live_draft(live_context(), live_path)
     yahoo_calls = []
@@ -880,9 +1032,7 @@ async def test_broken_default_fails_closed_before_yahoo(
         recommendation_service,
         "bind_default_local_draft_profile",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            LocalDraftProfileNotFoundError(
-                "default local draft profile source was not found"
-            )
+            LocalDraftProfileNotFoundError("default local draft profile source was not found")
         ),
         raising=False,
     )
@@ -942,9 +1092,7 @@ async def test_rollover_default_fails_closed_before_yahoo_or_target_binding(
         yahoo_calls.append((name, arguments))
         return {}
 
-    with pytest.raises(
-        ValueError, match=r"season 2026.*current UTC season 2027"
-    ):
+    with pytest.raises(ValueError, match=r"season 2026.*current UTC season 2027"):
         await get_live_draft_recommendation(
             call_tool,
             league_key=None,
@@ -991,8 +1139,7 @@ async def test_invalid_default_store_error_is_sanitized_before_yahoo(
         )
 
     assert str(captured.value) == (
-        "The saved default draft profile is unavailable. Choose or clear it "
-        "in the local dashboard."
+        "The saved default draft profile is unavailable. Choose or clear it in the local dashboard."
     )
     assert private_detail not in str(captured.value)
     assert yahoo_calls == []
@@ -1261,9 +1408,7 @@ async def test_outer_advisory_timeout_fails_open_without_changing_recommendation
 
 
 @pytest.mark.asyncio
-async def test_blocked_ledger_never_calls_advisory_critic(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_blocked_ledger_never_calls_advisory_critic(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "drafts.json"
     context = live_context()
     context["picks"] = [pick for pick in context["picks"] if pick["pickNumber"] != 2]

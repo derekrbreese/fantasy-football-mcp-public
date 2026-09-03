@@ -279,6 +279,8 @@ def test_recommendations_propagate_only_a_valid_yahoo_player_key() -> None:
     )
 
     assert keyed["player"]["playerKey"] == "461.p.100042"
+
+
 def test_candidate_output_distinguishes_missing_adp_from_rank_fallback() -> None:
     candidate_pool = [
         *rankings(),
@@ -295,8 +297,7 @@ def test_candidate_output_distinguishes_missing_adp_from_rank_fallback() -> None
     )
 
     candidate = next(
-        item for item in result["recommendations"]
-        if item["player"]["name"] == "No Market ADP"
+        item for item in result["recommendations"] if item["player"]["name"] == "No Market ADP"
     )
     assert candidate["player"]["adp"] is None
     assert candidate["player"]["adpAvailable"] is False
@@ -476,7 +477,10 @@ def test_full_suite_returns_specialists_scenario_critic_and_contingency() -> Non
     assert first["state"]["nextUserPick"] == 11
     assert first["capabilities"]["externalNews"] is False
     assert first["capabilities"]["injuryStatus"] is True
-    assert first["nextTwoPicksPlan"]["primaryNow"]["name"] == first["primaryRecommendation"]["player"]["name"]
+    assert (
+        first["nextTwoPicksPlan"]["primaryNow"]["name"]
+        == first["primaryRecommendation"]["player"]["name"]
+    )
     assert first["nextTwoPicksPlan"]["nextUserPicks"] == [11, 14]
     assert first["nextTwoPicksPlan"]["probabilitiesCalibrated"] is False
 
@@ -655,6 +659,54 @@ def test_fantasypros_projection_evidence_is_output_only_and_strictly_allowlisted
     assert "private" not in repr(candidate)
 
 
+def test_projection_evidence_allows_only_valid_sleeper_experience() -> None:
+    source = rankings()
+    target = next(item for item in source if item["name"] == "CeeDee Lamb")
+    target.update(
+        {
+            "projected_points": 294.5,
+            "projected_opportunities": 124.25,
+            "projection_opportunity_kind": "receptions",
+            "projection_source": "FantasyPros",
+            "projection_season": 2026,
+            "projection_scoring": "PPR",
+            "projection_source_as_of": None,
+            "projection_fetched_at": "2026-08-28T16:00:00Z",
+            "projection_stale": False,
+            "experience_years": 3,
+            "experience_source": "Sleeper",
+        }
+    )
+
+    result = LiveDraftRecommendationEngine(simulations=0).recommend(
+        live_context(),
+        source,
+        {"teams": 4},
+        count=5,
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    candidate = next(
+        item for item in result["recommendations"] if item["player"]["name"] == "CeeDee Lamb"
+    )
+
+    assert candidate["projectionEvidence"]["experienceYears"] == 3
+    assert candidate["projectionEvidence"]["experienceSource"] == "Sleeper"
+
+    target["experience_source"] = "https://evil.test/?token=secret"
+    malformed = LiveDraftRecommendationEngine(simulations=0).recommend(
+        live_context(),
+        source,
+        {"teams": 4},
+        count=5,
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    malformed_candidate = next(
+        item for item in malformed["recommendations"] if item["player"]["name"] == "CeeDee Lamb"
+    )
+    assert "experienceYears" not in malformed_candidate["projectionEvidence"]
+    assert "evil.test" not in repr(malformed_candidate)
+
+
 @pytest.mark.parametrize(
     ("override",),
     [
@@ -734,7 +786,11 @@ def test_breakout_classification_stays_stable_as_the_ledger_advances() -> None:
     )
 
     before = LiveDraftRecommendationEngine(simulations=0).recommend(
-        live_context(), candidates, {"teams": 4}, count=20, now=datetime(2026, 9, 1, tzinfo=timezone.utc)
+        live_context(),
+        candidates,
+        {"teams": 4},
+        count=20,
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
     )
     after = LiveDraftRecommendationEngine(simulations=0).recommend(
         advanced, candidates, {"teams": 4}, count=20, now=datetime(2026, 9, 1, tzinfo=timezone.utc)
@@ -829,17 +885,13 @@ def test_authoritative_capture_integrity_blocks_complete_ledger_recommendations(
     context["captureBlocked"] = True
 
     state = reconcile_live_draft(context, team_count=4)
-    result = LiveDraftRecommendationEngine().recommend(
-        context, rankings(), {"teams": 4}
-    )
+    result = LiveDraftRecommendationEngine().recommend(context, rankings(), {"teams": 4})
 
     assert state["health"]["complete"] is False
     assert state["health"]["authoritativeCaptureBlocked"] is True
     assert result["status"] == "blocked"
     assert result["recommendations"] == []
-    assert any(
-        "capture integrity" in warning.lower() for warning in result["warnings"]
-    )
+    assert any("capture integrity" in warning.lower() for warning in result["warnings"])
 
 
 def test_no_rankings_returns_state_advice_without_inventing_players() -> None:
@@ -1247,9 +1299,7 @@ def test_market_sleeper_watch_is_bounded_transparent_and_deterministic() -> None
     assert market["sleeperWatch"][0]["marketRound"] == 12
     assert market["sleeperWatch"][0]["action"]["code"] == "can-wait"
     delta = next(
-        item
-        for item in market["sleeperWatch"]
-        if item["player"]["name"] == "Delta Sleeper"
+        item for item in market["sleeperWatch"] if item["player"]["name"] == "Delta Sleeper"
     )
     assert "questionable" in delta["riskCaution"]["message"]
     exclusions = {item["code"]: item for item in market["exclusions"]}
@@ -1258,14 +1308,10 @@ def test_market_sleeper_watch_is_bounded_transparent_and_deterministic() -> None
     assert exclusions["no-real-adp"]["count"] == 0
     assert exclusions["outside-displayed-frontier"]["count"] == 1
     slipped = next(
-        item
-        for item in first["recommendations"]
-        if item["player"]["name"] == "Slipped Value"
+        item for item in first["recommendations"] if item["player"]["name"] == "Slipped Value"
     )
     assert slipped["decisionSignals"]["action"]["code"] == "take-now"
-    assert {badge["code"] for badge in slipped["decisionSignals"]["badges"]} == {
-        "value"
-    }
+    assert {badge["code"] for badge in slipped["decisionSignals"]["badges"]} == {"value"}
 
 
 @pytest.mark.parametrize(
@@ -1303,9 +1349,7 @@ def test_market_signals_never_treat_rank_fallback_as_real_adp(
     assert player["decisionSignals"]["badges"] == []
     assert player["decisionSignals"]["action"]["code"] == "timing-unknown"
     assert result["marketSignals"]["status"] == "unavailable"
-    exclusions = {
-        item["code"]: item for item in result["marketSignals"]["exclusions"]
-    }
+    exclusions = {item["code"]: item for item in result["marketSignals"]["exclusions"]}
     assert exclusions["no-real-adp"]["count"] == 1
 
 
@@ -1333,16 +1377,20 @@ def test_sleeper_watch_fails_closed_for_ledger_identity_and_source_season() -> N
     assert blocked["status"] == "blocked"
     assert blocked["marketSignals"]["status"] == "blocked"
     assert blocked["marketSignals"]["sleeperWatch"] == []
-    assert next(
-        item
-        for item in blocked["marketSignals"]["trust"]
-        if item["code"] == "ledger-complete"
-    )["passed"] is False
-    assert next(
-        item
-        for item in blocked["marketSignals"]["trust"]
-        if item["code"] == "drafted-identities-resolved"
-    )["passed"] is False
+    assert (
+        next(
+            item for item in blocked["marketSignals"]["trust"] if item["code"] == "ledger-complete"
+        )["passed"]
+        is False
+    )
+    assert (
+        next(
+            item
+            for item in blocked["marketSignals"]["trust"]
+            if item["code"] == "drafted-identities-resolved"
+        )["passed"]
+        is False
+    )
 
     unresolved_pool = [*rankings()[1:], sleeper]
     unresolved = engine.recommend(
@@ -1355,9 +1403,7 @@ def test_sleeper_watch_fails_closed_for_ledger_identity_and_source_season() -> N
     assert unresolved["status"] == "degraded"
     assert unresolved["marketSignals"]["status"] == "blocked"
     assert unresolved["marketSignals"]["sleeperWatch"] == []
-    exclusions = {
-        item["code"]: item for item in unresolved["marketSignals"]["exclusions"]
-    }
+    exclusions = {item["code"]: item for item in unresolved["marketSignals"]["exclusions"]}
     assert exclusions["unresolved-drafted-identity"]["count"] == 1
 
     wrong_season = engine.recommend(

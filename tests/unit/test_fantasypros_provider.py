@@ -34,7 +34,7 @@ def isolate_persistent_fantasypros_state(
     monkeypatch.setattr(
         snapshot_cache_module,
         "DEFAULT_SNAPSHOT_CACHE_PATH",
-        tmp_path / "app-private" / "fantasypros-snapshots.sqlite3",
+        tmp_path / "app-private" / "provider-snapshots.sqlite3",
     )
 
 
@@ -529,7 +529,7 @@ async def test_projection_snapshot_schema_migration_preserves_existing_snapshots
     with sqlite3.connect(cache_path) as connection:
         connection.executescript(
             """
-            PRAGMA user_version = 1;
+            PRAGMA user_version = 2;
             CREATE TABLE snapshots (
                 endpoint TEXT NOT NULL,
                 variant TEXT NOT NULL,
@@ -545,8 +545,11 @@ async def test_projection_snapshot_schema_migration_preserves_existing_snapshots
                 reported_limit INTEGER CHECK(reported_limit BETWEEN 1 AND 100000),
                 public_api_limited INTEGER NOT NULL CHECK(public_api_limited IN (0, 1)),
                 PRIMARY KEY (endpoint, variant, season, week, request_limit, record_limit),
-                CHECK(endpoint IN ('players', 'injuries', 'news')),
-                CHECK(variant IN ('catalog', 'weekly', 'recent'))
+                CHECK(endpoint IN ('players', 'injuries', 'news', 'projections')),
+                CHECK(variant IN (
+                    'catalog', 'catalog-season', 'weekly', 'recent',
+                    'preseason-std', 'preseason-half', 'preseason-ppr'
+                ))
             ) WITHOUT ROWID;
             """
         )
@@ -607,7 +610,7 @@ async def test_projection_snapshot_schema_migration_preserves_existing_snapshots
     )
     assert cache.load(projection_key) is not None
     with sqlite3.connect(cache_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert connection.execute("SELECT count(*) FROM snapshots").fetchone()[0] == 2
 
     source_payloads["projections"] = _projection_payload()
@@ -630,6 +633,43 @@ async def test_projection_snapshot_schema_migration_preserves_existing_snapshots
     assert result["players"][0]["identityResolved"] is True
     assert result["players"][0]["projected_points"] == 221.5
     assert result["adpEvidence"]["reason"] == "half_ppr_adp_unavailable"
+
+
+def test_default_cache_copies_legacy_fantasypros_database_to_provider_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_path = tmp_path / "fantasypros-snapshots.sqlite3"
+    destination = tmp_path / "provider-snapshots.sqlite3"
+    key = snapshot_cache_module.FantasyProsSnapshotKey(
+        "players", "catalog", record_limit=2500
+    )
+    snapshot = snapshot_cache_module.FantasyProsSnapshot(
+        records=(
+            {"id": 101, "name": "Jordan Alpha", "position": "RB", "team": "SF"},
+        ),
+        fetched_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        truncated=False,
+        returned_count=1,
+        reported_count=1,
+        reported_limit=None,
+        public_api_limited=False,
+    )
+    snapshot_cache_module.FantasyProsSnapshotCache(path=legacy_path).save(key, snapshot)
+    monkeypatch.setattr(
+        snapshot_cache_module, "LEGACY_FANTASYPROS_SNAPSHOT_CACHE_PATH", legacy_path
+    )
+    monkeypatch.setattr(
+        snapshot_cache_module, "DEFAULT_PROVIDER_SNAPSHOT_CACHE_PATH", destination
+    )
+    monkeypatch.setattr(snapshot_cache_module, "DEFAULT_SNAPSHOT_CACHE_PATH", destination)
+
+    migrated = snapshot_cache_module.FantasyProsSnapshotCache().load(key)
+
+    assert migrated == snapshot
+    assert destination.is_file()
+    assert legacy_path.is_file()
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
 @pytest.mark.asyncio

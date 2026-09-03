@@ -83,6 +83,7 @@ enhanced_mcp_*.py
 !tests/unit/test_fantasypros_provider.py
 !tests/unit/test_live_draft_recommender.py
 !tests/unit/test_live_draft_recommendation_service.py
+!tests/unit/test_sleeper_player_provider.py
 
 # Temporary and analysis files
 temp/

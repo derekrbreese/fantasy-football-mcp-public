@@ -85,7 +85,7 @@ test('renders all server-provided content as inert text with accessible structur
       breakoutMethod: malicious,
       projectionLabel: 'FantasyPros projection evidence',
       projectionDetail: '2026 PPR · 294.5 projected points · 124.25 receptions · fresh cached snapshot',
-      projectionCaution: 'Projection evidence only; FantasyPros does not supply experience years, so this evidence alone does not create a Breakout Watch label.',
+      projectionCaution: 'Projection evidence only; no matching Sleeper experience was available, so this evidence alone does not create a Breakout Watch label.',
       reasoning: [malicious],
     }],
     contingency: ['If unavailable: Player 2'],

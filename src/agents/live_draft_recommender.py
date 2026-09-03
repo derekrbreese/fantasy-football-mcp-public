@@ -185,24 +185,20 @@ def _safe_evidence_time(value: Any, *, optional: bool = False) -> tuple[bool, st
 def _fantasypros_projection_evidence(
     value: Mapping[str, Any], position: str
 ) -> dict[str, Any] | None:
-    """Allowlist display-only provider evidence without creating a breakout label."""
+    """Allowlist provider projection evidence and optional matched experience."""
 
     season = value.get("projection_season")
     scoring = value.get("projection_scoring")
     stale = value.get("projection_stale")
     points = _bounded_nonnegative_number(value.get("projected_points"), 1_000.0)
-    opportunities = _bounded_nonnegative_number(
-        value.get("projected_opportunities"), 1_000.0
-    )
+    opportunities = _bounded_nonnegative_number(value.get("projected_opportunities"), 1_000.0)
     opportunity_kind = value.get("projection_opportunity_kind")
     valid_kinds = {
         "RB": {"touches"},
         "WR": {"targets", "receptions"},
         "TE": {"targets", "receptions"},
     }
-    fetched_valid, fetched_at = _safe_evidence_time(
-        value.get("projection_fetched_at")
-    )
+    fetched_valid, fetched_at = _safe_evidence_time(value.get("projection_fetched_at"))
     source_valid, source_as_of = _safe_evidence_time(
         value.get("projection_source_as_of"), optional=True
     )
@@ -219,7 +215,7 @@ def _fantasypros_projection_evidence(
         or not source_valid
     ):
         return None
-    return {
+    result = {
         "source": "FantasyPros",
         "season": season,
         "scoring": scoring,
@@ -230,6 +226,12 @@ def _fantasypros_projection_evidence(
         "projectedOpportunities": opportunities,
         "opportunityKind": opportunity_kind,
     }
+    experience = value.get("experience_years")
+    experience_source = value.get("experience_source")
+    if type(experience) is int and 0 <= experience <= 30 and experience_source == "Sleeper":
+        result["experienceYears"] = experience
+        result["experienceSource"] = "Sleeper"
+    return result
 
 
 def _position(value: Any) -> str:
@@ -268,9 +270,7 @@ def _inverse_logistic(exponent: float) -> float:
 def _same_player(pick: Mapping[str, Any], player: Mapping[str, Any]) -> bool:
     """Resolve Yahoo's initialed ledger names without broad last-name-only matching."""
 
-    pick_player_key = normalize_yahoo_player_key(
-        pick.get("playerKey") or pick.get("player_key")
-    )
+    pick_player_key = normalize_yahoo_player_key(pick.get("playerKey") or pick.get("player_key"))
     ranking_player_key = normalize_yahoo_player_key(
         player.get("player_key") or player.get("playerKey")
     )
@@ -622,9 +622,7 @@ class RosterConstructionAgent:
             )
 
         if self.superflex_count:
-            superflex_surplus = eligible_surplus + max(
-                0, self.counts["QB"] - self.required["QB"]
-            )
+            superflex_surplus = eligible_surplus + max(0, self.counts["QB"] - self.required["QB"])
             current = min(self.superflex_count, superflex_surplus)
             slots.append(
                 {
@@ -647,9 +645,7 @@ class RosterConstructionAgent:
             "starterComplete": open_starters == 0,
             "draftableRosterSlots": draftable_slots,
             "positionCounts": {
-                position: count
-                for position, count in sorted(self.counts.items())
-                if position
+                position: count for position, count in sorted(self.counts.items()) if position
             },
         }
 
@@ -678,9 +674,7 @@ class OpponentModelAgent:
             probability = 0.5
             basis = "unknown user draft slot"
         else:
-            probability = _inverse_logistic(
-                (next_user_pick - candidate.effective_adp) / 6.0
-            )
+            probability = _inverse_logistic((next_user_pick - candidate.effective_adp) / 6.0)
             basis = (
                 "heuristic from real ADP and picks until the next user turn"
                 if candidate.adp is not None
@@ -740,9 +734,8 @@ class RiskNewsAgent:
             else None
         )
         if prefix == "injury":
-            freshness_value = (
-                candidate.raw.get("injury_snapshot_at")
-                or candidate.raw.get("retrievedAt")
+            freshness_value = candidate.raw.get("injury_snapshot_at") or candidate.raw.get(
+                "retrievedAt"
             )
             maximum_age = self._INJURY_MAX_AGE_SECONDS
         else:
@@ -756,9 +749,7 @@ class RiskNewsAgent:
         )
         return fresh, source or None, updated_at
 
-    def _recent_news(
-        self, candidate: Candidate, *, fresh: bool
-    ) -> list[dict[str, str]]:
+    def _recent_news(self, candidate: Candidate, *, fresh: bool) -> list[dict[str, str]]:
         if not fresh or not isinstance(candidate.raw.get("recentNews"), list):
             return []
         result: list[dict[str, str]] = []
@@ -787,9 +778,7 @@ class RiskNewsAgent:
         return fresh and bool(self._recent_news(candidate, fresh=fresh))
 
     def score(self, candidate: Candidate) -> tuple[float | None, dict[str, Any]]:
-        injury_fresh, injury_source, injury_updated_at = self._fresh_signal(
-            candidate, "injury"
-        )
+        injury_fresh, injury_source, injury_updated_at = self._fresh_signal(candidate, "injury")
         news_fresh, news_source, news_updated_at = self._fresh_signal(candidate, "news")
         raw_status = candidate.raw.get("injury_status") or candidate.raw.get("status")
         supplied_status = str(raw_status).strip().lower() if raw_status else "unknown"
@@ -842,9 +831,7 @@ class ScenarioSimulatorAgent:
                 selected = False
                 for offset in range(intervening):
                     pick_number = current_pick + offset
-                    pressure = _inverse_logistic(
-                        (candidate.effective_adp - pick_number) / 5.0
-                    )
+                    pressure = _inverse_logistic((candidate.effective_adp - pick_number) / 5.0)
                     hazard = min(0.72, 0.035 + pressure * 0.22)
                     if rng.random() < hazard:
                         selected = True
@@ -918,9 +905,7 @@ class LiveDraftRecommendationEngine:
         league = dict(league_info or {})
         team_count = int(_number(league.get("teams") or league.get("num_teams"), 0)) or None
         reference_time = now or datetime.now(timezone.utc)
-        state = reconcile_live_draft(
-            live_context, team_count=team_count, now=reference_time
-        )
+        state = reconcile_live_draft(live_context, team_count=team_count, now=reference_time)
         warnings = list(state["health"]["warnings"])
         risk_agent = RiskNewsAgent(reference_time)
         ranking_candidates = [
@@ -1047,9 +1032,7 @@ class LiveDraftRecommendationEngine:
         pool_size = max(len(rankings), 100)
         evaluated = []
 
-        for candidate, breakout_label in zip(
-            candidates, candidate_breakout_labels, strict=True
-        ):
+        for candidate, breakout_label in zip(candidates, candidate_breakout_labels, strict=True):
             value, value_detail = value_agent.score(
                 candidate, state["currentOverallPick"], pool_size
             )
@@ -1090,8 +1073,7 @@ class LiveDraftRecommendationEngine:
                         {"playerKey": yahoo_player_key}
                         if (
                             yahoo_player_key := normalize_yahoo_player_key(
-                                candidate.raw.get("player_key")
-                                or candidate.raw.get("playerKey")
+                                candidate.raw.get("player_key") or candidate.raw.get("playerKey")
                             )
                         )
                         else {}
@@ -1163,9 +1145,7 @@ class LiveDraftRecommendationEngine:
         next_two_plan = plan_next_two_picks(
             evaluated, state, unresolved_drafted=len(unresolved_drafted)
         )
-        base["capabilities"]["breakoutWatch"] = (
-            breakout_summary["status"] == "available"
-        )
+        base["capabilities"]["breakoutWatch"] = breakout_summary["status"] == "available"
         result = {
             **base,
             "status": "success" if critic["passed"] else "degraded",
@@ -1237,8 +1217,7 @@ class LiveDraftRecommendationEngine:
                 {
                     str(item.get("category") or "news")
                     for item in risk.get("recentNews", [])
-                    if str(item.get("category") or "").casefold()
-                    in RiskNewsAgent._NEWS_SCORES
+                    if str(item.get("category") or "").casefold() in RiskNewsAgent._NEWS_SCORES
                 }
             )
             reasons.append(
@@ -1270,9 +1249,7 @@ class LiveDraftRecommendationEngine:
             "adpAvailable": player.get("adpAvailable") is True,
             "tier": str(value.get("tier") or "unknown")[:24],
         }
-        player_key = normalize_yahoo_player_key(
-            player.get("playerKey") or player.get("player_key")
-        )
+        player_key = normalize_yahoo_player_key(player.get("playerKey") or player.get("player_key"))
         if player_key:
             result["playerKey"] = player_key
         return result
@@ -1351,17 +1328,12 @@ class LiveDraftRecommendationEngine:
                     str(item.get("player", {}).get("name") or ""),
                 )
             )
-            candidates = [
-                LiveDraftRecommendationEngine._candidate_brief(item) for item in pool[:5]
-            ]
+            candidates = [LiveDraftRecommendationEngine._candidate_brief(item) for item in pool[:5]]
             leading_tier = candidates[0]["tier"]
             tier_remaining = sum(
                 1
                 for item in pool
-                if str(
-                    item.get("specialistDetails", {}).get("value", {}).get("tier")
-                    or "unknown"
-                )
+                if str(item.get("specialistDetails", {}).get("value", {}).get("tier") or "unknown")
                 == leading_tier
             )
             next_drop = next(
@@ -1398,9 +1370,7 @@ class LiveDraftRecommendationEngine:
                 "window": len(recent),
                 "message": f"{count} {position} selections in the last {len(recent)} picks.",
             }
-            for position, count in sorted(
-                counts.items(), key=lambda entry: (-entry[1], entry[0])
-            )
+            for position, count in sorted(counts.items(), key=lambda entry: (-entry[1], entry[0]))
             if count >= 3
         ][:4]
 
@@ -1418,9 +1388,7 @@ class LiveDraftRecommendationEngine:
         plan["source"] = "configured" if isinstance(configured, list) and configured else "default"
         warnings = []
         open_slots = [
-            f"{slot['position']} {slot['open']}"
-            for slot in plan["slots"]
-            if slot["open"] > 0
+            f"{slot['position']} {slot['open']}" for slot in plan["slots"] if slot["open"] > 0
         ]
         if open_slots:
             warnings.append(f"Open starter slots: {', '.join(open_slots)}.")
@@ -1428,15 +1396,9 @@ class LiveDraftRecommendationEngine:
         team_count = int(_number(state.get("teamCount"), 0))
         current_pick = int(_number(state.get("currentOverallPick"), 0))
         current_round = (
-            ((current_pick - 1) // team_count) + 1
-            if team_count > 0 and current_pick > 0
-            else None
+            ((current_pick - 1) // team_count) + 1 if team_count > 0 and current_pick > 0 else None
         )
-        special_teams = [
-            position
-            for position in ("K", "DST")
-            if roster_agent.counts[position] > 0
-        ]
+        special_teams = [position for position in ("K", "DST") if roster_agent.counts[position] > 0]
         if current_round is not None and current_round <= 10 and special_teams:
             warnings.append(
                 f"Early {'/'.join(special_teams)} selection reduced earlier skill-position depth."
@@ -1480,7 +1442,9 @@ class LiveDraftRecommendationEngine:
                 {
                     "position": board["position"],
                     "tier": str(board.get("leadingTier") or "unknown")[:24],
-                    "candidates": [dict(item) for item in candidates[:3] if isinstance(item, Mapping)],
+                    "candidates": [
+                        dict(item) for item in candidates[:3] if isinstance(item, Mapping)
+                    ],
                 }
             )
         return groups[:4]
@@ -1617,7 +1581,11 @@ class LiveDraftRecommendationEngine:
         position_boards = [] if blocked else cls._position_boards(evaluated)
         return {
             "strategyComparison": (
-                {"consensus": False, "strategies": [], "summary": "Strategy comparison is blocked until the ledger is repaired."}
+                {
+                    "consensus": False,
+                    "strategies": [],
+                    "summary": "Strategy comparison is blocked until the ledger is repaired.",
+                }
                 if blocked
                 else cls._strategy_comparison(evaluated, risk_available=risk_available)
             ),
