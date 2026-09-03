@@ -223,6 +223,14 @@ The first FantasyPros-enabled recommendation automatically fetches the base play
 
 No Sleeper API key is required. When fresh FantasyPros preseason projections are present, the service requests `https://api.sleeper.app/v1/players/nfl?active=true`, retains only RB/WR/TE identity fields plus `years_exp`, and caches that normalized catalog for 24 hours at `~/.fantasy-football-mcp/sleeper-players.json`. The directory and file are restricted to `0700` and `0600` respectively. A failed refresh may use a cache no older than 45 days; older, malformed, oversized, or ambiguous data fails closed. The raw Sleeper response, unrelated player fields, and request URLs are not persisted.
 
+Warm the cache without running a recommendation:
+
+```bash
+uv run python cache_sleeper_players.py
+```
+
+The command respects the 24-hour TTL and prints only bounded cache metadata as JSON. Use `--force` for an explicit network refresh. It exits nonzero only when no usable fresh or bounded-stale catalog is available. A daily cron entry can invoke the same command from the repository checkout; use absolute paths for both the checkout and `uv` because cron usually has a minimal environment.
+
 ## Databricks advisory critic
 
 The Databricks integration is an optional, advisory-only second look at a completed deterministic recommendation. The local deterministic engine remains authoritative: the model cannot reorder candidates, change scores, select or draft a player, or feed output back into any specialist. A missing, incomplete, or defective authoritative ledger skips the advisory path. Stale state may still produce degraded deterministic candidates; when it does, staleness is disclosed as a quality flag and the deterministic response remains visibly degraded. Disabled or skipped advisory work is omitted from the response entirely; a timeout, dependency problem, authentication failure, or invalid model response fails open and leaves the deterministic recommendations unchanged.

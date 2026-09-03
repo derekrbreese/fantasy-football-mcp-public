@@ -268,8 +268,31 @@ class SleeperPlayerProvider:
             "warnings": warnings,
         }
 
+    async def warm_player_cache(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        """Populate the normalized cache without returning any player records."""
+
+        now = _utc(self._clock())
+        async with self._lock:
+            catalog, fetched_at, stale, refresh_failed = await self._catalog(
+                now, force_refresh=force_refresh
+            )
+        if not catalog:
+            status = "unavailable"
+        elif refresh_failed:
+            status = "degraded"
+        else:
+            status = "success"
+        return {
+            "status": status,
+            "provider": "Sleeper",
+            "catalogFetchedAt": _iso(fetched_at) if fetched_at is not None else None,
+            "cacheStale": stale,
+            "refreshFailed": refresh_failed,
+            "catalogPlayers": len(catalog),
+        }
+
     async def _catalog(
-        self, now: datetime
+        self, now: datetime, *, force_refresh: bool = False
     ) -> tuple[tuple[dict[str, Any], ...], datetime | None, bool, bool]:
         cached = self._memory_cache
         if cached is None:
@@ -277,7 +300,7 @@ class SleeperPlayerProvider:
             self._memory_cache = cached
         if cached is not None:
             age = (now - cached[0]).total_seconds()
-            if 0 <= age < self._cache_ttl_seconds:
+            if not force_refresh and 0 <= age < self._cache_ttl_seconds:
                 return cached[1], cached[0], False, False
         else:
             age = math.inf

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import cache_sleeper_players
 from src.services.sleeper_player_provider import SleeperPlayerProvider
 
 
@@ -118,6 +119,61 @@ async def test_fetches_normalizes_resolves_and_persists_private_daily_cache(
     assert no_network.calls == []
     assert cached["players"][0]["experience_years"] == 2
     assert cached["cacheStale"] is False
+
+
+@pytest.mark.asyncio
+async def test_cache_warmer_respects_ttl_and_supports_explicit_refresh(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 9, 3, 18, 0, tzinfo=timezone.utc)
+    cache_path = tmp_path / "sleeper-players.json"
+    transport = FakeTransport(sleeper_catalog())
+    provider = SleeperPlayerProvider(
+        transport=transport,
+        clock=lambda: now,
+        cache_path=cache_path,
+    )
+
+    first = await provider.warm_player_cache()
+    cached = await provider.warm_player_cache()
+    forced = await provider.warm_player_cache(force_refresh=True)
+
+    assert first == cached == forced
+    assert first == {
+        "status": "success",
+        "provider": "Sleeper",
+        "catalogFetchedAt": "2026-09-03T18:00:00Z",
+        "cacheStale": False,
+        "refreshFailed": False,
+        "catalogPlayers": 4,
+    }
+    assert len(transport.calls) == 2
+
+
+def test_cache_warmer_cli_prints_only_bounded_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeProvider:
+        async def warm_player_cache(self, *, force_refresh=False):
+            assert force_refresh is True
+            return {
+                "status": "success",
+                "provider": "Sleeper",
+                "catalogFetchedAt": "2026-09-03T18:00:00Z",
+                "cacheStale": False,
+                "refreshFailed": False,
+                "catalogPlayers": 1234,
+                "players": [{"name": "must not escape"}],
+                "private": "must not escape",
+            }
+
+    monkeypatch.setattr(cache_sleeper_players, "SleeperPlayerProvider", FakeProvider)
+
+    assert cache_sleeper_players.main(["--force"]) == 0
+    output = capsys.readouterr().out
+    assert '"catalogPlayers":1234' in output
+    assert "must not escape" not in output
 
 
 @pytest.mark.asyncio
