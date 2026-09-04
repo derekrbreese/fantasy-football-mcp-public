@@ -50,6 +50,7 @@ _STRATEGY_WEIGHTS = {
     "balanced": {
         "value": 0.32,
         "rosterConstruction": 0.24,
+        "draftPlan": 0.18,
         "draftDynamics": 0.10,
         "opponentModel": 0.12,
         "riskNews": 0.12,
@@ -58,6 +59,7 @@ _STRATEGY_WEIGHTS = {
     "aggressive": {
         "value": 0.28,
         "rosterConstruction": 0.15,
+        "draftPlan": 0.15,
         "draftDynamics": 0.12,
         "opponentModel": 0.12,
         "riskNews": 0.08,
@@ -66,12 +68,16 @@ _STRATEGY_WEIGHTS = {
     "conservative": {
         "value": 0.30,
         "rosterConstruction": 0.25,
+        "draftPlan": 0.18,
         "draftDynamics": 0.08,
         "opponentModel": 0.10,
         "riskNews": 0.22,
         "scenario": 0.05,
     },
 }
+_DRAFT_PLANS = frozenset(
+    {"balanced_rb_wr", "hero_rb", "wr_heavy", "rb_heavy", "best_available"}
+)
 _COCKPIT_POSITIONS = ("OVERALL", "QB", "RB", "WR", "TE", "FLEX", "K", "DST")
 
 
@@ -650,6 +656,83 @@ class RosterConstructionAgent:
         }
 
 
+class DraftPlanAgent:
+    """Apply a bounded, round-aware RB/WR construction preference."""
+
+    name = "draftPlan"
+
+    def __init__(self, roster: Sequence[Mapping[str, Any]], plan: str):
+        self.counts = Counter(_position(player.get("position")) for player in roster)
+        self.round = len(roster) + 1
+        self.plan = plan if plan in _DRAFT_PLANS else "balanced_rb_wr"
+
+    def score(self, candidate: Candidate) -> tuple[float, dict[str, Any]]:
+        position = candidate.position
+        score = 50.0
+        impact = "uses best available value without an RB/WR construction preference"
+
+        if self.plan == "balanced_rb_wr" and self.round <= 4:
+            if position in {"RB", "WR"}:
+                other = "WR" if position == "RB" else "RB"
+                position_deficit = max(0, 2 - self.counts[position])
+                other_deficit = max(0, 2 - self.counts[other])
+                score = 94.0 if position_deficit > other_deficit else 84.0
+                if self.round == 3 and self.counts[position] == 0:
+                    score = 100.0
+                if position_deficit == 0 and other_deficit > 0:
+                    score = 24.0
+                impact = "works toward two RBs and two WRs through Round 4"
+            else:
+                score = 24.0
+                impact = "defers non-RB/WR picks while building the early RB/WR core"
+        elif self.plan == "hero_rb" and self.round <= 5:
+            if self.counts["RB"] == 0 and self.round <= 2:
+                score = 100.0 if position == "RB" else (74.0 if position == "WR" else 28.0)
+                impact = "seeks one anchor RB in the first two rounds"
+            elif position == "WR":
+                score = 98.0 if self.counts["WR"] < 3 else 78.0
+                impact = "builds WR strength around the anchor RB through Round 5"
+            elif position == "RB":
+                score = 20.0
+                impact = "defers the second RB after securing the anchor"
+            else:
+                score = 40.0
+                impact = "keeps the early focus on one anchor RB plus WR depth"
+        elif self.plan == "wr_heavy":
+            if self.round <= 4:
+                if position == "WR":
+                    score = 100.0 if self.counts["WR"] < 3 else 82.0
+                    impact = "builds a WR-heavy core through Round 4"
+                elif position == "RB":
+                    score = 18.0
+                    impact = "defers RB in the Zero-RB opening"
+                else:
+                    score = 52.0
+                    impact = "allows elite non-RB value without displacing the WR focus"
+            elif self.round <= 7 and self.counts["RB"] < 2:
+                score = 94.0 if position == "RB" else 52.0
+                impact = "attacks RB upside after the WR-heavy opening"
+        elif self.plan == "rb_heavy" and self.round <= 5:
+            target = 2 if self.round <= 3 else 3
+            if position == "RB":
+                score = 100.0 if self.counts["RB"] < target else 70.0
+                target_round = 3 if self.round <= 3 else 5
+                impact = f"works toward {target} RBs by Round {target_round}"
+            elif position == "WR":
+                score = 68.0
+                impact = "adds WR value without abandoning the RB-heavy opening"
+            else:
+                score = 26.0
+                impact = "defers non-RB/WR picks during the RB-heavy opening"
+
+        return score, {
+            "plan": self.plan,
+            "round": self.round,
+            "positionCount": self.counts[position],
+            "impact": impact,
+        }
+
+
 class DraftDynamicsAgent:
     name = "draftDynamics"
 
@@ -897,6 +980,7 @@ class LiveDraftRecommendationEngine:
         league_info: Mapping[str, Any] | None = None,
         *,
         strategy: str = "balanced",
+        draft_plan: str = "balanced_rb_wr",
         count: int = 5,
         now: datetime | None = None,
         market_source: Mapping[str, Any] | None = None,
@@ -913,6 +997,7 @@ class LiveDraftRecommendationEngine:
             for index, item in enumerate(rankings, start=1)
         ]
         roster_agent = RosterConstructionAgent(state["userRoster"], _roster_positions(league))
+        draft_plan_agent = DraftPlanAgent(state["userRoster"], draft_plan)
         injury_available = any(
             risk_agent.injury_available(candidate)
             for candidate in ranking_candidates
@@ -944,6 +1029,7 @@ class LiveDraftRecommendationEngine:
         base = {
             "source": "live-draft-specialist-suite",
             "strategy": strategy if strategy in _STRATEGY_WEIGHTS else "balanced",
+            "draftPlan": draft_plan_agent.plan,
             "generatedAt": live_context.get("generatedAt"),
             "state": state,
             "capabilities": {
@@ -1037,6 +1123,7 @@ class LiveDraftRecommendationEngine:
                 candidate, state["currentOverallPick"], pool_size
             )
             roster, roster_detail = roster_agent.score(candidate)
+            plan, plan_detail = draft_plan_agent.score(candidate)
             dynamics, dynamics_detail = dynamics_agent.score(candidate)
             opponent, opponent_detail = opponent_agent.score(candidate, state["nextUserPick"])
             risk, risk_detail = risk_agent.score(candidate)
@@ -1046,6 +1133,7 @@ class LiveDraftRecommendationEngine:
             scores = {
                 "value": value,
                 "rosterConstruction": roster,
+                "draftPlan": plan,
                 "draftDynamics": dynamics,
                 "opponentModel": opponent,
                 "riskNews": risk,
@@ -1060,6 +1148,7 @@ class LiveDraftRecommendationEngine:
                 candidate,
                 value_detail,
                 roster_detail,
+                plan_detail,
                 dynamics_detail,
                 risk_detail,
                 opponent_detail,
@@ -1096,6 +1185,7 @@ class LiveDraftRecommendationEngine:
                 "specialistDetails": {
                     "value": value_detail,
                     "rosterConstruction": roster_detail,
+                    "draftPlan": plan_detail,
                     "draftDynamics": dynamics_detail,
                     "opponentModel": opponent_detail,
                     "scenario": scenario_detail,
@@ -1166,6 +1256,7 @@ class LiveDraftRecommendationEngine:
                 "liveStateReconciler": state["health"],
                 "playerValue": "rank, ADP value, and tiers",
                 "rosterConstruction": "starter, flex, Superflex, and depth requirements",
+                "draftPlan": "round-aware RB/WR roster construction preference",
                 "draftDynamics": "recent positional-run pressure",
                 "opponentModel": "uncalibrated ADP survival heuristic",
                 "riskNews": "sourced injury/news when supplied; missing means unknown",
@@ -1193,6 +1284,7 @@ class LiveDraftRecommendationEngine:
         candidate: Candidate,
         value: Mapping[str, Any],
         roster: Mapping[str, Any],
+        draft_plan: Mapping[str, Any],
         dynamics: Mapping[str, Any],
         risk: Mapping[str, Any],
         opponent: Mapping[str, Any],
@@ -1205,6 +1297,7 @@ class LiveDraftRecommendationEngine:
         reasons = [
             f"{value['tier']} value at rank {int(candidate.rank)} ({market_context})",
             roster["impact"],
+            draft_plan["impact"],
         ]
         if dynamics["runDetected"]:
             reasons.append(

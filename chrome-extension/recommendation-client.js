@@ -3,6 +3,9 @@
 
   const DEFAULT_RECOMMENDATION_ENDPOINT = 'http://127.0.0.1:8765/draft-recommendation';
   const STRATEGIES = new Set(['conservative', 'balanced', 'aggressive']);
+  const DRAFT_PLANS = new Set([
+    'balanced_rb_wr', 'hero_rb', 'wr_heavy', 'rb_heavy', 'best_available',
+  ]);
 
   function clampInteger(value, minimum, maximum, fallback) {
     let number;
@@ -39,10 +42,14 @@
   function buildRecommendationRequestForLeagueId(value, preferences = {}) {
     const leagueId = explicitLeagueId(value);
     const strategy = STRATEGIES.has(preferences.strategy) ? preferences.strategy : 'balanced';
+    const draftPlan = DRAFT_PLANS.has(preferences.draftPlan)
+      ? preferences.draftPlan
+      : 'balanced_rb_wr';
     return {
       schemaVersion: 1,
       leagueId,
       strategy,
+      draftPlan,
       count: clampInteger(preferences.count, 1, 20, 5),
       rankingCount: clampInteger(preferences.rankingCount, 25, 500, 250),
       simulations: clampInteger(preferences.simulations, 0, 512, 256),

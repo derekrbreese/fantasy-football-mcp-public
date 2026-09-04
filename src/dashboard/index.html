@@ -41,11 +41,21 @@
             <input id="league-id" name="leagueId" required maxlength="32" pattern="[0-9]{1,32}" inputmode="numeric" autocomplete="off" placeholder="10462193">
           </label>
           <label>
-            <span>Strategy</span>
+            <span>Risk style</span>
             <select id="strategy" name="strategy">
               <option value="balanced" selected>Balanced</option>
               <option value="conservative">Conservative</option>
               <option value="aggressive">Aggressive</option>
+            </select>
+          </label>
+          <label>
+            <span>Draft plan</span>
+            <select id="draft-plan" name="draftPlan">
+              <option value="balanced_rb_wr" selected>Balanced RB/WR</option>
+              <option value="hero_rb">Hero RB</option>
+              <option value="wr_heavy">WR-heavy / Zero RB</option>
+              <option value="rb_heavy">RB-heavy</option>
+              <option value="best_available">Best available</option>
             </select>
           </label>
           <label>

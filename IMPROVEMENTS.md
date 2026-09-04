@@ -9,6 +9,7 @@ This list separates the delivered live-draft baseline from prioritized follow-up
 - Complete pick, fantasy-team, order, and user-roster context.
 - League-specific state validation and rollback-resistant private persistence.
 - Deterministic value, roster, dynamics, opponent, risk/news, scenario, and critic specialists.
+- Independent round-aware draft plans for Balanced RB/WR, Hero RB, WR-heavy / Zero RB, RB-heavy, and unmodified Best available construction, combinable with every risk style.
 - Yahoo roster-slot support, including Superflex aliases.
 - Conservative player resolution with explicit equivalent NFL team-code aliases, stale-state warnings, and incomplete-ledger blocking.
 - Popup ledger diagnostics with exact missing, duplicate, and sanitized unnumbered-pick details, plus guarded authoritative full repair that distinguishes strictly numbered pre-rendered future rows using stable current-pick evidence. Unsafe or ambiguous capture persists a privacy-safe per-league server blocker until a verified coherent scan or accepted repair clears it.

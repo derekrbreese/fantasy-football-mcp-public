@@ -10,6 +10,7 @@
   const elements = {
     league: document.querySelector('#league-select'),
     strategy: document.querySelector('#strategy-select'),
+    draftPlan: document.querySelector('#draft-plan-select'),
     refresh: document.querySelector('#refresh-recommendations'),
     dashboard: document.querySelector('#open-dashboard'),
     controllerStatus: document.querySelector('#controller-status'),
@@ -84,6 +85,7 @@
     elements.refresh.disabled = refreshing || !session;
     elements.league.disabled = refreshing;
     elements.strategy.disabled = refreshing;
+    elements.draftPlan.disabled = refreshing;
     updateDashboardLink(session);
   }
 
@@ -289,6 +291,7 @@
       autoRefresh.markRequested(session);
       const result = await YahooDraftRecommendationClient.fetchDraftRecommendations(session, {
         strategy: elements.strategy.value,
+        draftPlan: elements.draftPlan.value,
         count: 5,
         rankingCount: 250,
         simulations: 256,

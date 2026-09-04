@@ -6,10 +6,35 @@ from datetime import datetime, timezone
 import pytest
 
 from src.agents.live_draft_recommender import (
+    Candidate,
+    DraftPlanAgent,
     LiveDraftRecommendationEngine,
     _same_player,
     reconcile_live_draft,
 )
+
+
+def test_draft_plans_apply_distinct_early_round_position_preferences() -> None:
+    rb = Candidate({}, "Runner", "RB", "SF", 1, 1)
+    wr = Candidate({}, "Receiver", "WR", "MIN", 1, 1)
+    qb = Candidate({}, "Quarterback", "QB", "BUF", 1, 1)
+
+    two_receivers = [{"position": "WR"}, {"position": "WR"}]
+    balanced = DraftPlanAgent(two_receivers, "balanced_rb_wr")
+    assert balanced.round == 3
+    assert balanced.score(rb)[0] == 100
+    assert balanced.score(wr)[0] == 24
+
+    hero = DraftPlanAgent([{"position": "RB"}, {"position": "WR"}], "hero_rb")
+    assert hero.score(wr)[0] > hero.score(rb)[0]
+
+    assert DraftPlanAgent([], "wr_heavy").score(wr)[0] > DraftPlanAgent(
+        [], "wr_heavy"
+    ).score(rb)[0]
+    assert DraftPlanAgent([], "rb_heavy").score(rb)[0] > DraftPlanAgent(
+        [], "rb_heavy"
+    ).score(wr)[0]
+    assert DraftPlanAgent([], "best_available").score(qb)[0] == 50
 
 
 def live_context() -> dict:
@@ -465,11 +490,13 @@ def test_recommender_normalizes_jaguars_team_alias_for_initialed_picks() -> None
 
 def test_full_suite_returns_specialists_scenario_critic_and_contingency() -> None:
     engine = LiveDraftRecommendationEngine(simulations=96, random_seed=17)
+    player_rankings = rankings()
 
-    first = engine.recommend(live_context(), rankings(), {"teams": 4}, count=3)
-    second = engine.recommend(live_context(), rankings(), {"teams": 4}, count=3)
+    first = engine.recommend(live_context(), player_rankings, {"teams": 4}, count=3)
+    second = engine.recommend(live_context(), player_rankings, {"teams": 4}, count=3)
 
     assert first["status"] == "success"
+    assert first["draftPlan"] == "balanced_rb_wr"
     assert first["primaryRecommendation"] == first["recommendations"][0]
     assert len(first["alternatives"]) == 2
     assert first["recommendations"] == second["recommendations"]
@@ -488,6 +515,7 @@ def test_full_suite_returns_specialists_scenario_critic_and_contingency() -> Non
     assert set(primary["scores"]) == {
         "value",
         "rosterConstruction",
+        "draftPlan",
         "draftDynamics",
         "opponentModel",
         "riskNews",
@@ -497,6 +525,7 @@ def test_full_suite_returns_specialists_scenario_critic_and_contingency() -> Non
     assert primary["confidenceCalibrated"] is False
     assert 0 <= primary["returnProbability"] <= 1
     assert primary["rosterImpact"]
+    assert primary["specialistDetails"]["draftPlan"]["round"] == 3
     assert primary["reasoning"]
     assert "checks" in first["critic"]
     assert first["critic"]["passed"] is True

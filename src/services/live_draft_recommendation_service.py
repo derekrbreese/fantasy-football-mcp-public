@@ -870,6 +870,7 @@ async def get_live_draft_recommendation(
     league_key: str | None,
     league_id: str | None = None,
     strategy: str = "balanced",
+    draft_plan: str = "balanced_rb_wr",
     count: int = 5,
     ranking_count: int = 250,
     simulations: int = 256,
@@ -1044,6 +1045,7 @@ async def get_live_draft_recommendation(
         rankings if isinstance(rankings, list) else [],
         league_info,
         strategy=strategy,
+        draft_plan=draft_plan,
         count=max(1, min(int(count), 20)),
         market_source=market_source,
     )

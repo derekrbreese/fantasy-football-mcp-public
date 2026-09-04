@@ -90,7 +90,7 @@ The popup displays picks and recorder health, not recommendations, and it cannot
 
 ### Firefox Draft Assistant
 
-The sidebar shows up to five recommendations beside Yahoo. Above the detailed cards, an at-a-glance decision brief shows whether you are on the clock, next, a known number of picks away, or missing reliable turn timing; it also keeps the primary recommendation and two immediate fallbacks visible together. Its queue and alert preference are stored only for the exact Yahoo session identity (sport plus league ID) in extension storage. Numeric-league-only preference keys from earlier development builds are intentionally not migrated because their sport provenance cannot be proven. Optional browser alerts fire only for a complete, current ledger when you are next or on the clock, and are deduplicated per recorded revision. Press plain **R** outside a form control for a manual refresh. The sidebar does not invent a countdown clock from pick distance.
+The sidebar shows up to five recommendations beside Yahoo. Above the detailed cards, an at-a-glance decision brief shows whether you are on the clock, next, a known number of picks away, or missing reliable turn timing; it also keeps the primary recommendation and two immediate fallbacks visible together. **Risk style** controls conservative/balanced/aggressive scoring, while the independent **Draft plan** offers Balanced RB/WR, Hero RB, WR-heavy / Zero RB, RB-heavy, and Best available construction. The plans are round-aware scoring preferences, not hard position locks. Its queue and alert preference are stored only for the exact Yahoo session identity (sport plus league ID) in extension storage. Numeric-league-only preference keys from earlier development builds are intentionally not migrated because their sport provenance cannot be proven. Optional browser alerts fire only for a complete, current ledger when you are next or on the clock, and are deduplicated per recorded revision. Press plain **R** outside a form control for a manual refresh. The sidebar does not invent a countdown clock from pick distance.
 
 It selects a league only from the active draft tab or an explicit saved-league choice; it never silently chooses the newest saved session. After the initial request, a newer pick for that exact league cancels stale work, debounces duplicate events, and refreshes automatically. A same-revision `lastSyncedAt` bookkeeping write does not cancel the valid request. Another league's storage updates do not affect it.
 
@@ -197,7 +197,7 @@ After a changed scan, the extension posts sanitized context to the loopback-only
 2. Check ledger, state-age, and identity warnings.
 3. Call `ff_get_live_draft_recommendation` with the same `league_id` only when the state is ready.
 
-The sidebar/dashboard sends only an allowlisted league ID and bounded strategy/count/ranking/simulation settings to the local recommendation route. The server independently loads the exact saved session and profile, then rechecks both after scoring. If a pick or profile changed mid-request, it discards the candidates and asks for a refresh.
+The sidebar/dashboard sends only an allowlisted league ID and bounded risk-style/draft-plan/count/ranking/simulation settings to the local recommendation route. The server independently loads the exact saved session and profile, then rechecks both after scoring. If a pick or profile changed mid-request, it discards the candidates and asks for a refresh.
 
 ### Manual export
 

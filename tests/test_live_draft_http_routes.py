@@ -1561,8 +1561,9 @@ async def test_recommendation_route_derives_identity_and_clamps_inputs(monkeypat
     assert calls == [
         {
             "league_key": None,
-            "league_id": "10462193",
-            "strategy": "aggressive",
+                "league_id": "10462193",
+                "strategy": "aggressive",
+                "draft_plan": "balanced_rb_wr",
             "count": 20,
             "ranking_count": 500,
             "simulations": 512,
@@ -1681,6 +1682,7 @@ async def test_recommendation_route_bounds_streamed_body(monkeypatch) -> None:
         ({"schemaVersion": 1, "leagueId": "10462193", "leagueKey": "nfl.l.999"}, "Unsupported field"),
         ({"schemaVersion": 1, "leagueId": "../10462193"}, "leagueId"),
         ({"schemaVersion": 1, "leagueId": "10462193", "strategy": "reckless"}, "strategy"),
+        ({"schemaVersion": 1, "leagueId": "10462193", "draftPlan": "reckless"}, "draftPlan"),
         ({"schemaVersion": 1, "leagueId": "10462193", "count": True}, "count"),
         ({"schemaVersion": 1, "leagueId": "10462193", "rankingCount": True}, "rankingCount"),
         ({"schemaVersion": 1, "leagueId": "10462193", "simulations": False}, "simulations"),
@@ -1999,7 +2001,7 @@ def test_dashboard_uses_shared_ui_contract_without_inline_or_remote_code() -> No
     assert "leagueInput.value.trim() !== leagueId" in script
     league_input_start = script.index("leagueInput.addEventListener('input'")
     settings_input_start = script.index(
-        "['strategy', 'count', 'ranking-count', 'simulations']",
+        "['strategy', 'draft-plan', 'count', 'ranking-count', 'simulations']",
         league_input_start,
     )
     toggle_start = script.index(

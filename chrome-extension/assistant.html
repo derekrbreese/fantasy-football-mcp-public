@@ -20,11 +20,20 @@
           <option value="">Choose a recorded league</option>
         </select>
 
-        <label for="strategy-select">Strategy</label>
+        <label for="strategy-select">Risk style</label>
         <select id="strategy-select">
           <option value="balanced" selected>Balanced</option>
           <option value="conservative">Conservative</option>
           <option value="aggressive">Aggressive</option>
+        </select>
+
+        <label for="draft-plan-select">Draft plan</label>
+        <select id="draft-plan-select">
+          <option value="balanced_rb_wr" selected>Balanced RB/WR</option>
+          <option value="hero_rb">Hero RB</option>
+          <option value="wr_heavy">WR-heavy / Zero RB</option>
+          <option value="rb_heavy">RB-heavy</option>
+          <option value="best_available">Best available</option>
         </select>
 
         <div class="control-actions">

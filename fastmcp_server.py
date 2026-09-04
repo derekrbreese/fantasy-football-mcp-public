@@ -680,6 +680,9 @@ async def ff_get_live_draft_recommendation(
     league_key: Optional[str] = None,
     league_id: Optional[str] = None,
     strategy: Literal["conservative", "aggressive", "balanced"] = "balanced",
+    draft_plan: Literal[
+        "balanced_rb_wr", "hero_rb", "wr_heavy", "rb_heavy", "best_available"
+    ] = "balanced_rb_wr",
     count: int = 5,
     ranking_count: int = 250,
     simulations: int = 256,
@@ -693,6 +696,7 @@ async def ff_get_live_draft_recommendation(
             league_key=league_key,
             league_id=league_id,
             strategy=strategy,
+            draft_plan=draft_plan,
             count=count,
             ranking_count=ranking_count,
             simulations=simulations,
@@ -721,7 +725,15 @@ _DRAFT_PROFILE_BIND_MAX_BODY = 4_096
 _DRAFT_PROFILE_DEFAULT_MAX_BODY = 4_096
 _DRAFT_PROFILE_XLSX_MAX_BODY = 2_000_000
 _DRAFT_RECOMMENDATION_FIELDS = frozenset(
-    {"schemaVersion", "leagueId", "strategy", "count", "rankingCount", "simulations"}
+    {
+        "schemaVersion",
+        "leagueId",
+        "strategy",
+        "draftPlan",
+        "count",
+        "rankingCount",
+        "simulations",
+    }
 )
 _DRAFT_REVISION_FIELDS = frozenset({"schemaVersion", "leagueId"})
 _DRAFT_PROFILE_FIELDS = frozenset(
@@ -1609,6 +1621,15 @@ async def receive_live_draft_recommendation(request: Request) -> Response:
     strategy = payload.get("strategy", "balanced")
     if strategy not in {"conservative", "balanced", "aggressive"}:
         return _draft_json_error(request, "strategy is invalid", 400)
+    draft_plan = payload.get("draftPlan", "balanced_rb_wr")
+    if draft_plan not in {
+        "balanced_rb_wr",
+        "hero_rb",
+        "wr_heavy",
+        "rb_heavy",
+        "best_available",
+    }:
+        return _draft_json_error(request, "draftPlan is invalid", 400)
     try:
         count = _clamped_draft_integer(payload, "count", 5, 1, 20)
         ranking_count = _clamped_draft_integer(
@@ -1629,6 +1650,7 @@ async def receive_live_draft_recommendation(request: Request) -> Response:
             league_key=None,
             league_id=league_id,
             strategy=strategy,
+            draft_plan=draft_plan,
             count=count,
             ranking_count=ranking_count,
             simulations=simulations,

@@ -453,7 +453,7 @@
     const latency = finiteNumber(data.latencyMs);
     summary.appendChild(textElement(
       'span',
-      `Strategy ${data.strategy || 'unknown'} · ${latency === null ? 'scoring latency unavailable' : `${latency.toFixed(1)} ms scoring latency`}`,
+      `Risk ${data.strategy || 'unknown'} · Draft plan ${data.draftPlan || 'unknown'} · ${latency === null ? 'scoring latency unavailable' : `${latency.toFixed(1)} ms scoring latency`}`,
     ));
 
     const sources = data.dataSources && typeof data.dataSources === 'object'
@@ -966,6 +966,7 @@
     return {
       endpoint: '/draft-recommendation',
       strategy: document.getElementById('strategy').value,
+      draftPlan: document.getElementById('draft-plan').value,
       count: document.getElementById('count').value,
       rankingCount: document.getElementById('ranking-count').value,
       simulations: document.getElementById('simulations').value,
@@ -978,6 +979,7 @@
     return JSON.stringify([
       leagueId,
       options.strategy,
+      options.draftPlan,
       options.count,
       options.rankingCount,
       options.simulations,
@@ -1408,7 +1410,7 @@
     renderSavedProfileChoices();
     if (savedProfilesLoaded) showSelectedProfileStatus();
   });
-  ['strategy', 'count', 'ranking-count', 'simulations'].forEach((identifier) => {
+  ['strategy', 'draft-plan', 'count', 'ranking-count', 'simulations'].forEach((identifier) => {
     document.getElementById(identifier).addEventListener('change', () => {
       cancelActiveAnalysis();
       livePoller?.invalidate();
