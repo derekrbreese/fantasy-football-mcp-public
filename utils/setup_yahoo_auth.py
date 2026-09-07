@@ -376,8 +376,8 @@ try:
             league_id="",  # Empty to get all leagues
             game_code="nfl",
             game_id=449,  # 2025 NFL season
-            YAHOO_CLIENT_ID=CLIENT_ID,
-            YAHOO_CLIENT_SECRET=CLIENT_SECRET,
+            yahoo_consumer_key=CLIENT_ID,
+            yahoo_consumer_secret=CLIENT_SECRET,
             browser_callback=True,  # Opens browser automatically
             env_file_location=ENV_FILE_PATH,  # Save token to .env in project root
             save_token_data_to_env_file=True  # Save for reuse
