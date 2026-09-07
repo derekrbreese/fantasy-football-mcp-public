@@ -322,7 +322,7 @@ def manual_oauth_flow(client_id, client_secret):
         return False
     
     # Save token to file
-    token_file = PROJECT_ROOT / ".py.json"
+    token_file = PROJECT_ROOT / ".yahoo_token.json"
     with open(token_file, 'w') as f:
         json.dump(token_data, f, indent=2)
     
