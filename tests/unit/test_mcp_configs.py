@@ -107,42 +107,66 @@ def test_only_this_project_is_reported_when_multiple_projects_exist(home, capsys
     assert "isn't registered" not in out
 
 
-@pytest.mark.parametrize("env", [{}, {"YAHOO_ACCESS_TOKEN": "stale"}])
-def test_local_scope_does_not_treat_alias_as_the_same_project_key(home, capsys, env):
+def run_printed_commands(home, out, cwd):
+    """Run the printed `claude mcp` lines against a stub CLI; return (cwds, args) it saw."""
+    commands = [line.strip() for line in out.splitlines() if "claude mcp " in line]
+    bin_dir = home / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    cli = bin_dir / "claude"
+    cli.write_text(
+        '#!/bin/sh\npwd >> "$CLAUDE_CWD_LOG"\nprintf "%s\\n" "$*" >> "$CLAUDE_ARG_LOG"\n'
+    )
+    cli.chmod(0o755)
+    cwd_log = home / "cwd.log"
+    arg_log = home / "args.log"
+    env = {
+        **os.environ,
+        "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+        "CLAUDE_CWD_LOG": str(cwd_log),
+        "CLAUDE_ARG_LOG": str(arg_log),
+    }
+    for command in commands:
+        subprocess.run(command, shell=True, cwd=cwd, env=env, check=True)
+    return cwd_log.read_text().splitlines(), arg_log.read_text().splitlines()
+
+
+def test_local_scope_alias_without_tokens_counts_as_registered(home, capsys):
     repo = home / "repo"
     repo.mkdir()
     alias = home / "repo-alias"
     alias.symlink_to(repo, target_is_directory=True)
-    write(
-        home / ".claude.json",
-        {"projects": {str(alias): {"mcpServers": {"ffb": stdio_entry(**env)}}}},
-    )
+    write(home / ".claude.json", {"projects": {str(alias): {"mcpServers": {"ffb": stdio_entry()}}}})
     mcp_configs.update_mcp_configs("acc", "ref")
     out = capsys.readouterr().out
-    assert "isn't registered" in out
-    assert "local scope" not in out
-    assert "claude mcp remove" not in out
+    assert f"'ffb' (local scope via {alias}) reads tokens from .env" in out
+    assert "isn't registered" not in out
 
 
-def test_canonical_project_does_not_report_tokens_from_its_alias(home, capsys):
+@pytest.mark.skipif(os.name == "nt", reason="Executes POSIX shell instructions")
+def test_local_scope_alias_repair_commands_run_from_the_alias_key(home, capsys, monkeypatch):
     repo = home / "repo"
     repo.mkdir()
     alias = home / "repo-alias"
     alias.symlink_to(repo, target_is_directory=True)
-    write(
-        home / ".claude.json",
-        {
-            "projects": {
-                str(repo): {"mcpServers": {"ffb": stdio_entry()}},
-                str(alias): {"mcpServers": {"ffb": stdio_entry(YAHOO_ACCESS_TOKEN="stale")}},
-            }
-        },
-    )
+    state = {
+        "projects": {
+            str(repo): {"mcpServers": {"ffb": stdio_entry()}},
+            str(alias): {"mcpServers": {"ffb": stdio_entry(YAHOO_ACCESS_TOKEN="stale")}},
+        }
+    }
+    write(home / ".claude.json", state)
+    other = home / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
     mcp_configs.update_mcp_configs("acc", "ref")
     out = capsys.readouterr().out
-    assert out.count("'ffb' (local scope)") == 1
-    assert "reads tokens from .env" in out
-    assert "stores Yahoo tokens" not in out
+    assert "'ffb' (local scope) reads tokens from .env" in out
+    assert f"'ffb' (local scope via {alias}) stores Yahoo tokens" in out
+    cwds, args = run_printed_commands(home, out, other)
+    assert cwds == [str(alias), str(alias)]
+    assert args[0] == "mcp remove ffb --scope local"
+    assert args[1].startswith("mcp add ffb --scope local -- ")
+    assert json.loads((home / ".claude.json").read_text()) == state
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Executes POSIX shell instructions")
@@ -165,28 +189,9 @@ def test_repair_commands_target_checkout_from_another_directory(home, capsys, mo
     monkeypatch.chdir(other)
     mcp_configs.update_mcp_configs("acc", "ref")
     out = capsys.readouterr().out
-    commands = [line.strip() for line in out.splitlines() if "claude mcp " in line]
-    assert len(commands) == 2
-    # Execute the printed instructions against a stub CLI, never the real client.
-    bin_dir = home / "bin"
-    bin_dir.mkdir()
-    cli = bin_dir / "claude"
-    cli.write_text(
-        '#!/bin/sh\npwd >> "$CLAUDE_CWD_LOG"\nprintf "%s\\n" "$*" >> "$CLAUDE_ARG_LOG"\n'
-    )
-    cli.chmod(0o755)
-    cwd_log = home / "cwd.log"
-    arg_log = home / "args.log"
-    env = {
-        **os.environ,
-        "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
-        "CLAUDE_CWD_LOG": str(cwd_log),
-        "CLAUDE_ARG_LOG": str(arg_log),
-    }
-    for command in commands:
-        subprocess.run(command, shell=True, cwd=other, env=env, check=True)
-    assert cwd_log.read_text().splitlines() == [str(repo.resolve()), str(repo.resolve())]
-    remove, add = arg_log.read_text().splitlines()
+    cwds, args = run_printed_commands(home, out, other)
+    assert cwds == [str(repo.resolve()), str(repo.resolve())]
+    remove, add = args
     assert remove == f"mcp remove fantasy-football --scope {scope}"
     assert add.startswith(f"mcp add fantasy-football --scope {scope} -- ")
     assert str(repo / "fantasy_football_multi_league.py") in add
