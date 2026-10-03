@@ -14,7 +14,9 @@ config anyway; the server reads them from .env.
 import json
 import os
 import platform
+import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,7 +41,13 @@ def _is_this_server(name, entry):
 def _desktop_config_path():
     system = platform.system()
     if system == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
     if system == "Windows":
         return Path(os.environ.get("APPDATA", "")) / "Claude" / "claude_desktop_config.json"
     return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
@@ -47,7 +55,7 @@ def _desktop_config_path():
 
 def _update_token_config(path, access_token, refresh_token, guid):
     """Write tokens into the first matching server entry. Returns True if one was updated."""
-    with open(path, "r") as f:
+    with open(path) as f:
         config = json.load(f)
     servers = config.get("mcpServers") or {}
     for name, entry in servers.items():
@@ -66,20 +74,31 @@ def _update_token_config(path, access_token, refresh_token, guid):
 
 def _quote(path):
     text = str(path)
-    return f'"{text}"' if " " in text else text
+    if platform.system() == "Windows":
+        return subprocess.list2cmdline([text])
+    return shlex.quote(text)
+
+
+def _scope_command(command, scope):
+    """Anchor directory-scoped CLI operations to the checkout being inspected."""
+    if scope in ("local", "project"):
+        cd = "cd /d" if platform.system() == "Windows" else "cd"
+        return f"{cd} {_quote(PROJECT_ROOT)} && {command}"
+    return command
 
 
 def _add_command(name="yahoo-fantasy-football", scope="user"):
-    return f"claude mcp add {name} --scope {scope} -- {_quote(sys.executable)} {_quote(STDIO_SERVER)}"
+    command = f"claude mcp add {_quote(name)} --scope {scope} -- {_quote(sys.executable)} {_quote(STDIO_SERVER)}"
+    return _scope_command(command, scope)
 
 
 def _claude_code_entries():
-    """(scope, name, entry) for this server in Claude Code's user, local and project scopes."""
+    """(scope, name, entry) in user scope and this checkout's local/project scopes."""
     found = []
     state_file = Path.home() / ".claude.json"
     if state_file.exists():
         try:
-            with open(state_file, "r") as f:
+            with open(state_file) as f:
                 state = json.load(f)
         except (OSError, ValueError):
             state = {}
@@ -87,13 +106,15 @@ def _claude_code_entries():
             if _is_this_server(name, entry):
                 found.append(("user", name, entry))
         for project, settings in (state.get("projects") or {}).items():
+            if Path(project).resolve() != PROJECT_ROOT.resolve():
+                continue
             for name, entry in ((settings or {}).get("mcpServers") or {}).items():
                 if _is_this_server(name, entry):
                     found.append(("local", name, entry))
     project_file = PROJECT_ROOT / ".mcp.json"
     if project_file.exists():
         try:
-            with open(project_file, "r") as f:
+            with open(project_file) as f:
                 servers = json.load(f).get("mcpServers") or {}
         except (OSError, ValueError):
             servers = {}
@@ -114,11 +135,13 @@ def _report_claude_code():
                 f"⚠️  Claude Code server '{name}' ({scope} scope) stores Yahoo tokens in its config.\n"
                 "   Those override the fresh tokens in .env and expire within an hour.\n"
                 "   Re-register it without them (the server reads .env on its own):\n"
-                f"     claude mcp remove {name} --scope {scope}\n"
+                f"     {_scope_command(f'claude mcp remove {_quote(name)} --scope {scope}', scope)}\n"
                 f"     {_add_command(name, scope)}"
             )
         else:
-            print(f"✅ Claude Code server '{name}' ({scope} scope) reads tokens from .env, nothing to update")
+            print(
+                f"✅ Claude Code server '{name}' ({scope} scope) reads tokens from .env, nothing to update"
+            )
 
     if installed and not entries:
         print(
