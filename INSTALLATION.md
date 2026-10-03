@@ -113,11 +113,11 @@ If you want to use Reddit sentiment analysis features (`ff_analyze_reddit_sentim
 
 The app will work without Reddit credentials, but sentiment analysis will use fallback methods.
 
-## Step 5: Claude Desktop Configuration
+## Step 5: MCP Client Configuration
 
 ### 5.1 Automatic MCP Config Update
 
-The authentication scripts (`setup_yahoo_auth.py` and `reauth_yahoo.py`) automatically update MCP configuration files if they exist:
+The authentication scripts (`setup_yahoo_auth.py`, `refresh_yahoo_token.py` and `reauth_yahoo.py`) automatically update MCP configuration files if they exist (Claude Code is covered in 5.3):
 
 - **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 - **Cursor**: `~/.cursor/mcp.json`
@@ -165,6 +165,16 @@ Add the following to your MCP config file:
 - Copy the credentials from your `.env` file (they should already be there if you ran the auth scripts)
 - If you have other MCP servers configured, add this as an additional entry
 - The server name can be either `"yahoo-fantasy-football"` or `"fantasy-football"` - the scripts will update both
+
+### 5.3 Claude Code
+
+Claude Code needs no tokens in its config: the server reads them from `.env`, which the auth scripts keep current. Register it once with the Python from your virtual environment:
+
+```bash
+claude mcp add yahoo-fantasy-football --scope user -- /absolute/path/to/venv/bin/python /absolute/path/to/fantasy_football_multi_league.py
+```
+
+On Windows, use `venv\Scripts\python.exe`. The auth scripts detect Claude Code, print this exact command when the server isn't registered yet, and confirm when it is. Avoid passing `-e YAHOO_ACCESS_TOKEN=...`: a token stored in the config overrides `.env` and expires within an hour. The scripts warn if they find one.
 
 ## Step 6: Test the Installation
 
