@@ -842,7 +842,9 @@ class LineupOptimizer:
                     errors.append(f"No player on the roster can fill {key}.")
                     continue
                 if not _is_available(pick, week):
-                    errors.append(f"{pick.name} starts at {key} but is {pick.status or 'on bye'}.")
+                    status = str(pick.status or "").upper()
+                    reason = f"listed {status}" if status in UNAVAILABLE_STATUSES else "on bye"
+                    errors.append(f"{pick.name} starts at {key} but is {reason}.")
                 starters[key] = pick
                 used.add(id(pick))
 

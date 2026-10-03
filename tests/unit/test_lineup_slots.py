@@ -70,7 +70,15 @@ async def test_unavailable_players_do_not_start():
     assert "Brown" not in names
     # Goedert is the only TE, so he fills the slot, with a warning rather than silently.
     assert result["starters"]["TE"].name == "Goedert"
-    assert any("Goedert" in e for e in result["errors"])
+    assert "Goedert starts at TE but is listed O." in result["errors"]
+
+
+@pytest.mark.asyncio
+async def test_forced_bye_week_starter_is_reported_as_on_bye():
+    lone_te = player("Kincaid", "TE", "TE", 0.0)
+    lone_te.on_bye = True
+    players = [p for p in roster() if p.raw["display_position"] != "TE"] + [lone_te]
+    assert "Kincaid starts at TE but is on bye." in (await build(players))["errors"]
 
 
 @pytest.mark.asyncio
