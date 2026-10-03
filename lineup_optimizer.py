@@ -29,6 +29,42 @@ BENCH_SLOTS = {
     "COVID",
 }
 
+# Starting slots used when the league's settings can't be read (Yahoo slot names).
+DEFAULT_ROSTER_SLOTS = [
+    ("QB", 1),
+    ("WR", 2),
+    ("RB", 2),
+    ("TE", 1),
+    ("W/R/T", 1),
+    ("K", 1),
+    ("DEF", 1),
+]
+
+# Which base positions each Yahoo slot accepts. Used when a player's own
+# eligible_positions are missing, and to order slots from narrowest to widest.
+SLOT_MEMBERS = {
+    "QB": {"QB"},
+    "RB": {"RB"},
+    "WR": {"WR"},
+    "TE": {"TE"},
+    "K": {"K"},
+    "DEF": {"DEF"},
+    "W/R": {"WR", "RB"},
+    "W/T": {"WR", "TE"},
+    "R/T": {"RB", "TE"},
+    "W/R/T": {"WR", "RB", "TE"},
+    "Q/W/R/T": {"QB", "WR", "RB", "TE"},
+    "DL": {"DL", "DE", "DT"},
+    "LB": {"LB"},
+    "DB": {"DB", "CB", "S"},
+    "D": {"DL", "DE", "DT", "LB", "DB", "CB", "S"},
+}
+BASE_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DEF", "DL", "DE", "DT", "LB", "DB", "CB", "S"}
+SLOT_ALIASES = {"DST": "DEF", "D/ST": "DEF", "FLEX": "W/R/T", "SUPERFLEX": "Q/W/R/T", "OP": "Q/W/R/T"}
+
+# Players with these statuses can't score this week; they start only if nobody else can.
+UNAVAILABLE_STATUSES = {"O", "IR", "IR-R", "IR-NR", "PUP", "PUP-R", "PUP-P", "NFI-R", "NFI-A", "SUSP", "NA"}
+
 # Match confidence scores for different Sleeper matching methods
 MATCH_CONFIDENCE = {
     "exact": 1.0,
@@ -144,6 +180,88 @@ def _normalize_position(raw: Any) -> str:
             if isinstance(val, dict) and "position" in val:
                 return str(val.get("position", "BN")).upper()
     return str(raw).upper()
+
+
+def _canonical_slot(name: Any) -> str:
+    slot = str(name or "").strip().upper()
+    return SLOT_ALIASES.get(slot, slot)
+
+
+def _find_roster_positions(payload: Any) -> Optional[List[Any]]:
+    """Locate the roster_positions list anywhere in a Yahoo settings payload."""
+    if isinstance(payload, dict):
+        if "roster_positions" in payload:
+            found = payload["roster_positions"]
+            if isinstance(found, dict):  # {"0": {...}, "1": {...}, "count": n}
+                found = [v for k, v in found.items() if k != "count"]
+            return found if isinstance(found, list) else None
+        children: Iterable[Any] = payload.values()
+    elif isinstance(payload, list):
+        children = payload
+    else:
+        return None
+    for child in children:
+        found = _find_roster_positions(child)
+        if found is not None:
+            return found
+    return None
+
+
+def parse_roster_slots(settings: Any) -> List[tuple[str, int]]:
+    """Starting slots as (Yahoo slot name, count), from a league settings payload.
+
+    Accepts the raw ``league/{key}/settings`` response or an already-extracted list
+    of ``{"position": ..., "count": ...}`` dicts. Bench and IR slots are dropped.
+    Returns an empty list when nothing usable is found.
+    """
+    entries = settings if isinstance(settings, list) else _find_roster_positions(settings) or []
+    slots: List[tuple[str, int]] = []
+    for entry in entries:
+        if isinstance(entry, dict) and "roster_position" in entry:
+            entry = entry["roster_position"]
+        if not isinstance(entry, dict):
+            continue
+        slot = _canonical_slot(entry.get("position"))
+        if not slot or slot in BENCH_SLOTS or slot.startswith("IR") or slot.startswith("IL"):
+            continue
+        if str(entry.get("is_starting_position", 1)) in ("0", "False", "false"):
+            continue
+        count = _coerce_int(entry.get("count"), default=1)
+        if count > 0:
+            slots.append((slot, count))
+    return slots
+
+
+def _base_positions(player: "Player") -> set[str]:
+    """The player's real positions (e.g. {"WR"}), never the slot he sits in."""
+    raw = player.raw.get("display_position") or player.raw.get("primary_position")
+    if not raw and _canonical_slot(player.position) in BASE_POSITIONS:
+        raw = player.position  # a single-position slot is also his position
+    return {_canonical_slot(p) for p in str(raw or "").split(",") if p.strip()}
+
+
+def _eligible_slots(player: "Player") -> set[str]:
+    """Every Yahoo slot this player may fill, from Yahoo's list plus his base positions."""
+    eligible = {_canonical_slot(p) for p in player.raw.get("eligible_positions") or []}
+    base = _base_positions(player)
+    eligible |= base
+    eligible |= {slot for slot, members in SLOT_MEMBERS.items() if base & members}
+    return {slot for slot in eligible if slot not in BENCH_SLOTS and not slot.startswith("IR")}
+
+
+def _is_available(player: "Player", week: Optional[int]) -> bool:
+    if player.on_bye or (isinstance(week, int) and isinstance(player.bye, int) and player.bye == week):
+        return False
+    return str(player.status or "").upper() not in UNAVAILABLE_STATUSES
+
+
+def _strategy_score(player: "Player", strategy: str) -> float:
+    median = player.composite_score or max(player.yahoo_projection, player.sleeper_projection)
+    if strategy in ("floor", "conservative"):
+        return player.floor_projection or median
+    if strategy in ("ceiling", "aggressive"):
+        return player.ceiling_projection or median
+    return median
 
 
 def _calculate_match_confidence(match_method: str) -> float:
@@ -684,43 +802,58 @@ class LineupOptimizer:
         strategy: str = "balanced",
         week: Optional[int] = None,
         use_llm: bool = False,
+        roster_slots: Optional[Sequence[tuple[str, int]]] = None,
     ) -> Dict[str, Any]:
-        """Return a deterministic starter/bench split without heavy math."""
+        """Fill the league's starting slots from the whole roster, bench included.
+
+        ``roster_slots`` is the league's starting configuration as (Yahoo slot, count)
+        pairs, e.g. from ``parse_roster_slots``; without it a standard
+        QB/2RB/2WR/TE/W-R-T/K/DEF lineup is assumed. Slots are filled narrowest
+        first (WR before W/R before W/R/T), each with the best remaining eligible
+        player by the strategy's score. Injured, suspended, and bye-week players
+        start only when no one else can fill the slot.
+        """
+
+        slots = list(roster_slots) if roster_slots else list(DEFAULT_ROSTER_SLOTS)
+        errors: List[str] = []
+        if not roster_slots:
+            errors.append("League roster settings unavailable; assumed a standard lineup.")
+
+        def breadth(slot: str) -> int:
+            return len(SLOT_MEMBERS.get(slot, {slot}))
+
+        eligible = {id(p): _eligible_slots(p) for p in players}
+        ranked = sorted(
+            players,
+            key=lambda p: (_is_available(p, week), _strategy_score(p, strategy)),
+            reverse=True,
+        )
 
         starters: Dict[str, Player] = {}
-        bench: List[Player] = []
-        bench_ids: set[int] = set()
-        selected_ids: set[int] = set()
+        used: set[int] = set()
+        # Stable sort keeps the league's own slot order among slots of equal breadth.
+        for slot, count in sorted(slots, key=lambda s: breadth(s[0])):
+            for n in range(count):
+                key = f"{slot}{n + 1}" if count > 1 else slot
+                pick = next(
+                    (p for p in ranked if id(p) not in used and slot in eligible[id(p)]), None
+                )
+                if pick is None:
+                    errors.append(f"No player on the roster can fill {key}.")
+                    continue
+                if not _is_available(pick, week):
+                    status = str(pick.status or "").upper()
+                    reason = f"listed {status}" if status in UNAVAILABLE_STATUSES else "on bye"
+                    errors.append(f"{pick.name} starts at {key} but is {reason}.")
+                starters[key] = pick
+                used.add(id(pick))
 
-        for player in players:
-            slot = player.position.upper()
-            if slot in BENCH_SLOTS:
-                bench.append(player)
-                bench_ids.add(id(player))
-                continue
-
-            existing = starters.get(slot)
-            if existing is None:
-                starters[slot] = player
-                selected_ids.add(id(player))
-                continue
-
-            # Prefer the player with the higher projection
-            if player.yahoo_projection > existing.yahoo_projection:
-                bench.append(existing)
-                bench_ids.add(id(existing))
-                starters[slot] = player
-                selected_ids.add(id(player))
-            else:
-                bench.append(player)
-                bench_ids.add(id(player))
-
-        for player in players:
-            pid = id(player)
-            if pid in selected_ids or pid in bench_ids:
-                continue
-            bench.append(player)
-            bench_ids.add(pid)
+        # Present starters in the league's slot order rather than fill order.
+        order = {slot: i for i, (slot, _) in enumerate(slots)}
+        starters = dict(
+            sorted(starters.items(), key=lambda kv: order.get(kv[0].rstrip("0123456789"), 99))
+        )
+        bench = [p for p in ranked if id(p) not in used]
 
         recommendations = [f"Start {p.name} at {pos}" for pos, p in starters.items()]
         data_quality = {
@@ -751,7 +884,7 @@ class LineupOptimizer:
             "starters": starters,
             "bench": bench,
             "recommendations": recommendations,
-            "errors": [],
+            "errors": errors,
             "data_quality": data_quality,
         }
 

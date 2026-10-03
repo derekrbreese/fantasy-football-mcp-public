@@ -111,11 +111,22 @@ async def handle_ff_build_lineup(arguments: dict) -> dict:
             }
 
         players = await lineup_optimizer.enhance_with_external_data(players, week=week)
+
+        # The league's own starting slots (3 WR, W/R flex, IDP, ...); defaults if unreadable.
+        roster_slots = []
+        try:
+            from lineup_optimizer import parse_roster_slots
+
+            roster_slots = parse_roster_slots(await yahoo_api_call(f"league/{league_key}/settings"))
+        except Exception:
+            roster_slots = []
+
         optimization = await lineup_optimizer.optimize_lineup_smart(
             players,
             strategy,
             week,
             use_llm,
+            roster_slots=roster_slots,
         )
         if optimization["status"] == "error":
             return {
@@ -156,7 +167,7 @@ async def handle_ff_build_lineup(arguments: dict) -> dict:
         bench_formatted = [
             {
                 "name": player.name,
-                "position": player.position,
+                "position": player.raw.get("display_position") or player.position,
                 "opponent": player.opponent,
                 "composite_score": round(player.composite_score, 1),
                 "matchup_score": player.matchup_score,
