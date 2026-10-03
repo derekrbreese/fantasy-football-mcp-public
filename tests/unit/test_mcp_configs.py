@@ -107,14 +107,42 @@ def test_only_this_project_is_reported_when_multiple_projects_exist(home, capsys
     assert "isn't registered" not in out
 
 
-def test_local_scope_resolves_project_path_alias(home, capsys):
+@pytest.mark.parametrize("env", [{}, {"YAHOO_ACCESS_TOKEN": "stale"}])
+def test_local_scope_does_not_treat_alias_as_the_same_project_key(home, capsys, env):
     repo = home / "repo"
     repo.mkdir()
     alias = home / "repo-alias"
     alias.symlink_to(repo, target_is_directory=True)
-    write(home / ".claude.json", {"projects": {str(alias): {"mcpServers": {"ffb": stdio_entry()}}}})
+    write(
+        home / ".claude.json",
+        {"projects": {str(alias): {"mcpServers": {"ffb": stdio_entry(**env)}}}},
+    )
     mcp_configs.update_mcp_configs("acc", "ref")
-    assert "'ffb' (local scope) reads tokens from .env" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "isn't registered" in out
+    assert "local scope" not in out
+    assert "claude mcp remove" not in out
+
+
+def test_canonical_project_does_not_report_tokens_from_its_alias(home, capsys):
+    repo = home / "repo"
+    repo.mkdir()
+    alias = home / "repo-alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    write(
+        home / ".claude.json",
+        {
+            "projects": {
+                str(repo): {"mcpServers": {"ffb": stdio_entry()}},
+                str(alias): {"mcpServers": {"ffb": stdio_entry(YAHOO_ACCESS_TOKEN="stale")}},
+            }
+        },
+    )
+    mcp_configs.update_mcp_configs("acc", "ref")
+    out = capsys.readouterr().out
+    assert out.count("'ffb' (local scope)") == 1
+    assert "reads tokens from .env" in out
+    assert "stores Yahoo tokens" not in out
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Executes POSIX shell instructions")

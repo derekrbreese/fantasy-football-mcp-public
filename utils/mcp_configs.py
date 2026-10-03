@@ -106,7 +106,9 @@ def _claude_code_entries():
             if _is_this_server(name, entry):
                 found.append(("user", name, entry))
         for project, settings in (state.get("projects") or {}).items():
-            if Path(project).resolve() != PROJECT_ROOT.resolve():
+            # Local scope is keyed by the CLI's cwd string, not filesystem identity.
+            # Aliases must not count as the key targeted by our repair commands.
+            if project != str(PROJECT_ROOT):
                 continue
             for name, entry in ((settings or {}).get("mcpServers") or {}).items():
                 if _is_this_server(name, entry):
