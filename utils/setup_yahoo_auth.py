@@ -16,6 +16,10 @@ from dotenv import load_dotenv
 # Find project root (where .env file is located)
 SCRIPT_DIR = Path(__file__).parent.absolute()
 PROJECT_ROOT = SCRIPT_DIR.parent
+
+# Shared MCP client config handling lives next to this script.
+sys.path.insert(0, str(SCRIPT_DIR))
+from mcp_configs import update_mcp_configs  # noqa: E402
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
 # Load environment variables from project root
@@ -161,114 +165,6 @@ def update_env_file_with_tokens(access_token, refresh_token, env_file_path, guid
         f.writelines(new_lines)
     
     print(f"✅ Updated {env_path} with tokens")
-
-def update_mcp_configs(access_token, refresh_token, guid=None):
-    """Update Claude Desktop, Cursor, and Antigravity MCP config files with new tokens."""
-    import platform
-    
-    updated_configs = []
-    
-    # 1. Update Claude Desktop config (if it exists)
-    system = platform.system()
-    if system == 'Darwin':  # macOS
-        claude_config_path = Path.home() / 'Library' / 'Application Support' / 'Claude' / 'claude_desktop_config.json'
-    elif system == 'Windows':
-        claude_config_path = Path(os.environ.get('APPDATA', '')) / 'Claude' / 'claude_desktop_config.json'
-    else:  # Linux
-        claude_config_path = Path.home() / '.config' / 'Claude' / 'claude_desktop_config.json'
-    
-    if claude_config_path.exists():
-        try:
-            with open(claude_config_path, 'r') as f:
-                config = json.load(f)
-            
-            # Try both possible server names
-            server_names = ['fantasy-football', 'yahoo-fantasy-football']
-            updated = False
-            
-            for server_name in server_names:
-                if 'mcpServers' in config and server_name in config['mcpServers']:
-                    if 'env' not in config['mcpServers'][server_name]:
-                        config['mcpServers'][server_name]['env'] = {}
-                    
-                    config['mcpServers'][server_name]['env']['YAHOO_ACCESS_TOKEN'] = access_token
-                    config['mcpServers'][server_name]['env']['YAHOO_REFRESH_TOKEN'] = refresh_token
-                    if guid:
-                        config['mcpServers'][server_name]['env']['YAHOO_GUID'] = guid
-                    updated = True
-                    break
-            
-            if updated:
-                with open(claude_config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-                updated_configs.append('Claude Desktop config')
-        except Exception as e:
-            print(f"⚠️  Could not update Claude Desktop config: {e}")
-    
-    # 2. Update Cursor MCP config (if it exists)
-    cursor_config_path = Path.home() / '.cursor' / 'mcp.json'
-    if cursor_config_path.exists():
-        try:
-            with open(cursor_config_path, 'r') as f:
-                config = json.load(f)
-            
-            # Try both possible server names
-            server_names = ['yahoo-fantasy-football', 'fantasy-football']
-            updated = False
-            
-            for server_name in server_names:
-                if 'mcpServers' in config and server_name in config['mcpServers']:
-                    if 'env' not in config['mcpServers'][server_name]:
-                        config['mcpServers'][server_name]['env'] = {}
-                    
-                    config['mcpServers'][server_name]['env']['YAHOO_ACCESS_TOKEN'] = access_token
-                    config['mcpServers'][server_name]['env']['YAHOO_REFRESH_TOKEN'] = refresh_token
-                    if guid:
-                        config['mcpServers'][server_name]['env']['YAHOO_GUID'] = guid
-                    updated = True
-                    break
-            
-            if updated:
-                with open(cursor_config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-                updated_configs.append('Cursor MCP config')
-        except Exception as e:
-            print(f"⚠️  Could not update Cursor MCP config: {e}")
-    
-    # 3. Update Antigravity MCP config (if it exists)
-    antigravity_config_path = Path.home() / '.gemini' / 'antigravity' / 'mcp_config.json'
-    if antigravity_config_path.exists():
-        try:
-            with open(antigravity_config_path, 'r') as f:
-                config = json.load(f)
-            
-            # Try both possible server names
-            server_names = ['yahoo-fantasy-football', 'fantasy-football']
-            updated = False
-            
-            for server_name in server_names:
-                if 'mcpServers' in config and server_name in config['mcpServers']:
-                    if 'env' not in config['mcpServers'][server_name]:
-                        config['mcpServers'][server_name]['env'] = {}
-                    
-                    config['mcpServers'][server_name]['env']['YAHOO_ACCESS_TOKEN'] = access_token
-                    config['mcpServers'][server_name]['env']['YAHOO_REFRESH_TOKEN'] = refresh_token
-                    if guid:
-                        config['mcpServers'][server_name]['env']['YAHOO_GUID'] = guid
-                    updated = True
-                    break
-            
-            if updated:
-                with open(antigravity_config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-                updated_configs.append('Antigravity MCP config')
-        except Exception as e:
-            print(f"⚠️  Could not update Antigravity MCP config: {e}")
-    
-    if updated_configs:
-        print(f"✅ Updated tokens in: {', '.join(updated_configs)}")
-    else:
-        print("⚠️  No MCP config files found to update")
 
 def manual_oauth_flow(client_id, client_secret):
     """Handle the manual OAuth flow (Method 2)."""
