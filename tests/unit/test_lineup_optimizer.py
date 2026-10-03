@@ -8,6 +8,7 @@ from lineup_optimizer import (
     LineupOptimizer,
     MatchAnalytics,
     Player,
+    _calculate_dynamic_weights,
     _calculate_match_confidence,
     _coerce_float,
     _coerce_int,
@@ -324,3 +325,42 @@ class TestMatchConfidenceScores:
     def test_match_confidence_failed_is_zero(self):
         """Test that failed matches have zero confidence."""
         assert MATCH_CONFIDENCE["failed"] == 0.0
+
+
+class TestDynamicWeights:
+    """Projection blend weights (issue #27: they used to sum to 0.8)."""
+
+    @pytest.mark.parametrize("confidence", [0.0, 0.25, 0.5, 0.85, 1.0])
+    def test_weights_sum_to_one_when_both_sources_present(self, confidence):
+        w = _calculate_dynamic_weights(16.0, 14.0, confidence)
+        assert w["yahoo"] + w["sleeper"] == pytest.approx(1.0)
+
+    def test_identical_projections_blend_to_themselves(self):
+        w = _calculate_dynamic_weights(16.0, 16.0, 1.0)
+        assert 16.0 * w["yahoo"] + 16.0 * w["sleeper"] == pytest.approx(16.0)
+
+    def test_full_confidence_is_an_even_split(self):
+        w = _calculate_dynamic_weights(10.0, 20.0, 1.0)
+        assert w["yahoo"] == pytest.approx(0.5)
+        assert w["sleeper"] == pytest.approx(0.5)
+
+    def test_lower_confidence_shifts_weight_to_yahoo(self):
+        sure = _calculate_dynamic_weights(10.0, 20.0, 1.0)
+        shaky = _calculate_dynamic_weights(10.0, 20.0, 0.4)
+        assert shaky["sleeper"] < sure["sleeper"]
+        assert shaky["yahoo"] > sure["yahoo"]
+
+    def test_missing_yahoo_projection_uses_sleeper_in_full(self):
+        w = _calculate_dynamic_weights(0.0, 18.0, 0.85)
+        assert (w["yahoo"], w["sleeper"]) == (0.0, 1.0)
+
+    def test_missing_sleeper_projection_uses_yahoo_in_full(self):
+        w = _calculate_dynamic_weights(12.0, 0.0, 1.0)
+        assert (w["yahoo"], w["sleeper"]) == (1.0, 0.0)
+
+    def test_unmatched_sleeper_player_is_ignored(self):
+        w = _calculate_dynamic_weights(12.0, 18.0, 0.0)
+        assert (w["yahoo"], w["sleeper"]) == (1.0, 0.0)
+
+    def test_no_unused_other_key(self):
+        assert "other" not in _calculate_dynamic_weights(10.0, 10.0, 1.0)

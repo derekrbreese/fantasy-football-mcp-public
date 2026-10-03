@@ -168,35 +168,29 @@ def _calculate_match_confidence(match_method: str) -> float:
 def _calculate_dynamic_weights(
     yahoo_proj: float, sleeper_proj: float, match_confidence: float
 ) -> Dict[str, float]:
-    """Calculate dynamic projection weights based on data quality and match confidence."""
+    """Calculate dynamic projection weights based on data quality and match confidence.
 
-    # Base weights from CLAUDE.md strategy
-    base_yahoo_weight = 0.40
-    base_sleeper_weight = 0.40
+    The weights blend the projections that are actually present, so they sum to 1.0
+    over those sources: two identical projections blend to that same value, and a
+    player with only one projection gets that projection rather than a fraction of it.
+    """
 
-    # Adjust Sleeper weight based on match confidence
-    adjusted_sleeper_weight = base_sleeper_weight * match_confidence
+    # Even split when the Sleeper match is certain; a shakier match shifts weight to Yahoo.
+    sleeper_weight = 0.5 * max(0.0, min(1.0, match_confidence))
+    yahoo_weight = 1.0 - sleeper_weight
 
-    # Compensate Yahoo weight to maintain total projection weight at 0.8
-    target_total = base_yahoo_weight + base_sleeper_weight
-    adjusted_yahoo_weight = target_total - adjusted_sleeper_weight
-
-    # Ensure weights don't exceed reasonable bounds
-    adjusted_yahoo_weight = max(0.1, min(0.7, adjusted_yahoo_weight))
-    adjusted_sleeper_weight = max(0.0, min(0.7, adjusted_sleeper_weight))
-
-    # Normalize to target total
-    total_weight = adjusted_yahoo_weight + adjusted_sleeper_weight
-    if total_weight > 0:
-        scale_factor = target_total / total_weight
-        adjusted_yahoo_weight *= scale_factor
-        adjusted_sleeper_weight *= scale_factor
+    # A source with no projection contributes nothing, so its share goes to the other one.
+    has_yahoo = bool(yahoo_proj)
+    has_sleeper = bool(sleeper_proj) and sleeper_weight > 0
+    if has_yahoo and not has_sleeper:
+        yahoo_weight, sleeper_weight = 1.0, 0.0
+    elif has_sleeper and not has_yahoo:
+        yahoo_weight, sleeper_weight = 0.0, 1.0
 
     return {
-        "yahoo": adjusted_yahoo_weight,
-        "sleeper": adjusted_sleeper_weight,
+        "yahoo": yahoo_weight,
+        "sleeper": sleeper_weight,
         "match_confidence": match_confidence,
-        "other": 0.20,  # matchup, trending, momentum remain constant
     }
 
 

@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.8 or higher
+- Python 3.11 or higher (3.11–3.14 supported)
 - Claude Desktop application
 - Yahoo Fantasy Sports account with active leagues
 - Git (for cloning the repository)
@@ -43,7 +43,7 @@ pip install -r requirements.txt
 
 1. Go to https://developer.yahoo.com/apps/ and click "Create an App":
    - **Application Name**: Fantasy Football MCP (or your choice)
-   - **Application Type**: Web Application
+   - **Application Type**: Web Application (shown as "Traditional web app" in newer versions of the form). Do **not** pick "Installed Application" / "Native app" — Yahoo only issues a Client ID for those, with no Client Secret, and this server needs both.
    - **Redirect URI(s)**: `oob` (for out-of-band OAuth flow - you'll copy the verification code manually)
 2. Click "Create App" and save your **Client ID (Consumer Key)** and **Client Secret (Consumer Secret)**.
 3. **Apply for Fantasy Sports API access** at https://sports.yahoo.com/developer/access/ — include the Client ID from step 2 so the approval is attached to the app you already created. Approval is a manual human review with no published turnaround time; the API stays 401 until it lands.

@@ -54,6 +54,8 @@ Copy `.env.example` to `.env` and provide your Yahoo developer credentials. Do n
 
 ## Yahoo API access
 
+Create the Yahoo developer application as a **Web Application** ("Traditional web app"), not a native/installed app — only web apps are issued the client secret this server needs. See [INSTALLATION.md](INSTALLATION.md) for the full steps.
+
 Creating a Yahoo developer application is no longer sufficient by itself to use the Fantasy Sports API. Apply for Fantasy API access through Yahoo's developer access process and associate the approval with your existing client ID.
 
 Yahoo's current access model is read-only. This project therefore treats league-management recommendations separately from transaction execution.
