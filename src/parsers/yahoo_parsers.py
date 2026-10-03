@@ -5,6 +5,23 @@ from typing import Any, Dict, List, Optional
 from src.utils.bye_weeks import get_bye_week_with_fallback
 
 
+def _extract_positions(obj: Any) -> List[str]:
+    """Flatten Yahoo's eligible_positions into a list of position strings.
+
+    Yahoo's JSON uses ``[{"position": "WR"}, {"position": "W/R/T"}]``; XML-derived
+    payloads use ``{"position": ["WR", "W/R/T"]}``. Both, plus plain strings, work.
+    """
+    if isinstance(obj, str):
+        return [obj]
+    if isinstance(obj, list):
+        return [p for item in obj for p in _extract_positions(item)]
+    if isinstance(obj, dict):
+        if "position" in obj:
+            return _extract_positions(obj["position"])
+        return [p for key, value in obj.items() if key != "count" for p in _extract_positions(value)]
+    return []
+
+
 def parse_team_roster(data: Dict) -> List[Dict]:
     """Extract a simple roster list from Yahoo team data.
 
@@ -80,6 +97,14 @@ def parse_team_roster(data: Dict) -> List[Dict]:
                     # Fallback to display position if selected_position not found
                     if "position" not in info and "display_position" in container:
                         info["position"] = container.get("display_position")
+                    # The player's real positions, kept apart from the slot he occupies,
+                    # so the optimizer can move bench players into any slot they fit.
+                    if "display_position" in container:
+                        info["display_position"] = container.get("display_position")
+                    if "eligible_positions" in container:
+                        eligible = _extract_positions(container.get("eligible_positions"))
+                        if eligible:
+                            info["eligible_positions"] = eligible
 
                     if "team" not in info:
                         team_value: Optional[str] = None
