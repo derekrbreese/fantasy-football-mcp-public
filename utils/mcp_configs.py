@@ -79,21 +79,35 @@ def _quote(path):
     return shlex.quote(text)
 
 
-def _scope_command(command, scope):
-    """Anchor directory-scoped CLI operations to the checkout being inspected."""
+def _scope_command(command, scope, directory=None):
+    """Anchor directory-scoped CLI operations to the directory their scope is keyed by."""
     if scope in ("local", "project"):
         cd = "cd /d" if platform.system() == "Windows" else "cd"
-        return f"{cd} {_quote(PROJECT_ROOT)} && {command}"
+        return f"{cd} {_quote(directory or PROJECT_ROOT)} && {command}"
     return command
 
 
-def _add_command(name="yahoo-fantasy-football", scope="user"):
+def _add_command(name="yahoo-fantasy-football", scope="user", directory=None):
+    """Build the `claude mcp add` command that registers this checkout's stdio server."""
     command = f"claude mcp add {_quote(name)} --scope {scope} -- {_quote(sys.executable)} {_quote(STDIO_SERVER)}"
-    return _scope_command(command, scope)
+    return _scope_command(command, scope, directory)
+
+
+def _is_this_checkout(project):
+    """True if a ~/.claude.json project key points at this checkout, aliases included."""
+    try:
+        return Path(project).resolve() == PROJECT_ROOT.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _claude_code_entries():
-    """(scope, name, entry) in user scope and this checkout's local/project scopes."""
+    """(scope, name, entry, directory) in user scope and this checkout's local/project scopes.
+
+    directory is the path the scope is keyed by: the exact ~/.claude.json project
+    key for local scope (which may be a symlink alias of this checkout), the
+    checkout itself for project scope, and None for user scope.
+    """
     found = []
     state_file = Path.home() / ".claude.json"
     if state_file.exists():
@@ -104,15 +118,15 @@ def _claude_code_entries():
             state = {}
         for name, entry in (state.get("mcpServers") or {}).items():
             if _is_this_server(name, entry):
-                found.append(("user", name, entry))
+                found.append(("user", name, entry, None))
         for project, settings in (state.get("projects") or {}).items():
-            # Local scope is keyed by the CLI's cwd string, not filesystem identity.
-            # Aliases must not count as the key targeted by our repair commands.
-            if project != str(PROJECT_ROOT):
+            # Local scope is keyed by the CLI's cwd string, so an alias of this
+            # checkout is its own entry and must be repaired from that exact path.
+            if not _is_this_checkout(project):
                 continue
             for name, entry in ((settings or {}).get("mcpServers") or {}).items():
                 if _is_this_server(name, entry):
-                    found.append(("local", name, entry))
+                    found.append(("local", name, entry, project))
     project_file = PROJECT_ROOT / ".mcp.json"
     if project_file.exists():
         try:
@@ -122,7 +136,7 @@ def _claude_code_entries():
             servers = {}
         for name, entry in servers.items():
             if _is_this_server(name, entry):
-                found.append(("project", name, entry))
+                found.append(("project", name, entry, PROJECT_ROOT))
     return found
 
 
@@ -130,20 +144,23 @@ def _report_claude_code():
     """Print Claude Code status. Returns True if Claude Code is installed or configured."""
     installed = shutil.which("claude") is not None or (Path.home() / ".claude.json").exists()
     entries = _claude_code_entries()
-    for scope, name, entry in entries:
+    for scope, name, entry, directory in entries:
+        label = f"'{name}' ({scope} scope"
+        if scope == "local" and directory != str(PROJECT_ROOT):
+            label += f" via {directory}"
+        label += ")"
         env = entry.get("env") or {}
         if any(key in env for key in TOKEN_KEYS):
+            remove = f"claude mcp remove {_quote(name)} --scope {scope}"
             print(
-                f"⚠️  Claude Code server '{name}' ({scope} scope) stores Yahoo tokens in its config.\n"
+                f"⚠️  Claude Code server {label} stores Yahoo tokens in its config.\n"
                 "   Those override the fresh tokens in .env and expire within an hour.\n"
                 "   Re-register it without them (the server reads .env on its own):\n"
-                f"     {_scope_command(f'claude mcp remove {_quote(name)} --scope {scope}', scope)}\n"
-                f"     {_add_command(name, scope)}"
+                f"     {_scope_command(remove, scope, directory)}\n"
+                f"     {_add_command(name, scope, directory)}"
             )
         else:
-            print(
-                f"✅ Claude Code server '{name}' ({scope} scope) reads tokens from .env, nothing to update"
-            )
+            print(f"✅ Claude Code server {label} reads tokens from .env, nothing to update")
 
     if installed and not entries:
         print(
