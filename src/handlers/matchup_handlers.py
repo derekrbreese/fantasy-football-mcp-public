@@ -146,7 +146,8 @@ async def handle_ff_build_lineup(arguments: dict) -> dict:
         return {"error": f"Could not find your team in league {league_key}"}
 
     try:
-        roster_data = await yahoo_api_call(f"team/{team_key}/roster")
+        week_param = f";week={int(week)}" if week else ""
+        roster_data = await yahoo_api_call(f"team/{team_key}/roster{week_param}")
         try:
             from lineup_optimizer import lineup_optimizer
         except ImportError as exc:

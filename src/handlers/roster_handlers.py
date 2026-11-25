@@ -66,7 +66,8 @@ async def handle_ff_get_roster(arguments: dict) -> dict:
                 "suggestion": "Provide team_key explicitly if multiple teams exist",
             }
 
-    data = await yahoo_api_call(f"team/{team_key}/roster")
+    week_param = f";week={int(week)}" if week else ""
+    data = await yahoo_api_call(f"team/{team_key}/roster{week_param}")
     roster = parse_team_roster(data)
 
     if not roster:

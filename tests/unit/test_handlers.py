@@ -637,3 +637,41 @@ class TestMatchupWeekSelection:
         result, _ = await self._call(payload, {"league_key": "470.l.1", "week": 2})
         assert result["raw_matchups"] == payload
         assert result["week"] == 2
+
+
+class TestRosterWeek:
+    """A requested week must reach Yahoo, not just the response label."""
+
+    @staticmethod
+    async def _roster(arguments):
+        import src.handlers.roster_handlers as roster_mod
+
+        api = AsyncMock(return_value={})
+        team = {"team_key": "470.l.1.t.4", "team_name": "Mine"}
+        with (
+            patch.object(roster_mod, "get_user_team_info", AsyncMock(return_value=team)),
+            patch.object(roster_mod, "yahoo_api_call", api),
+            patch.object(roster_mod, "parse_team_roster", lambda data: []),
+        ):
+            await roster_mod.handle_ff_get_roster({"league_key": "470.l.1", **arguments})
+        return api
+
+    async def test_roster_without_week_uses_current_roster(self):
+        api = await self._roster({})
+        api.assert_awaited_once_with("team/470.l.1.t.4/roster")
+
+    async def test_roster_passes_week_including_string_week(self):
+        api = await self._roster({"week": "9"})
+        api.assert_awaited_once_with("team/470.l.1.t.4/roster;week=9")
+
+    async def test_build_lineup_passes_week(self):
+        import src.handlers.matchup_handlers as matchup_mod
+
+        api = AsyncMock(return_value={})
+        with (
+            patch.object(matchup_mod, "get_user_team_key", AsyncMock(return_value="470.l.1.t.4")),
+            patch.object(matchup_mod, "yahoo_api_call", api),
+        ):
+            await matchup_mod.handle_ff_build_lineup({"league_key": "470.l.1", "week": 13})
+
+        assert api.await_args_list[0].args[0] == "team/470.l.1.t.4/roster;week=13"
