@@ -2,6 +2,8 @@
 
 from typing import Any, Dict
 
+from src.parsers.yahoo_parsers import parse_percent_owned
+
 # These will be injected from main file
 yahoo_api_call = None
 get_waiver_wire_players = None
@@ -35,7 +37,10 @@ async def handle_ff_get_players(arguments: dict) -> dict:
     include_external_data = arguments.get("include_external_data", True)
 
     pos_filter = f";position={position}" if position else ""
-    data = await yahoo_api_call(f"league/{league_key}/players;status=A{pos_filter};count={count}")
+    # out=percent_owned: Yahoo only reports ownership when asked for it.
+    data = await yahoo_api_call(
+        f"league/{league_key}/players;status=A{pos_filter};count={count};out=percent_owned"
+    )
 
     def _iter_payload_dicts(container: Any):
         if isinstance(container, dict):
@@ -68,10 +73,12 @@ async def handle_ff_get_players(arguments: dict) -> dict:
                     player_info["team"] = payload["editorial_team_abbr"]
                 if "display_position" in payload:
                     player_info["position"] = payload["display_position"]
-                if "ownership" in payload and isinstance(payload["ownership"], dict):
-                    player_info["owned_pct"] = payload["ownership"].get("ownership_percentage", 0.0)
                 if "percent_owned" in payload:
-                    player_info["owned_pct"] = float(payload.get("percent_owned", 0.0))
+                    owned, change = parse_percent_owned(payload["percent_owned"])
+                    # Yahoo leaves the value out when nobody owns the player.
+                    player_info["owned_pct"] = owned if owned is not None else 0.0
+                    if change is not None:
+                        player_info["weekly_change"] = change
                 # Add injury, bye as in waiver
                 if "status" in payload:
                     player_info["injury_status"] = payload["status"]

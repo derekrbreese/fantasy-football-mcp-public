@@ -80,16 +80,15 @@ class TestLoadStaticByeWeeks:
 
 
 class TestGetByeWeekWithFallback:
-    """Test bye week retrieval with static data as authoritative source."""
+    """Test bye week retrieval: Yahoo's value first, the static file as a fallback."""
 
-    def test_get_bye_week_static_overrides_api(self):
-        """Test that static data is always used when available (authoritative)."""
-        # Static data overrides API data
+    def test_get_bye_week_api_overrides_static(self):
+        """A valid API value wins: the static file is one season's schedule."""
         result = get_bye_week_with_fallback("KC", api_bye_week=6)
-        assert result == 10  # Uses static KC=10, ignores API=6
-        
+        assert result == 6  # API value, not static KC=10
+
         result = get_bye_week_with_fallback("KC", api_bye_week=10)
-        assert result == 10  # Uses static KC=10 (matches API)
+        assert result == 10
 
     def test_get_bye_week_invalid_api_data_uses_static(self):
         """Test using static data when API data is invalid."""
@@ -122,14 +121,12 @@ class TestGetByeWeekWithFallback:
         result = get_bye_week_with_fallback("XXX", api_bye_week=7)
         assert result == 7  # Uses API data when team not in static
 
-    def test_get_bye_week_static_is_authoritative(self):
-        """Test that static data is authoritative for known teams."""
-        # Static data is always used for teams in the static data file
-        result = get_bye_week_with_fallback("KC", api_bye_week=6)
-        assert result == 10  # Static overrides API
-        
-        result = get_bye_week_with_fallback("SF", api_bye_week=9)
-        assert result == 14  # Static overrides API
+    def test_get_bye_week_real_2026_values_beat_2025_file(self):
+        """Yahoo's 2026 byes differ from the 2025 file for most teams; Yahoo's must be used."""
+        assert get_bye_week_with_fallback("SF", api_bye_week=8) == 8  # file says 14
+        assert get_bye_week_with_fallback("GB", api_bye_week=11) == 11  # file says 5
+        # True is an int in Python; it is not a week number.
+        assert get_bye_week_with_fallback("SF", api_bye_week=True) == 14
 
     def test_get_bye_week_all_teams_have_static_data(self):
         """Test that all 32 NFL teams have static data."""

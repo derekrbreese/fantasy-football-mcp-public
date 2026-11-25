@@ -16,6 +16,7 @@ from mcp.types import TextContent, Tool
 # Import extracted modules
 from src.api import get_access_token, refresh_yahoo_token, set_access_token, yahoo_api_call
 from src.parsers import parse_team_roster, parse_yahoo_free_agent_players
+from src.parsers.yahoo_parsers import parse_percent_owned
 from src.services import analyze_reddit_sentiment
 
 # Import rate limiting and caching utilities
@@ -46,8 +47,10 @@ from src.handlers import (
     handle_ff_get_matchup,
     handle_ff_get_players,
     handle_ff_get_roster,
+    handle_ff_get_scoreboard,
     handle_ff_get_standings,
     handle_ff_get_teams,
+    handle_ff_get_transactions,
     handle_ff_get_waiver_wire,
     handle_ff_refresh_token,
     inject_draft_dependencies,
@@ -257,8 +260,10 @@ async def get_waiver_wire_players(
             "trending": "A",  # Added %
         }.get(sort, "OR")
 
+        # out=percent_owned: Yahoo only reports ownership when asked for it.
         endpoint = (
             f"league/{league_key}/players;status=A{pos_filter};sort={sort_type};count={count}"
+            ";out=percent_owned"
         )
         data = await yahoo_api_call(endpoint)
 
@@ -280,6 +285,7 @@ async def get_waiver_wire_players(
 
                             if isinstance(player_data, list):
                                 player_info = {}
+                                api_bye_week = None
 
                                 for element in player_data:
                                     if isinstance(element, dict):
@@ -293,8 +299,8 @@ async def get_waiver_wire_players(
                                         if "display_position" in element:
                                             player_info["position"] = element["display_position"]
                                         
-                                        # Extract bye week with fallback to static data
-                                        api_bye_week = None
+                                        # Bye week as Yahoo reports it; resolved after the loop,
+                                        # once the team is known too.
                                         if "bye_weeks" in element:
                                             bye_weeks_data = element["bye_weeks"]
                                             if isinstance(bye_weeks_data, dict) and "week" in bye_weeks_data:
@@ -304,26 +310,25 @@ async def get_waiver_wire_players(
                                                     bye_num = int(bye_week)
                                                     if 1 <= bye_num <= 18:
                                                         api_bye_week = bye_num
-                                        
-                                        # Use fallback utility to get bye week (tries API first, then static data)
-                                        team_abbr = element.get("editorial_team_abbr", "")
-                                        player_info["bye"] = get_bye_week_with_fallback(team_abbr, api_bye_week)
-
-                                        # Ownership data
-                                        if "ownership" in element:
-                                            ownership = element["ownership"]
-                                            player_info["owned_pct"] = ownership.get(
-                                                "ownership_percentage", 0
-                                            )
-                                            player_info["weekly_change"] = ownership.get(
-                                                "weekly_change", 0
-                                            )
 
                                         # Injury status
                                         if "status" in element:
                                             player_info["injury_status"] = element["status"]
                                         if "status_full" in element:
                                             player_info["injury_detail"] = element["status_full"]
+
+                                player_info["bye"] = get_bye_week_with_fallback(
+                                    str(player_info.get("team", "")).upper(), api_bye_week
+                                )
+
+                                # Ownership arrives as a separate part after the player's details.
+                                for extra in player_array[1:]:
+                                    if isinstance(extra, dict) and "percent_owned" in extra:
+                                        owned, change = parse_percent_owned(extra["percent_owned"])
+                                        if owned is not None:
+                                            player_info["owned_pct"] = owned
+                                        if change is not None:
+                                            player_info["weekly_change"] = change
 
                                 if player_info.get("name"):
                                     # Ensure all expected fields are present with defaults
@@ -381,6 +386,7 @@ async def get_draft_rankings(
 
                             if isinstance(player_data, list):
                                 player_info = {}
+                                api_bye_week = None
                                 rank = int(key) + 1  # Use the key as rank
 
                                 for element in player_data:
@@ -392,8 +398,8 @@ async def get_draft_rankings(
                                         if "display_position" in element:
                                             player_info["position"] = element["display_position"]
                                         
-                                        # Extract bye week with fallback to static data
-                                        api_bye_week = None
+                                        # Bye week as Yahoo reports it; resolved after the loop,
+                                        # once the team is known too.
                                         if "bye_weeks" in element:
                                             bye_weeks_data = element["bye_weeks"]
                                             if isinstance(bye_weeks_data, dict) and "week" in bye_weeks_data:
@@ -403,10 +409,6 @@ async def get_draft_rankings(
                                                     bye_num = int(bye_week)
                                                     if 1 <= bye_num <= 18:
                                                         api_bye_week = bye_num
-                                        
-                                        # Use fallback utility to get bye week (tries API first, then static data)
-                                        team_abbr = element.get("editorial_team_abbr", "")
-                                        player_info["bye"] = get_bye_week_with_fallback(team_abbr, api_bye_week)
 
                                         # Draft data if available
                                         if "draft_analysis" in element:
@@ -426,6 +428,10 @@ async def get_draft_rankings(
                                         else:
                                             # Use rank as ADP if no draft data
                                             player_info["rank"] = rank
+
+                                player_info["bye"] = get_bye_week_with_fallback(
+                                    str(player_info.get("team", "")).upper(), api_bye_week
+                                )
 
                                 if player_info.get("name"):
                                     players.append(player_info)
@@ -538,6 +544,48 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "League key (e.g., 'nfl.l.XXXXXX')",
                     }
+                },
+                "required": ["league_key"],
+            },
+        ),
+        Tool(
+            name="ff_get_scoreboard",
+            description="Get every matchup in a league for a week, with both teams' scores",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "league_key": {
+                        "type": "string",
+                        "description": "League key (e.g., '461.l.61410')",
+                    },
+                    "week": {
+                        "type": "integer",
+                        "description": "Week number (optional, defaults to current week)",
+                    },
+                },
+                "required": ["league_key"],
+            },
+        ),
+        Tool(
+            name="ff_get_transactions",
+            description="Get recent league transactions: adds, drops, trades and FAAB bids",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "league_key": {
+                        "type": "string",
+                        "description": "League key (e.g., '461.l.61410')",
+                    },
+                    "types": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["add", "drop", "trade", "commish"]},
+                        "description": "Transaction types to include (optional, defaults to all). A swap (add/drop) counts as both an add and a drop.",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of transactions to return (default 25, max 100)",
+                        "default": 25,
+                    },
                 },
                 "required": ["league_key"],
             },
@@ -925,6 +973,8 @@ TOOL_HANDLERS: dict[str, Callable[[dict], Awaitable[dict]]] = {
     "ff_get_league_info": handle_ff_get_league_info,
     "ff_get_standings": handle_ff_get_standings,
     "ff_get_teams": handle_ff_get_teams,
+    "ff_get_scoreboard": handle_ff_get_scoreboard,
+    "ff_get_transactions": handle_ff_get_transactions,
     "ff_get_roster": handle_ff_get_roster,
     "ff_get_roster_with_projections": handle_ff_get_roster,
     "ff_get_matchup": handle_ff_get_matchup,

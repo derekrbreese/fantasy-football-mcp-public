@@ -28,6 +28,8 @@ The main FastMCP server currently exposes:
 - `ff_get_leagues`
 - `ff_get_league_info`
 - `ff_get_standings`
+- `ff_get_scoreboard`
+- `ff_get_transactions`
 - `ff_get_roster`
 - `ff_get_matchup`
 - `ff_get_players`

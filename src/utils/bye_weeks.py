@@ -68,39 +68,27 @@ def get_bye_week_with_fallback(
     api_bye_week: Optional[int] = None
 ) -> Optional[int]:
     """
-    Get bye week for a team, preferring static data as authoritative source.
-    
-    Static data contains the correct 2025 NFL bye weeks and is always used when available.
-    API data is only used as a fallback if the team is not in static data.
-    
+    Get bye week for a team, preferring the value Yahoo returned.
+
+    Yahoo's value is for the season being queried, so it wins whenever it is a
+    valid week. The static file is a single season's schedule (2025) and is only
+    consulted when Yahoo gives nothing usable.
+
     Args:
         team_abbr: Team abbreviation (e.g., "KC", "SF", "BUF")
-        api_bye_week: Bye week from API (if available, used only as fallback)
-    
+        api_bye_week: Bye week from the API, if available
+
     Returns:
         Bye week number (1-18) or None if not found.
     """
-    # Load static data (authoritative source for 2025)
-    static_data = load_static_bye_weeks()
-    
-    # Always prefer static data when available
-    if team_abbr in static_data:
-        bye_week = static_data[team_abbr]
-        if api_bye_week is not None and api_bye_week != bye_week and 1 <= api_bye_week <= 18:
-            logger.debug(
-                f"Using static bye week {bye_week} for {team_abbr} "
-                f"(overriding API value: {api_bye_week})"
-            )
-        return bye_week
-    
-    # Fall back to API data only if team not in static data
-    if api_bye_week is not None and isinstance(api_bye_week, int) and 1 <= api_bye_week <= 18:
-        logger.info(
-            f"Using API bye week {api_bye_week} for {team_abbr} "
-            f"(team not in static data)"
-        )
+    if isinstance(api_bye_week, int) and not isinstance(api_bye_week, bool) and 1 <= api_bye_week <= 18:
         return api_bye_week
-    
+
+    static_data = load_static_bye_weeks()
+    if team_abbr in static_data:
+        logger.debug(f"No usable API bye week for {team_abbr}; using static value")
+        return static_data[team_abbr]
+
     logger.warning(f"No bye week data found for team {team_abbr} (static or API)")
     return None
 

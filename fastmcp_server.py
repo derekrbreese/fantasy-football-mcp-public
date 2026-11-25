@@ -47,6 +47,15 @@ _TOOL_PROMPTS: Dict[str, str] = {
         "🏆 Get current league standings. "
         "Parameters: league_key only. Returns ranks, records, points for all teams."
     ),
+    "ff_get_scoreboard": (
+        "📊 Get every matchup in the league for a week. "
+        "Parameters: league_key (required), week (optional). Returns both teams' scores per matchup."
+    ),
+    "ff_get_transactions": (
+        "🔄 Get recent league transactions. "
+        "Parameters: league_key (required), types and count (optional). "
+        "Returns adds, drops, trades and FAAB bids, newest first."
+    ),
     "ff_get_roster": (
         "Get roster data with configurable detail levels. Use data_level='basic' for "
         "quick roster info, 'standard' for roster + projections, or 'full' for "
@@ -380,6 +389,91 @@ async def ff_get_standings(
         Dict with sorted standings showing ranks, records, and points
     """
     return await _call_legacy_tool("ff_get_standings", ctx=ctx, league_key=league_key)
+
+
+@server.tool(
+    name="ff_get_scoreboard",
+    description=(
+        "📊 Get every matchup in the league for a week, not just yours. "
+        "Parameters: league_key (required), week (optional, defaults to current). "
+        "Returns actual and projected points for both teams in each matchup, "
+        "plus playoff/consolation flags and the winner once final. "
+        "Call once per week to build score history or the remaining schedule."
+    ),
+    meta=_tool_meta("ff_get_scoreboard"),
+    annotations={
+        "title": "Get League Scoreboard",
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "destructiveHint": False,
+        "openWorldHint": False,
+    },
+)
+async def ff_get_scoreboard(
+    ctx: Context,
+    league_key: str,
+    week: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Return all matchups in a Yahoo league for one week.
+
+    Args:
+        league_key: League identifier (required)
+        week: Week number (optional, defaults to current week)
+
+    Returns:
+        Dict with the week and a matchups list containing both teams' scores
+    """
+    return await _call_legacy_tool(
+        "ff_get_scoreboard",
+        ctx=ctx,
+        league_key=league_key,
+        week=week,
+    )
+
+
+@server.tool(
+    name="ff_get_transactions",
+    description=(
+        "🔄 Get recent league transactions, newest first. "
+        "Parameters: league_key (required), types (optional list from add, drop, "
+        "trade, commish; defaults to all), count (optional, default 25, max 100). "
+        "Returns each move's players, source and destination teams, and the "
+        "winning FAAB bid where one was placed. Losing bids are not available."
+    ),
+    meta=_tool_meta("ff_get_transactions"),
+    annotations={
+        "title": "Get League Transactions",
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "destructiveHint": False,
+        "openWorldHint": False,
+    },
+)
+async def ff_get_transactions(
+    ctx: Context,
+    league_key: str,
+    types: Optional[list[Literal["add", "drop", "trade", "commish"]]] = None,
+    count: int = 25,
+) -> Dict[str, Any]:
+    """
+    Return recent adds, drops, trades and commissioner moves for a Yahoo league.
+
+    Args:
+        league_key: League identifier (required)
+        types: Transaction types to include (optional, defaults to all)
+        count: Number of transactions to return (default 25, max 100)
+
+    Returns:
+        Dict with a newest-first transactions list
+    """
+    return await _call_legacy_tool(
+        "ff_get_transactions",
+        ctx=ctx,
+        league_key=league_key,
+        types=types,
+        count=count,
+    )
 
 
 @server.tool(
@@ -1773,6 +1867,8 @@ def get_tool_selection_guide() -> str:
                         "ff_get_leagues": "Discovery: Find available leagues and extract league_key identifiers",
                         "ff_get_league_info": "Configuration: League settings, scoring rules, roster requirements",
                         "ff_get_standings": "Rankings: Current standings, records, points for strategy context",
+                        "ff_get_scoreboard": "League Scores: Every matchup for a week, for playoff scenarios and score history",
+                        "ff_get_transactions": "League Activity: Recent adds, drops, trades and winning FAAB bids",
                     },
                 },
                 "PLAYER_ROSTER_ANALYSIS": {
