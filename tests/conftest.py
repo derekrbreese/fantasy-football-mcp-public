@@ -16,6 +16,8 @@ def mock_env_vars(monkeypatch):
         "YAHOO_REFRESH_TOKEN": "test_refresh_token_67890",
         "YAHOO_CONSUMER_KEY": "test_consumer_key",
         "YAHOO_CONSUMER_SECRET": "test_consumer_secret",
+        "YAHOO_CLIENT_ID": "test_consumer_key",
+        "YAHOO_CLIENT_SECRET": "test_consumer_secret",
         "YAHOO_GUID": "TEST_GUID_12345",
     }
     for key, value in test_env.items():
