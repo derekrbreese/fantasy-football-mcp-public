@@ -1,12 +1,64 @@
 """Matchup MCP tool handlers."""
 
-from typing import Any
+from typing import Any, Optional
 
 # These will be injected from main file
 get_user_team_key = None
 get_user_team_info = None
 yahoo_api_call = None
 parse_team_roster = None
+
+
+def _matchup_week(entry: Any) -> Optional[int]:
+    matchup = entry.get("matchup") if isinstance(entry, dict) else None
+    try:
+        return int(matchup.get("week"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _select_matchup_week(data: Any, week: Optional[int]) -> tuple[Any, Optional[int]]:
+    """Trim a team/matchups response to a single week.
+
+    Yahoo returns every week of the season. Keep only the requested week, or the
+    current one when no week is given: the first matchup that is not final, falling
+    back to the last week once the season is over.
+
+    Returns a copy (the original may be a cached response) and the week kept. If the
+    payload is not in the expected shape it is returned unchanged.
+    """
+    content = data.get("fantasy_content") if isinstance(data, dict) else None
+    team = content.get("team") if isinstance(content, dict) else None
+    if not isinstance(team, list):
+        return data, week
+
+    for index, part in enumerate(team):
+        if not isinstance(part, dict) or not isinstance(part.get("matchups"), dict):
+            continue
+
+        matchups = part["matchups"]
+        entries = [
+            matchups[key]
+            for key in sorted((k for k in matchups if str(k).isdigit()), key=int)
+            if _matchup_week(matchups[key]) is not None
+        ]
+        if not entries:
+            return data, week
+
+        if week is not None:
+            chosen = [entry for entry in entries if _matchup_week(entry) == week]
+        else:
+            upcoming = [entry for entry in entries if entry["matchup"].get("status") != "postevent"]
+            chosen = [upcoming[0] if upcoming else entries[-1]]
+            week = _matchup_week(chosen[0])
+
+        trimmed = {str(i): entry for i, entry in enumerate(chosen)}
+        trimmed["count"] = len(chosen)
+        new_team = list(team)
+        new_team[index] = {**part, "matchups": trimmed}
+        return {**data, "fantasy_content": {**content, "team": new_team}}, week
+
+    return data, week
 
 
 async def handle_ff_get_matchup(arguments: dict) -> dict:
@@ -18,21 +70,25 @@ async def handle_ff_get_matchup(arguments: dict) -> dict:
             - week: Week number (optional, defaults to current)
 
     Returns:
-        Dict with matchup data
+        Dict with matchup data for that single week
     """
     league_key = arguments.get("league_key")
-    week = arguments.get("week")
+    try:
+        week = int(arguments["week"]) if arguments.get("week") else None
+    except (TypeError, ValueError):
+        return {"error": "week must be a number"}
     team_key = await get_user_team_key(league_key)
 
     if not team_key:
         return {"error": f"Could not find your team in league {league_key}"}
 
-    week_param = f";week={week}" if week else ""
-    data = await yahoo_api_call(f"team/{team_key}/matchups{week_param}")
+    # One cached call covers every week; the week is picked out below.
+    data = await yahoo_api_call(f"team/{team_key}/matchups")
+    data, resolved_week = _select_matchup_week(data, week)
     return {
         "league_key": league_key,
         "team_key": team_key,
-        "week": week or "current",
+        "week": resolved_week or "current",
         "message": "Matchup data retrieved",
         "raw_matchups": data,
     }

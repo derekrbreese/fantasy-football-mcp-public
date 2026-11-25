@@ -11,8 +11,10 @@ from .admin_handlers import (
 from .league_handlers import (
     handle_ff_get_league_info,
     handle_ff_get_leagues,
+    handle_ff_get_scoreboard,
     handle_ff_get_standings,
     handle_ff_get_teams,
+    handle_ff_get_transactions,
 )
 
 # Roster handlers (need dependency injection)
@@ -123,6 +125,8 @@ __all__ = [
     "handle_ff_get_league_info",
     "handle_ff_get_standings",
     "handle_ff_get_teams",
+    "handle_ff_get_scoreboard",
+    "handle_ff_get_transactions",
     # Roster handlers (extracted, need dependency injection)
     "handle_ff_get_roster",
     # Matchup handlers (extracted, need dependency injection)

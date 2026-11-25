@@ -258,3 +258,24 @@ def parse_yahoo_free_agent_players(data: Dict) -> List[Dict]:
                 players.append(info)
 
     return players
+
+
+def parse_percent_owned(node: Any) -> tuple[Optional[float], Optional[float]]:
+    """Read Yahoo's percent_owned block: (percent owned, change this week).
+
+    Yahoo returns it as a list of single-key dicts,
+    ``[{"coverage_type": "week", "week": 11}, {"value": 94}, {"delta": "-4"}]``,
+    and only when the request asks for it with ``;out=percent_owned``.
+    """
+    merged: dict[str, Any] = {}
+    for part in node if isinstance(node, list) else [node]:
+        if isinstance(part, dict):
+            merged.update(part)
+
+    def _number(value: Any) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return _number(merged.get("value")), _number(merged.get("delta"))

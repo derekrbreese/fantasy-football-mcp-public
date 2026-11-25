@@ -246,7 +246,7 @@ Both scripts will:
 
 ## Available MCP Tools
 
-Once installed, you'll have access to 12 tools:
+Once installed, you'll have access to these tools, among others:
 
 1. **ff_get_leagues** - List all your fantasy football leagues
 2. **ff_get_league_info** - Get detailed league information with your team name
@@ -260,6 +260,8 @@ Once installed, you'll have access to 12 tools:
 10. **ff_get_draft_results** - View draft results and grades
 11. **ff_get_waiver_wire** - Find top waiver wire pickups
 12. **ff_get_draft_rankings** - Get pre-draft player rankings
+13. **ff_get_scoreboard** - See every matchup in the league for a week
+14. **ff_get_transactions** - See recent adds, drops, trades and FAAB bids
 
 ## Troubleshooting
 
